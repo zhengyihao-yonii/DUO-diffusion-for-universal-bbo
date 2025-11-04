@@ -1,0 +1,1 @@
+/home/xk/anaconda3/envs/gtg/bin/python /data/xk/zyh_dfgo/GTG/train.py --task dkitty --n_traj 4000 --eps 0.01 --k 20
