@@ -4,11 +4,13 @@ import torch
 from copy import deepcopy
 import numpy as np
 import os 
+import pickle as pkl
 import gym
 # from config.locomotion_config import Config
 from diffuser.utils.arrays import to_torch, to_np, to_device
 from diffuser.utils.des_bench import DesignBenchFunctionWrapper
 from diffuser.datasets.d4rl import suppress_output
+from diffuser.models.vae import VAE
 
 
 def evaluate(**deps):
@@ -92,6 +94,40 @@ def evaluate(**deps):
     renderer = Config.renderer
     observation_dim = dataset.observation_dim
     action_dim = dataset.action_dim
+    print(observation_dim, action_dim)
+    
+    # 加载VAE模型用于从隐空间解码到原始空间
+    vae = None
+    original_observation_dim = observation_dim  # 默认使用当前的观测维度
+    latent_dim = observation_dim  # 隐空间维度，默认与当前观测维度相同
+    vae_input_output_dim = 128  # 根据用户设计，VAE的输入输出维度固定为128
+    
+    # 尝试加载VAE信息
+    vae_info_path = f"./generated_datasets/{Config.task}_frac{Config.frac}_sigma{Config.sigma}/vae_info.p"
+    if os.path.exists(vae_info_path):
+        try:
+            with open(vae_info_path, 'rb') as f:
+                vae_info = pkl.load(f)
+            
+            # 获取原始观测维度和VAE路径
+            original_observation_dim = vae_info.get('original_observation_dim', observation_dim)
+            vae_path = vae_info.get('vae_path')
+            latent_dim = vae_info.get('latent_dim', observation_dim)
+            
+            print(f"从VAE信息中加载原始观测维度: {original_observation_dim}")
+            print(f"从VAE信息中加载VAE路径: {vae_path}")
+            print(f"从VAE信息中加载隐空间维度: {latent_dim}")
+            print(f"使用固定的VAE输入/输出维度: {vae_input_output_dim}")
+            
+            # 加载VAE模型 - 使用固定的128维输入/输出
+            vae = VAE(input_dim=vae_input_output_dim, latent_dim=latent_dim)
+            vae.load_state_dict(torch.load(vae_path, map_location=Config.device))
+            vae.to(Config.device)
+            vae.eval()
+            print(f"VAE模型加载成功")
+        except Exception as e:
+            print(f"加载VAE模型时出错: {e}")
+            vae = None
 
     if Config.diffusion == 'models.GaussianInvDynDiffusion':
         transition_dim = observation_dim
@@ -110,10 +146,11 @@ def evaluate(**deps):
         device=Config.device,
     )
     
+    # 更新proxy_model_config的input_dim以匹配原始观测维度
     proxy_model_config = utils.Config(
         Config.proxy_model,
         savepath='proxy_model_config.pkl',
-        input_dim=observation_dim,
+        input_dim=original_observation_dim,  # 使用原始观测维度
         hidden_dim=Config.proxy_hidden_dim,
         output_dim=action_dim,
         n_ensembles=Config.proxy_n_ensembles,
@@ -195,22 +232,86 @@ def evaluate(**deps):
         returns = returns.repeat(trainer.batch_size, 1)
         
         samples, time = trainer.ema_model.conditional_sample(conditions, values=None, returns=returns)
+        # 只保留观测部分（不包括动作）
         samples = samples[..., :observation_dim]
-        print(samples.shape)
+        print(f"生成的隐空间样本形状: {samples.shape}")
+        
+        # 如果VAE存在，将隐空间样本解码到原始空间
+        if vae is not None:
+            with torch.no_grad():
+                # 确保samples和normalizer参数在同一个设备上
+                # 将samples移至与normalizer参数相同的设备
+                samples_device = samples.device
+                # 将normalizer的maxs和mins移至与samples相同的设备
+                if hasattr(trainer.dataset.normalizer, 'maxs'):
+                    trainer.dataset.normalizer.maxs = trainer.dataset.normalizer.maxs.to(samples_device)
+                    trainer.dataset.normalizer.mins = trainer.dataset.normalizer.mins.to(samples_device)
+                # 对隐空间样本进行unnormalize处理
+                unnormalized_samples = trainer.dataset.normalizer.unnormalize(samples)
+                print(f"unnormalize后的隐空间样本形状: {unnormalized_samples.shape}")
+                
+                batch_size, horizon, _ = unnormalized_samples.shape
+                print(f"原始隐空间样本形状: {unnormalized_samples.shape}")
+                
+                # 重塑为[batch_size*horizon, latent_dim]以适应VAE.decode的输入要求
+                samples_flat = unnormalized_samples.reshape(-1, latent_dim)
+                print(f"扁平化后的样本形状: {samples_flat.shape}")
+                
+                # 解码到128维空间
+                decoded_flat = vae.decode(samples_flat)
+                print(f"解码后的扁平化形状: {decoded_flat.shape}")
+                
+                # 重塑回[batch_size, horizon, 128]并截取前original_observation_dim维
+                decoded_samples = decoded_flat.reshape(batch_size, horizon, -1)
+                print(f"重塑后的解码样本形状: {decoded_samples.shape}")
+                
+                # 截取前original_observation_dim维作为还原的输入
+                decoded_samples = decoded_samples[:, :, :original_observation_dim]
+                samples = decoded_samples
+            print(f"截取前{original_observation_dim}维后的样本形状: {samples.shape}")
 
         queries.append(samples[:, context_length:])
         contexts.append(samples[:, :context_length])
 
-    queries = torch.cat(queries, dim=0).reshape(-1, observation_dim)
-    contexts = torch.cat(contexts, dim=0).reshape(-1, observation_dim).cpu().numpy()
+    # 确保使用正确的维度进行reshape
+    queries = torch.cat(queries, dim=0).reshape(-1, original_observation_dim if vae is not None else observation_dim)
+    contexts = torch.cat(contexts, dim=0).reshape(-1, original_observation_dim if vae is not None else observation_dim).cpu().numpy()
     print(queries.shape, contexts.shape)
     
-    queries_norm = trainer.proxy_dataset.normalizer.normalize(trainer.dataset.normalizer.unnormalize(queries.cpu())).to(trainer.device)
+    # 对于解码后的样本，需要调整归一化处理以匹配原始观测空间
+    queries_cpu = queries.cpu()
+    
+    # 如果使用了VAE解码，我们需要确保归一化处理正确
+    if vae is not None:
+            # VAE解码后的样本可能不在原始空间范围内，需要适当处理
+            # 首先将样本转换为numpy数组
+            queries_np = queries_cpu.numpy()
+            # 记录解码后样本的范围
+            print(f"解码后样本范围: min={queries_np.min()}, max={queries_np.max()}")
+            # 使用proxy_dataset的normalizer对解码后的样本进行归一化
+            # 由于在VAE解码前已经进行了unnormalize，这里直接使用queries_cpu
+            queries_unnorm_tensor = queries_cpu.to('cpu')
+            # 对于VAE解码后的样本，我们直接进行归一化
+            queries_norm = trainer.proxy_dataset.normalizer.normalize(queries_unnorm_tensor)
+    else:
+        # 没有VAE时，使用原始的归一化处理
+        queries_unnorm = trainer.dataset.normalizer.unnormalize(queries_cpu)
+        queries_unnorm_tensor = torch.tensor(queries_unnorm, device='cpu')
+        queries_norm = trainer.proxy_dataset.normalizer.normalize(queries_unnorm_tensor)
+    
+    # 归一化后再转移到训练设备
+    queries_norm = queries_norm.to(trainer.device)
     queries_proxy_score = trainer.proxy_model(queries_norm).flatten()
 
     # filtering
     queries = queries[torch.argsort(queries_proxy_score)[-num_queries:]].cpu()
-    queries = dataset.normalizer.unnormalize(queries).numpy()
+    
+    # 如果使用了VAE，queries已经在原始空间中，不需要额外的unnormalize操作
+    if vae is None:
+        queries = dataset.normalizer.unnormalize(queries).numpy()
+    else:
+        # 已经在原始空间中的样本直接转换为numpy
+        queries = queries.numpy()
             
     func = DesignBenchFunctionWrapper(deps["task"], normalise=True)
     if deps["task"].startswith("tfbind"):
