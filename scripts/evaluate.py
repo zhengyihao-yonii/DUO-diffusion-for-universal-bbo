@@ -11,6 +11,8 @@ from diffuser.utils.arrays import to_torch, to_np, to_device
 from diffuser.utils.des_bench import DesignBenchFunctionWrapper
 from diffuser.datasets.d4rl import suppress_output
 from diffuser.models.vae import VAE
+# 添加StandardScaler导入
+from sklearn.preprocessing import StandardScaler
 
 
 def evaluate(**deps):
@@ -98,7 +100,7 @@ def evaluate(**deps):
     
     # 加载VAE模型用于从隐空间解码到原始空间
     vae = None
-    original_observation_dim = observation_dim  # 默认使用当前的观测维度
+    # original_observation_dim = observation_dim  # 默认使用当前的观测维度
     latent_dim = observation_dim  # 隐空间维度，默认与当前观测维度相同
     vae_input_output_dim = 128  # 根据用户设计，VAE的输入输出维度固定为128
     
@@ -125,6 +127,22 @@ def evaluate(**deps):
             vae.to(Config.device)
             vae.eval()
             print(f"VAE模型加载成功")
+            
+            # 加载VAE训练时使用的scaler参数
+            scaler = StandardScaler()
+            model_save_dir = os.path.dirname(vae_path)
+            scaler_mean_path = os.path.join(model_save_dir, "scaler_mean.npy")
+            scaler_scale_path = os.path.join(model_save_dir, "scaler_scale.npy")
+            
+            if os.path.exists(scaler_mean_path) and os.path.exists(scaler_scale_path):
+                scaler.mean_ = np.load(scaler_mean_path)
+                scaler.scale_ = np.load(scaler_scale_path)
+                scaler.n_features_in_ = len(scaler.mean_)
+                print(f"成功加载scaler参数，均值形状: {scaler.mean_.shape}")
+            else:
+                print(f"警告: 无法找到scaler参数文件，将不进行scaler还原")
+                scaler = None
+
         except Exception as e:
             print(f"加载VAE模型时出错: {e}")
             vae = None
@@ -232,7 +250,6 @@ def evaluate(**deps):
         returns = returns.repeat(trainer.batch_size, 1)
         
         samples, time = trainer.ema_model.conditional_sample(conditions, values=None, returns=returns)
-        # 只保留观测部分（不包括动作）
         samples = samples[..., :observation_dim]
         print(f"生成的隐空间样本形状: {samples.shape}")
         
@@ -257,18 +274,34 @@ def evaluate(**deps):
                 samples_flat = unnormalized_samples.reshape(-1, latent_dim)
                 print(f"扁平化后的样本形状: {samples_flat.shape}")
                 
-                # 解码到128维空间
+                # 解码到128维空间 - 在二维进行
                 decoded_flat = vae.decode(samples_flat)
                 print(f"解码后的扁平化形状: {decoded_flat.shape}")
                 
-                # 重塑回[batch_size, horizon, 128]并截取前original_observation_dim维
-                decoded_samples = decoded_flat.reshape(batch_size, horizon, -1)
-                print(f"重塑后的解码样本形状: {decoded_samples.shape}")
+                # 在二维状态下截断前original_observation_dim维
+                decoded_flat_truncated = decoded_flat[:, :original_observation_dim]
+                print(f"截断后的扁平化形状: {decoded_flat_truncated.shape}")
                 
-                # 截取前original_observation_dim维作为还原的输入
-                decoded_samples = decoded_samples[:, :, :original_observation_dim]
+                # 使用scaler进行反标准化 - 在二维状态下处理
+                if scaler is not None:
+                    print(f"应用scaler反标准化")
+                    # 转换为numpy进行scaler处理
+                    decoded_np = decoded_flat_truncated.cpu().numpy()
+                    # 应用scaler.inverse_transform进行反标准化
+                    decoded_inv_transformed = scaler.inverse_transform(decoded_np)
+                    # 转换回tensor
+                    decoded_flat_truncated = torch.tensor(decoded_inv_transformed, 
+                                                         dtype=decoded_flat_truncated.dtype, 
+                                                         device=decoded_flat_truncated.device)
+                    print(f"scaler反标准化后的样本范围: min={decoded_inv_transformed.min()}, max={decoded_inv_transformed.max()}")
+                
+                # 最后重塑回三维[batch_size, horizon, original_observation_dim]
+                decoded_samples = decoded_flat_truncated.reshape(batch_size, horizon, original_observation_dim)
+                print(f"重塑后的三维解码样本形状: {decoded_samples.shape}")
+                
+                # ！
                 samples = decoded_samples
-            print(f"截取前{original_observation_dim}维后的样本形状: {samples.shape}")
+            print(f"最终样本形状: {samples.shape}")
 
         queries.append(samples[:, context_length:])
         contexts.append(samples[:, :context_length])

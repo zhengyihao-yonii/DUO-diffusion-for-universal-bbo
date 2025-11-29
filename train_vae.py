@@ -26,7 +26,7 @@ TASKNAME2TASK = {
     'superconductor': 'Superconductor-RandomForest-v0',
 }
 
-TASKNAME2MAX_SAMPLES ={
+TASKNAME2MAX_SAMPLES = {
     'dkitty': 10004,
     'ant': 10004,
     'tfbind8': 32898,
@@ -67,7 +67,7 @@ def main(args):
     data_x = task.x
     
     # 为不同任务设置合适的输入维度
-    original_dim = get_original_observation_dim(args.task)
+    original_dim = data_x.shape[1]
     input_dim = max(original_dim, 128)  # 确保至少128维，或使用原始维度
     
     # 设置VAE模型参数

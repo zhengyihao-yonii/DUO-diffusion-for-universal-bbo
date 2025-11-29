@@ -9,7 +9,7 @@ from tqdm import tqdm
 from diffuser.utils import set_seed
 from diffuser.models.vae import VAE
 import torch.nn.functional as F
-from train_vae import main as train_vae_main, get_original_observation_dim
+from train_vae import main as train_vae_main
 
 @contextmanager
 def suppress_output():
@@ -49,7 +49,7 @@ TASKNAME2TASK = {
     'superconductor': 'Superconductor-RandomForest-v0',
 }
 
-TASKNAME2MAX_SAMPLES ={
+TASKNAME2MAX_SAMPLES = {
     'dkitty': 10004,
     'ant': 10004,
     'tfbind8': 32898,
@@ -152,8 +152,7 @@ if __name__ == "__main__":
     vae, scaler, model_save_dir = train_vae_main(vae_args)
     
     # 获取原始观测维度
-    original_observation_dim = get_original_observation_dim(args.task)
-    print(f"原始观测维度: {original_observation_dim}")
+    print(f"原始观测维度: {D}")
     
     # 降维
     print("使用VAE进行降维...")
@@ -256,7 +255,7 @@ if __name__ == "__main__":
     vae_info = {
         'latent_dim': latent_dim,
         'vae_path': os.path.join(model_save_dir, f"vae_latent{latent_dim}.pt"),
-        'original_observation_dim': original_observation_dim
+        'original_observation_dim': D
     }
     pkl.dump(vae_info, open(f"./generated_datasets/{args.task}_frac{args.frac}_sigma{args.sigma}/vae_info.p", "wb"))
 

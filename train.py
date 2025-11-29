@@ -7,7 +7,7 @@ from params_proto.neo_hyper import Sweep
 import wandb 
     
 if __name__ == '__main__':
-    wandb.login(key="9f59486bed008c431a4a5804c35bb3c065d0b658")
+    wandb.login(key="cbb3c28f1b21becaa3b185b09464e7f6ba3b84ef")
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", type=str, default="dkitty")
     parser.add_argument("--horizon", type=int, default=64)
@@ -20,6 +20,7 @@ if __name__ == '__main__':
     parser.add_argument("--n_traj", type=int, default=1000)
 
     args = parser.parse_args()
+    # 隐空间32维时访问文件名
     args.data_path = f'generated_datasets/{args.task}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}_vae_latent32_train.p'
     RUN.prefix = f"trained_models/{args.task}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}/seed{args.seed}/"
     
