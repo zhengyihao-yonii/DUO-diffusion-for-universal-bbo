@@ -82,6 +82,7 @@ def main(**deps):
     # renderer = render_config()
     renderer = Config.renderer
     observation_dim = dataset.observation_dim
+    original_observation_dim = proxy_dataset.original_observation_dim
     action_dim = dataset.action_dim
 
     # -----------------------------------------------------------------------------#
@@ -137,27 +138,7 @@ def main(**deps):
             calc_energy=Config.calc_energy,
             device=Config.device,
         )
-
-        # 加载VAE信息以获取原始观测维度
-        vae_info_path = f"./generated_datasets/{Config.task}_frac{Config.frac}_sigma{Config.sigma}/vae_info.p"
-        if os.path.exists(vae_info_path):
-            with open(vae_info_path, 'rb') as f:
-                vae_info = pkl.load(f)
-            # 获取原始观测维度
-            original_observation_dim = vae_info.get('original_observation_dim', 12)
-            print(f"从VAE信息中加载原始观测维度: {original_observation_dim}")
-        else:
-            # 如果没有VAE信息，根据任务类型设置默认值
-            task_to_dim = {
-                'dkitty': 56,
-                'ant': 60,
-                'tfbind8': 8,
-                'tfbind10': 10,
-                'superconductor': 86
-            }
-            original_observation_dim = task_to_dim.get(Config.task, 12)
-            print(f"使用默认原始观测维度: {original_observation_dim}")
-        
+            
         proxy_model_config = utils.Config(
             Config.proxy_model,
             savepath='proxy_model_config.pkl',

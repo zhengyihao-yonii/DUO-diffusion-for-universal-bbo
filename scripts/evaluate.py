@@ -95,6 +95,7 @@ def evaluate(**deps):
     # renderer = render_config()
     renderer = Config.renderer
     observation_dim = dataset.observation_dim
+    original_observation_dim = proxy_dataset.original_observation_dim
     action_dim = dataset.action_dim
     print(observation_dim, action_dim)
     
@@ -111,12 +112,11 @@ def evaluate(**deps):
             with open(vae_info_path, 'rb') as f:
                 vae_info = pkl.load(f)
             
-            # 获取原始观测维度和VAE路径
-            original_observation_dim = vae_info.get('original_observation_dim', observation_dim)
+            # 获取VAE路径
             vae_path = vae_info.get('vae_path')
             latent_dim = vae_info.get('latent_dim', observation_dim)
             
-            print(f"从VAE信息中加载原始观测维度: {original_observation_dim}")
+            print(f"从zipdataset加载原始观测维度: {original_observation_dim}")
             print(f"从VAE信息中加载VAE路径: {vae_path}")
             print(f"从VAE信息中加载隐空间维度: {latent_dim}")
             print(f"使用固定的VAE输入/输出维度: {vae_input_output_dim}")
@@ -299,7 +299,7 @@ def evaluate(**deps):
                 decoded_samples = decoded_flat_truncated.reshape(batch_size, horizon, original_observation_dim)
                 print(f"重塑后的三维解码样本形状: {decoded_samples.shape}")
                 
-                # ！
+                
                 samples = decoded_samples
             print(f"最终样本形状: {samples.shape}")
 

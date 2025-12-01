@@ -63,9 +63,11 @@ def main(args):
                             min_percentile=0)
                         )
     
+    if args.task.startswith("tfbind"):
+            task.map_to_logits()
     # 获取数据
-    data_x = task.x
-    
+    # data_x = task.x
+    data_x = torch.from_numpy(task.x.reshape(task.x.shape[0], -1)).float()
     # 为不同任务设置合适的输入维度
     original_dim = data_x.shape[1]
     input_dim = max(original_dim, 128)  # 确保至少128维，或使用原始维度

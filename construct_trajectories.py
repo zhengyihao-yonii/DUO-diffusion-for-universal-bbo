@@ -76,7 +76,9 @@ if __name__ == "__main__":
                             )
     fully_observed_task = TASKNAME2FULL[args.task]()
 
-    data_x = task.x
+    if args.task.startswith("tfbind"):
+            task.map_to_logits()
+    data_x = task.x.reshape(task.x.shape[0], -1).astype(np.float32)
     data_y = task.y
     
     print("bigger dataset min max", fully_observed_task.y.min(), fully_observed_task.y.max())

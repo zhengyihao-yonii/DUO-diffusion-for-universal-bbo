@@ -344,6 +344,7 @@ class ZipDataset(torch.utils.data.Dataset):
         self.data_y = np.clip(self.data_y + np.random.randn(*self.data_y.shape) * sigma, 0.0, 1.0).float()
         
         self.normalizer = SafeLimitsNormalizer(self.data_x)
+        self.original_observation_dim = self.data_x.shape[1]
         
     def unnormalize_values(self, y):
         return y
