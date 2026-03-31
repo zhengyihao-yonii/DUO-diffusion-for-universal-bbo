@@ -51,7 +51,7 @@ class Config(ParamsProto):
     ## training
     n_steps_per_epoch = 100
     loss_type = 'l2'
-    n_train_steps = 50000
+    n_train_steps = 10000  # 500 epoch -> 100 epoch
     batch_size = 128
     learning_rate = 1e-4
     gradient_accumulate_every = 2

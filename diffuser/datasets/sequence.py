@@ -264,9 +264,20 @@ class ValueDataset(SequenceDataset):
     
     
 class PointRegretDataset(torch.utils.data.Dataset):
-    def __init__(self, horizon, data_path, context_length, regret=False, include_returns=False):
+    def __init__(self, horizon, data_path, context_length, regret=False, include_returns=False, task_name=None):
         with open(data_path, "rb") as f:
-            points, values, pointwise_regret, cumulative_regret_to_go, timesteps = pkl.load(f)
+            data_obj = pkl.load(f)
+            
+        if len(data_obj) == 5:
+            # 单任务数据格式
+            points, values, pointwise_regret, cumulative_regret_to_go, timesteps = data_obj
+            task_indices = None
+            tasks_list = None
+        elif len(data_obj) == 7:
+            # 多任务数据格式
+            points, values, pointwise_regret, cumulative_regret_to_go, timesteps, task_indices, tasks_list = data_obj
+        else:
+            raise ValueError(f"Unexpected number of elements in dataset file: {len(data_obj)}")
     # def __init__(self, block_size, points, values, pointwise_regret, cumulative_rtg, timesteps, add_noise=False, variance=0.01):
         self.context_length = context_length
         self.block_size = horizon
@@ -280,6 +291,7 @@ class PointRegretDataset(torch.utils.data.Dataset):
         self.timesteps = timesteps
         self.regret = regret
         self.include_returns = include_returns
+        self.task_name = task_name
 
         # self.add_noise = add_noise
         # self.noise = torch.rand(self.num_trajectories, 1).repeat(1, self.size_of_trajectory) * variance
@@ -292,6 +304,22 @@ class PointRegretDataset(torch.utils.data.Dataset):
         self.normalizer_values = SafeLimitsNormalizer(self.values.unsqueeze(-1))
         self.normalizer_values.mins = 0.0
         self.normalizer_values.maxs = 1.0
+        
+        # Task name to embedding
+        self.task_to_idx = {
+            'ant': 0,
+            'dkitty': 1,
+            'tfbind8': 2,
+            'tfbind10': 3,
+            'superconductor': 4
+        }
+        
+        # 保存任务索引信息
+        self.task_indices = task_indices
+        self.tasks_list = tasks_list
+        
+        # 如果提供了task_name，使用它；否则使用-1
+        self.task_idx = self.task_to_idx[task_name] if task_name is not None else -1
     
     def __len__(self):
         return self.num_trajectories * (self.size_of_trajectory - self.block_size + 1)
@@ -299,6 +327,7 @@ class PointRegretDataset(torch.utils.data.Dataset):
     def get_conditions(self, trajectories):
         conditions = {}
         conditions["ctx_len"] = np.array([0])
+        conditions["task_idx"] = np.array([self.task_idx])
         return conditions
 
     def __getitem__(self, idx):
@@ -317,6 +346,19 @@ class PointRegretDataset(torch.utils.data.Dataset):
         trajectories = torch.cat([points, values_norm], dim=-1)
         conditions = self.get_conditions(trajectories)
         
+        # Update task index for multi-task data
+        if hasattr(self, 'task_indices') and self.task_indices is not None:
+            # 确保task_idx是一个标量值
+            # 检查task_indices的维度，如果是二维的（每个轨迹每个时间步都有任务索引），只取第一个元素
+            if self.task_indices.ndim == 2:
+                task_idx = self.task_indices[traj_idx, 0]
+            else:
+                task_idx = self.task_indices[traj_idx]
+            
+            if isinstance(task_idx, torch.Tensor):
+                task_idx = task_idx.item()
+            conditions["task_idx"] = np.array([task_idx])
+            
         if self.include_returns:
             returns = values.sum().unsqueeze(-1) / self.block_size
             batch = RewardBatch(trajectories, conditions, returns)

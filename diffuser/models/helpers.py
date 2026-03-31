@@ -95,10 +95,8 @@ def apply_conditioning(x, conditions, values=None):
     # del conditions["ctx_len"]
     
     for t, val in conditions.items():
-        if t != "ctx_len":
-            # for i in range(x.shape[0]):
-            #     if t <= ctx_len[i]:
-            #         x[i, t, :] = val[i].clone()
+        if t != "ctx_len" and isinstance(t, (int, float)):
+            # 只处理数值类型的键（时间步）
             idx = torch.LongTensor([t]).to(device=x.device) <= ctx_len
             x[idx, t, :] = val[idx].clone()
         # x[:, t, :] = val.clone()

@@ -6,6 +6,7 @@ import numpy as np
 import os 
 import pickle as pkl
 import gym
+import wandb
 # from config.locomotion_config import Config
 from diffuser.utils.arrays import to_torch, to_np, to_device
 from diffuser.utils.des_bench import DesignBenchFunctionWrapper
@@ -20,16 +21,33 @@ def evaluate(**deps):
 
     RUN._update(deps)
     print(deps)
-    if deps['task'] == 'ant':
+    
+    # 支持多任务训练和单任务评估
+    # 从deps中获取train_tasks和eval_task参数
+    train_tasks = deps.get('train_tasks', deps.get('task', 'dkitty'))
+    eval_task = deps.get('eval_task', train_tasks.split(',')[0])
+    
+    # 设置is_multitask标志
+    deps['is_multitask'] = len(train_tasks.split(',')) > 1
+    deps['train_tasks_list'] = train_tasks.split(',')
+    
+    # 加载配置文件时使用评估任务的配置
+    print(f"评估任务: {eval_task}")
+    if eval_task == 'ant':
         from config.ant_config import Config
-    elif deps['task'] == 'dkitty':
+    elif eval_task == 'dkitty':
         from config.dkitty_config import Config
-    elif deps['task'] == 'tfbind8':
+    elif eval_task == 'tfbind8':
         from config.tfbind8_config import Config
-    elif deps['task'] == 'tfbind10':
+    elif eval_task == 'tfbind10':
         from config.tfbind10_config import Config
-    elif deps['task'] == 'superconductor':
+    elif eval_task == 'superconductor':
         from config.superconductor_config import Config
+    else:
+        # 默认使用dkitty配置
+        print(f"警告: 未知的评估任务 {eval_task}，使用默认dkitty配置")
+        from config.dkitty_config import Config
+    
     Config._update(deps)
     
     # logger.remove('*.pkl')
@@ -37,6 +55,20 @@ def evaluate(**deps):
     logger.log_params(Config=vars(Config), RUN=vars(RUN))
 
     Config.device = 'cuda'
+    
+    # 初始化wandb
+    # 构建自定义的run名称，包含任务和参数信息
+    if hasattr(Config, 'is_multitask') and Config.is_multitask:
+        run_name = f"{Config.eval_task}_multitask_{Config.n_traj}x{Config.horizon}_k{Config.k}_eps{Config.eps}_seed{Config.seed}"
+    else:
+        run_name = f"{Config.train_tasks_list[0]}_{Config.n_traj}x{Config.horizon}_k{Config.k}_eps{Config.eps}_seed{Config.seed}"
+    
+    wandb.init(
+        project='decdiff-opt',
+        config=Config,
+        name=run_name,
+        group=f"{Config.eval_task}_evaluation"
+    )
     
     loadpath = os.path.join(logger.prefix, 'checkpoint')
     
@@ -47,14 +79,75 @@ def evaluate(**deps):
     
     state_dict = torch.load(loadpath, map_location=Config.device)
     
-    proxy_loadpath = os.path.join(logger.prefix, 'proxy_checkpoint')
-    
-    if Config.save_checkpoints:
-        proxy_loadpath = os.path.join(proxy_loadpath, f'state_{Config.proxy_n_train_steps}.pt')
+    # 对于多任务训练的模型，我们需要加载评估任务对应的单独训练的proxy model
+    if hasattr(Config, 'is_multitask') and Config.is_multitask:
+        # 使用评估任务对应的单独训练的proxy model
+        eval_task = Config.eval_task
+        print(f"加载评估任务 {eval_task} 的单独训练的proxy model")
+        
+        # 假设单独训练的proxy model保存在特定路径
+        # 这里我们需要构建一个合理的路径，假设单任务训练的模型保存在类似的路径结构中
+        # 我们需要使用frac和sigma参数来匹配正确的模型
+        proxy_model_prefix = f"trained_models/{eval_task}_frac{Config.frac}_sigma{Config.sigma}/{Config.n_traj}x{Config.horizon}_k{Config.k}_eps{Config.eps}/seed{Config.seed}/"
+        proxy_loadpath = os.path.join(proxy_model_prefix, 'proxy_checkpoint')
+        
+        if Config.save_checkpoints:
+            # 尝试使用默认的proxy_n_train_steps
+            try_proxy_steps = [Config.proxy_n_train_steps, 5000, 10000]
+            for steps in try_proxy_steps:
+                path_candidate = os.path.join(proxy_loadpath, f'state_{steps}.pt')
+                if os.path.exists(path_candidate):
+                    proxy_loadpath = path_candidate
+                    print(f"找到proxy model在: {proxy_loadpath}")
+                    break
+            else:
+                # 如果找不到指定步数的模型，尝试默认的state.pt
+                proxy_loadpath = os.path.join(proxy_loadpath, 'state.pt')
+        else:
+            proxy_loadpath = os.path.join(proxy_loadpath, 'state.pt')
+        
+        # 检查文件是否存在
+        if os.path.exists(proxy_loadpath):
+            print(f"从 {proxy_loadpath} 加载评估任务的proxy model")
+            proxy_state_dict = torch.load(proxy_loadpath, map_location=Config.device)
+        else:
+            print(f"警告: 无法找到评估任务 {eval_task} 的proxy model在 {proxy_loadpath}")
+            print("尝试使用默认的proxy model...")
+            # 回退到原始路径
+            proxy_loadpath = os.path.join(logger.prefix, 'proxy_checkpoint')
+            if Config.save_checkpoints:
+                proxy_loadpath = os.path.join(proxy_loadpath, f'state_{Config.proxy_n_train_steps}.pt')
+            else:
+                proxy_loadpath = os.path.join(proxy_loadpath, 'state.pt')
+            
+            if os.path.exists(proxy_loadpath):
+                proxy_state_dict = torch.load(proxy_loadpath, map_location=Config.device)
+            else:
+                print("错误: 无法找到任何proxy model")
+                raise FileNotFoundError(f"无法找到proxy model在 {proxy_loadpath}")
     else:
-        proxy_loadpath = os.path.join(proxy_loadpath, 'state.pt')
-    
-    proxy_state_dict = torch.load(proxy_loadpath, map_location=Config.device)
+        # 单任务模式，保持原有逻辑
+        proxy_loadpath = os.path.join(logger.prefix, 'proxy_checkpoint')
+        
+        if Config.save_checkpoints:
+            # 尝试使用指定的训练步数
+            path_candidate = os.path.join(proxy_loadpath, f'state_{Config.proxy_n_train_steps}.pt')
+            if os.path.exists(path_candidate):
+                proxy_loadpath = path_candidate
+                print(f"找到proxy model在: {proxy_loadpath}")
+            else:
+                # 如果找不到指定步数的模型，尝试默认的state.pt
+                proxy_loadpath = os.path.join(proxy_loadpath, 'state.pt')
+                print(f"未找到指定步数的proxy model，尝试加载: {proxy_loadpath}")
+        else:
+            proxy_loadpath = os.path.join(proxy_loadpath, 'state.pt')
+        
+        # 检查文件是否存在
+        if os.path.exists(proxy_loadpath):
+            proxy_state_dict = torch.load(proxy_loadpath, map_location=Config.device)
+        else:
+            print("错误: 无法找到proxy model")
+            raise FileNotFoundError(f"无法找到proxy model在 {proxy_loadpath}")
 
     # Load configs
     torch.backends.cudnn.benchmark = True
@@ -106,7 +199,24 @@ def evaluate(**deps):
     vae_input_output_dim = 128  # 根据用户设计，VAE的输入输出维度固定为128
     
     # 尝试加载VAE信息
-    vae_info_path = f"./generated_datasets/{Config.task}_frac{Config.frac}_sigma{Config.sigma}/vae_info.p"
+    # 根据单任务或多任务模式构建正确的路径
+    if hasattr(Config, 'is_multitask') and Config.is_multitask:
+        # 多任务模式
+        train_tasks_str = '_'.join(Config.train_tasks_list)
+        vae_info_path = f"./generated_datasets/multi_{train_tasks_str}_frac{Config.frac}_sigma{Config.sigma}/vae_info.p"
+    else:
+        # 单任务模式
+        if hasattr(Config, 'train_tasks_list') and len(Config.train_tasks_list) > 0:
+            task_name = Config.train_tasks_list[0]
+        elif hasattr(Config, 'task') and Config.task:
+            task_name = Config.task
+        elif hasattr(Config, 'eval_task') and Config.eval_task:
+            task_name = Config.eval_task
+        else:
+            # 默认使用dkitty
+            task_name = 'dkitty'
+        vae_info_path = f"./generated_datasets/{task_name}_frac{Config.frac}_sigma{Config.sigma}/vae_info.p"
+    
     if os.path.exists(vae_info_path):
         try:
             with open(vae_info_path, 'rb') as f:
@@ -131,17 +241,31 @@ def evaluate(**deps):
             # 加载VAE训练时使用的scaler参数
             scaler = StandardScaler()
             model_save_dir = os.path.dirname(vae_path)
-            scaler_mean_path = os.path.join(model_save_dir, "scaler_mean.npy")
-            scaler_scale_path = os.path.join(model_save_dir, "scaler_scale.npy")
             
-            if os.path.exists(scaler_mean_path) and os.path.exists(scaler_scale_path):
-                scaler.mean_ = np.load(scaler_mean_path)
-                scaler.scale_ = np.load(scaler_scale_path)
-                scaler.n_features_in_ = len(scaler.mean_)
-                print(f"成功加载scaler参数，均值形状: {scaler.mean_.shape}")
+            # 多任务模式：加载对应任务的scaler文件
+            if hasattr(Config, 'is_multitask') and Config.is_multitask:
+                scaler_path = os.path.join(model_save_dir, f"scaler_{Config.eval_task}.p")
+                if os.path.exists(scaler_path):
+                    scaler_dict = pkl.load(open(scaler_path, "rb"))
+                    scaler.mean_ = scaler_dict['mean']
+                    scaler.scale_ = scaler_dict['scale']
+                    scaler.n_features_in_ = len(scaler.mean_)
+                    print(f"成功加载多任务scaler参数，均值形状: {scaler.mean_.shape}")
+                else:
+                    print(f"警告: 无法找到任务 {Config.eval_task} 的scaler文件: {scaler_path}")
+                    scaler = None
             else:
-                print(f"警告: 无法找到scaler参数文件，将不进行scaler还原")
-                scaler = None
+                # 单任务模式：加载默认的scaler文件
+                scaler_path = os.path.join(model_save_dir, f"scaler_{Config.task}.p")
+                if os.path.exists(scaler_path):
+                    scaler_dict = pkl.load(open(scaler_path, "rb"))
+                    scaler.mean_ = scaler_dict['mean']
+                    scaler.scale_ = scaler_dict['scale']
+                    scaler.n_features_in_ = len(scaler.mean_)
+                    print(f"成功加载单任务scaler参数，均值形状: {scaler.mean_.shape}")
+                else:
+                    print(f"警告: 无法找到任务 {Config.task} 的scaler文件: {scaler_path}")
+                    scaler = None
 
         except Exception as e:
             print(f"加载VAE模型时出错: {e}")
@@ -170,7 +294,7 @@ def evaluate(**deps):
         savepath='proxy_model_config.pkl',
         input_dim=original_observation_dim,  # 使用原始观测维度
         hidden_dim=Config.proxy_hidden_dim,
-        output_dim=action_dim,
+        output_dim=action_dim,  # 与dfgo-main保持一致，设置为action_dim
         n_ensembles=Config.proxy_n_ensembles,
         device=Config.device,
     )
@@ -359,6 +483,22 @@ def evaluate(**deps):
     
     logger.print(f"nmax_ep_reward: {np.max(y_norm)}, nmedian_ep_reward: {np.median(y_norm)}, nmean_ep_reward: {np.mean(y_norm)},", color='green')
     logger.log_metrics_summary({f"nmax_ep_reward": np.max(y_norm), "nmedian_ep_reward": np.median(y_norm), "nmean_ep_reward": np.mean(y_norm)})
+    
+    # 将评估结果保存到wandb
+    wandb.log({
+        "max_ep_reward": np.max(y),
+        "median_ep_reward": np.median(y),
+        "mean_ep_reward": np.mean(y),
+        "nmax_ep_reward": np.max(y_norm),
+        "nmedian_ep_reward": np.median(y_norm),
+        "nmean_ep_reward": np.mean(y_norm),
+        "eval_task": Config.eval_task,
+        "n_traj": Config.n_traj,
+        "horizon": Config.horizon,
+        "k": Config.k,
+        "eps": Config.eps,
+        "seed": Config.seed
+    })
     
     np.savez_compressed(os.path.join(logger.prefix, f'performance_{Config.n_train_steps}_{trainer.batch_size}x{Config.horizon - context_length}_alpha{Config.alpha}'), y=y, y_norm=y_norm, time=time)
     np.savez_compressed(os.path.join(logger.prefix, f'samples_{Config.n_train_steps}_{trainer.batch_size}x{Config.horizon - context_length}_alpha{Config.alpha}'), queries=queries)

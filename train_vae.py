@@ -54,23 +54,64 @@ def main(args):
     # 创建trained_models目录
     os.makedirs("trained_models/vae", exist_ok=True)
     
-    # 加载任务数据
-    print(f"加载任务: {args.task}")
-    task = design_bench.make(TASKNAME2TASK[args.task],
-                            dataset_kwargs=dict(
-                            max_samples=int(TASKNAME2MAX_SAMPLES[args.task] * args.frac),
-                            distribution=None,
-                            min_percentile=0)
-                        )
+    # 确定是单任务模式还是多任务模式
+    is_multitask = args.tasks is not None
     
-    if args.task.startswith("tfbind"):
-            task.map_to_logits()
-    # 获取数据
-    # data_x = task.x
-    data_x = torch.from_numpy(task.x.reshape(task.x.shape[0], -1)).float()
-    # 为不同任务设置合适的输入维度
-    original_dim = data_x.shape[1]
-    input_dim = max(original_dim, 128)  # 确保至少128维，或使用原始维度
+    if is_multitask:
+        # 多任务模式
+        task_list = args.tasks.split(',')
+        print(f"多任务模式，加载任务列表: {task_list}")
+        
+        all_data = []
+        for task_name in tqdm(task_list, desc="加载任务数据"):
+            print(f"加载任务: {task_name}")
+            task = design_bench.make(TASKNAME2TASK[task_name],
+                                   dataset_kwargs=dict(
+                                   max_samples=int(TASKNAME2MAX_SAMPLES[task_name] * args.frac),
+                                   distribution=None,
+                                   min_percentile=0)
+                               )
+            
+            if task_name.startswith("tfbind"):
+                task.map_to_logits()
+            
+            # 获取数据并转换为tensor
+            data_x = torch.from_numpy(task.x.reshape(task.x.shape[0], -1)).float()
+            all_data.append(data_x)
+        
+        # 使用固定维度进行统一处理
+        input_dim = args.fixed_dim
+        print(f"使用固定输入维度: {input_dim}")
+        
+        # 生成多任务模型保存路径
+        task_str = "multi_" + "_".join(task_list)
+        
+    else:
+        # 单任务模式
+        if not args.task:
+            raise ValueError("必须指定 --task 或 --tasks 参数")
+        
+        print(f"单任务模式，加载任务: {args.task}")
+        task = design_bench.make(TASKNAME2TASK[args.task],
+                                dataset_kwargs=dict(
+                                max_samples=int(TASKNAME2MAX_SAMPLES[args.task] * args.frac),
+                                distribution=None,
+                                min_percentile=0)
+                            )
+        
+        if args.task.startswith("tfbind"):
+                task.map_to_logits()
+        
+        # 获取数据
+        data_x = torch.from_numpy(task.x.reshape(task.x.shape[0], -1)).float()
+        all_data = [data_x]
+        
+        # 使用固定维度
+        input_dim = args.fixed_dim
+        print(f"使用固定输入维度: {input_dim}")
+        
+        # 生成单任务模型保存路径
+        task_str = args.task
     
     # 设置VAE模型参数
     vae_config = {
@@ -83,7 +124,7 @@ def main(args):
     }
     
     # 生成模型保存路径
-    model_save_dir = f"trained_models/vae/{args.task}_frac{args.frac}_sigma{args.sigma}"
+    model_save_dir = f"trained_models/vae/{task_str}_frac{args.frac}_sigma{args.sigma}_dim{input_dim}"
     os.makedirs(model_save_dir, exist_ok=True)
     model_path = os.path.join(model_save_dir, f"vae_latent{args.latent_dim}.pt")
     
@@ -96,32 +137,95 @@ def main(args):
         vae.to(device)
         
         # 加载缩放器
-        scaler = StandardScaler()
-        scaler.mean_ = np.load(os.path.join(model_save_dir, "scaler_mean.npy"))
-        scaler.scale_ = np.load(os.path.join(model_save_dir, "scaler_scale.npy"))
-        # 设置n_features_in_属性，确保scaler.transform()正常工作
-        scaler.n_features_in_ = len(scaler.mean_)
+        if is_multitask:
+            # 多任务模式，加载每个任务的scaler
+            scalers = []
+            for task_name in task_list:
+                scaler_path = os.path.join(model_save_dir, f"scaler_{task_name}.p")
+                if not os.path.exists(scaler_path):
+                    raise FileNotFoundError(f"未找到任务 {task_name} 的scaler文件: {scaler_path}")
+                scaler_dict = pkl.load(open(scaler_path, "rb"))
+                scaler = StandardScaler()
+                scaler.mean_ = scaler_dict['mean']
+                scaler.scale_ = scaler_dict['scale']
+                scaler.var_ = scaler_dict['var']
+                scaler.n_samples_seen_ = scaler_dict['n_samples_seen']
+                scaler.n_features_in_ = len(scaler.mean_)
+                scalers.append(scaler)
+            # 对于多任务，返回scalers列表
+            scaler = scalers
+        else:
+            # 单任务模式，加载单个scaler
+            scaler_path = os.path.join(model_save_dir, f"scaler_{task_str}.p")
+            if not os.path.exists(scaler_path):
+                raise FileNotFoundError(f"未找到任务 {task_str} 的scaler文件: {scaler_path}")
+            scaler_dict = pkl.load(open(scaler_path, "rb"))
+            scaler = StandardScaler()
+            scaler.mean_ = scaler_dict['mean']
+            scaler.scale_ = scaler_dict['scale']
+            scaler.var_ = scaler_dict['var']
+            scaler.n_samples_seen_ = scaler_dict['n_samples_seen']
+            scaler.n_features_in_ = len(scaler.mean_)
         
         print("模型和缩放器加载完成！")
         return vae, scaler, model_save_dir
     
     print(f"准备训练VAE模型，输入维度: {input_dim}，隐空间维度: {args.latent_dim}")
     
-    # 准备数据
-    x_np = data_x
-    # 标准化数据
-    scaler = StandardScaler()
-    x_scaled = scaler.fit_transform(x_np)
-    x_tensor = torch.tensor(x_scaled, dtype=torch.float32)
+    # 准备所有任务的数据，为每个任务使用独立的scaler
+    all_processed_data = []
+    scalers = []
     
-    # 数据填充或截断以适应固定输入维度
-    if x_tensor.size(1) < input_dim:
-        x_processed = torch.zeros(x_tensor.size(0), input_dim, dtype=torch.float32)
-        x_processed[:, :x_tensor.size(1)] = x_tensor
-    elif x_tensor.size(1) > input_dim:
-        x_processed = x_tensor[:, :input_dim]
-    else:
-        x_processed = x_tensor
+    # 处理每个数据集，使用独立的scaler
+    for i, data in enumerate(tqdm(all_data, desc="处理数据集")):
+        x_np = data.numpy()
+        
+        # 为当前任务创建独立的scaler
+        task_scaler = StandardScaler()
+        x_scaled = task_scaler.fit_transform(x_np)
+        x_tensor = torch.tensor(x_scaled, dtype=torch.float32)
+        
+        # 数据填充或截断以适应固定输入维度
+        if x_tensor.size(1) < input_dim:
+            x_processed = torch.zeros(x_tensor.size(0), input_dim, dtype=torch.float32)
+            x_processed[:, :x_tensor.size(1)] = x_tensor
+        elif x_tensor.size(1) > input_dim:
+            x_processed = x_tensor[:, :input_dim]
+        else:
+            x_processed = x_tensor
+        
+        all_processed_data.append(x_processed)
+        scalers.append(task_scaler)
+    
+    # 合并所有处理后的数据
+    x_processed = torch.cat(all_processed_data, dim=0)
+    print(f"合并后的数据集大小: {x_processed.shape}")
+    
+    # 记录数据集信息，包含每个任务的原始维度和scaler信息
+    dataset_info = {
+        'is_multitask': is_multitask,
+        'tasks': task_list if is_multitask else [task_str],
+        'total_samples': x_processed.shape[0],
+        'fixed_dim': input_dim,
+        'individual_sizes': [data.shape[0] for data in all_data],
+        'original_dims': [data.shape[1] for data in all_data]  # 记录每个任务的原始维度
+    }
+    print(f"数据集信息: {dataset_info}")
+    # 保存数据集信息
+    pkl.dump(dataset_info, open(os.path.join(model_save_dir, "dataset_info.p"), "wb"))
+    
+    # 保存每个任务的scaler
+    for i, (task_name, scaler) in enumerate(zip(dataset_info['tasks'], scalers)):
+        scaler_path = os.path.join(model_save_dir, f"scaler_{task_name}.p")
+        scaler_dict = {
+            'mean': scaler.mean_,
+            'scale': scaler.scale_,
+            'var': scaler.var_,
+            'n_samples_seen': scaler.n_samples_seen_,
+            'n_features_in_': scaler.n_features_in_
+        }
+        pkl.dump(scaler_dict, open(scaler_path, "wb"))
+        print(f"scaler参数已保存到: {scaler_path}")
     
     # 创建数据加载器
     train_loader, val_loader = create_vae_dataloaders(
@@ -157,29 +261,43 @@ def main(args):
     torch.save(vae.state_dict(), model_path)
     print(f"VAE模型已保存到: {model_path}")
     
-    # 保存缩放器参数
-    np.save(os.path.join(model_save_dir, "scaler_mean.npy"), scaler.mean_)
-    np.save(os.path.join(model_save_dir, "scaler_scale.npy"), scaler.scale_)
+    # 对于单任务模式，保持向后兼容，同时保存单个scaler文件
+    if not is_multitask:
+        # 保存单个scaler的兼容文件
+        scaler_dict = {
+            'mean': scalers[0].mean_,
+            'scale': scalers[0].scale_,
+            'var': scalers[0].var_,
+            'n_samples_seen': scalers[0].n_samples_seen_
+        }
+        pkl.dump(scaler_dict, open(os.path.join(model_save_dir, f"scaler_{task_str}.p"), "wb"))
     
     # 保存VAE配置
     vae_info = {
         'config': vae_config,
-        'original_dim': original_dim,
-        'model_path': model_path
+        'input_dim': input_dim,
+        'model_path': model_path,
+        'dataset_info': dataset_info
     }
     pkl.dump(vae_info, open(os.path.join(model_save_dir, "vae_info.p"), "wb"))
     
     print("VAE训练完成！")
-    return vae, scaler, model_save_dir
+    # 根据是否是多任务模式返回不同格式的scaler
+    if is_multitask:
+        return vae, scalers, model_save_dir
+    else:
+        return vae, scalers[0], model_save_dir
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="训练VAE模型用于降维")
     
     # 任务参数
-    parser.add_argument('--task', type=str, choices=list(TASKNAME2TASK.keys()), default='dkitty')
+    parser.add_argument('--task', type=str, choices=list(TASKNAME2TASK.keys()), help='单任务名称')
+    parser.add_argument('--tasks', type=str, help='多任务列表，用逗号分隔，例如: dkitty,ant,tfbind8')
     parser.add_argument('--frac', type=float, default=1.0, help='使用数据集的比例')
     parser.add_argument('--sigma', type=float, default=0.0, help='噪声标准差')
     parser.add_argument('--force_retrain', action='store_true', help='强制重新训练')
+    parser.add_argument('--fixed_dim', type=int, default=128, help='固定的输入维度，用于统一不同数据集的长度')
     
     # VAE模型参数
     parser.add_argument('--latent_dim', type=int, default=32, help='隐空间维度')

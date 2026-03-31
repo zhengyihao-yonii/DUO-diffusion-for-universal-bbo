@@ -115,6 +115,8 @@ class TemporalUnet(nn.Module):
         dim=128,
         dim_mults=(1, 2, 4, 8),
         returns_condition=False,
+        task_condition=False,
+        num_tasks=1,
         condition_dropout=0.1,
         calc_energy=False,
         kernel_size=5,
@@ -134,6 +136,7 @@ class TemporalUnet(nn.Module):
 
         self.time_dim = dim
         self.returns_dim = dim
+        self.task_dim = dim
 
         self.time_mlp = nn.Sequential(
             SinusoidalPosEmb(dim),
@@ -143,9 +146,13 @@ class TemporalUnet(nn.Module):
         )
 
         self.returns_condition = returns_condition
+        self.task_condition = task_condition
         self.condition_dropout = condition_dropout
         self.calc_energy = calc_energy
 
+        embed_dim = dim
+        self.embeds = []
+        
         if self.returns_condition:
             self.returns_mlp = nn.Sequential(
                         nn.Linear(1, dim),
@@ -155,9 +162,17 @@ class TemporalUnet(nn.Module):
                         nn.Linear(dim * 4, dim),
                     )
             self.mask_dist = Bernoulli(probs=1-self.condition_dropout)
-            embed_dim = 2*dim
-        else:
-            embed_dim = dim
+            embed_dim += dim
+        
+        if self.task_condition:
+            self.task_mlp = nn.Sequential(
+                        nn.Linear(num_tasks, dim),
+                        act_fn,
+                        nn.Linear(dim, dim * 4),
+                        act_fn,
+                        nn.Linear(dim * 4, dim),
+                    )
+            embed_dim += dim
 
         self.downs = nn.ModuleList([])
         self.ups = nn.ModuleList([])
@@ -197,17 +212,19 @@ class TemporalUnet(nn.Module):
             nn.Conv1d(dim, transition_dim, 1),
         )
 
-    def forward(self, x, cond, time, returns=None, use_dropout=True, force_dropout=False):
+    def forward(self, x, cond, time, returns=None, task_idx=None, use_dropout=True, force_dropout=False):
         '''
             x : [ batch x horizon x transition ]
             returns : [batch x horizon]
+            task_idx: [batch x num_tasks] - one-hot encoded task index
         '''
         if self.calc_energy:
             x_inp = x
 
         x = einops.rearrange(x, 'b h t -> b t h')
 
-        t = self.time_mlp(time)
+        # 收集所有嵌入
+        embeds = [self.time_mlp(time)]
 
         if self.returns_condition:
             # assert returns is not None
@@ -219,9 +236,18 @@ class TemporalUnet(nn.Module):
                 if force_dropout:
                     returns_embed = 0*returns_embed
             else:
-                # print(t.shape)
-                returns_embed = torch.zeros((t.shape[0], self.returns_dim)).to(t.device)
-            t = torch.cat([t, returns_embed], dim=-1)
+                returns_embed = torch.zeros((embeds[0].shape[0], self.returns_dim)).to(embeds[0].device)
+            embeds.append(returns_embed)
+        
+        if self.task_condition:
+            if task_idx is not None:
+                task_embed = self.task_mlp(task_idx)
+            else:
+                task_embed = torch.zeros((embeds[0].shape[0], self.task_dim)).to(embeds[0].device)
+            embeds.append(task_embed)
+        
+        # 合并所有嵌入
+        t = torch.cat(embeds, dim=-1)
 
         h = []
         # print(x.shape)
@@ -258,14 +284,16 @@ class TemporalUnet(nn.Module):
         else:
             return x
 
-    def get_pred(self, x, cond, time, returns=None, use_dropout=True, force_dropout=False):
+    def get_pred(self, x, cond, time, returns=None, task_idx=None, use_dropout=True, force_dropout=False):
         '''
             x : [ batch x horizon x transition ]
             returns : [batch x horizon]
+            task_idx: [batch x num_tasks] - one-hot encoded task index
         '''
         x = einops.rearrange(x, 'b h t -> b t h')
 
-        t = self.time_mlp(time)
+        # 收集所有嵌入
+        embeds = [self.time_mlp(time)]
 
         if self.returns_condition:
             assert returns is not None
@@ -275,7 +303,17 @@ class TemporalUnet(nn.Module):
                 returns_embed = mask*returns_embed
             if force_dropout:
                 returns_embed = 0*returns_embed
-            t = torch.cat([t, returns_embed], dim=-1)
+            embeds.append(returns_embed)
+        
+        if self.task_condition:
+            if task_idx is not None:
+                task_embed = self.task_mlp(task_idx)
+            else:
+                task_embed = torch.zeros((embeds[0].shape[0], self.task_dim)).to(embeds[0].device)
+            embeds.append(task_embed)
+        
+        # 合并所有嵌入
+        t = torch.cat(embeds, dim=-1)
 
         h = []
 
@@ -309,6 +347,8 @@ class MLPnet(nn.Module):
         dim_mults=(1, 2, 4, 8),
         horizon=1,
         returns_condition=True,
+        task_condition=False,
+        num_tasks=1,
         condition_dropout=0.1,
         calc_energy=False,
     ):
@@ -321,6 +361,7 @@ class MLPnet(nn.Module):
 
         self.time_dim = dim
         self.returns_dim = dim
+        self.task_dim = dim
 
         self.time_mlp = nn.Sequential(
             SinusoidalPosEmb(dim),
@@ -330,11 +371,14 @@ class MLPnet(nn.Module):
         )
 
         self.returns_condition = returns_condition
+        self.task_condition = task_condition
         self.condition_dropout = condition_dropout
         self.calc_energy = calc_energy
         self.transition_dim = transition_dim
         self.action_dim = transition_dim - cond_dim
 
+        embed_dim = dim
+        
         if self.returns_condition:
             self.returns_mlp = nn.Sequential(
                         nn.Linear(1, dim),
@@ -344,9 +388,17 @@ class MLPnet(nn.Module):
                         nn.Linear(dim * 4, dim),
                     )
             self.mask_dist = Bernoulli(probs=1-self.condition_dropout)
-            embed_dim = 2*dim
-        else:
-            embed_dim = dim
+            embed_dim += dim
+        
+        if self.task_condition:
+            self.task_mlp = nn.Sequential(
+                        nn.Linear(num_tasks, dim),
+                        act_fn,
+                        nn.Linear(dim, dim * 4),
+                        act_fn,
+                        nn.Linear(dim * 4, dim),
+                    )
+            embed_dim += dim
 
         self.mlp = nn.Sequential(
                         nn.Linear(embed_dim + transition_dim, 1024),
@@ -356,14 +408,16 @@ class MLPnet(nn.Module):
                         nn.Linear(1024, transition_dim),
                     )
 
-    def forward(self, x, cond, time, returns=None, use_dropout=True, force_dropout=False):
+    def forward(self, x, cond, time, returns=None, task_idx=None, use_dropout=True, force_dropout=False):
         '''
             x : [ batch x action ]
             cond: [batch x state]
             returns : [batch x 1]
+            task_idx: [batch x num_tasks] - one-hot encoded task index
         '''
         # Assumes horizon = 1
         t = self.time_mlp(time).unsqueeze(1)
+        embeds = [t]
 
         if self.returns_condition:
             assert returns is not None
@@ -373,7 +427,17 @@ class MLPnet(nn.Module):
                 returns_embed = mask*returns_embed
             if force_dropout:
                 returns_embed = 0*returns_embed
-            t = torch.cat([t, returns_embed], dim=-1)
+            embeds.append(returns_embed)
+        
+        if self.task_condition:
+            if task_idx is not None:
+                task_embed = self.task_mlp(task_idx).unsqueeze(1)
+            else:
+                task_embed = torch.zeros((t.shape[0], 1, self.task_dim)).to(t.device)
+            embeds.append(task_embed)
+        
+        # 合并所有嵌入
+        t = torch.cat(embeds, dim=-1)
 
         inp = torch.cat([t, x], dim=-1)
         out  = self.mlp(inp)

@@ -89,17 +89,24 @@ class Trainer(object):
         self.dataset = dataset
         self.proxy_dataset = proxy_dataset
         
-        ranks = torch.argsort(torch.argsort(-1 * self.proxy_dataset.data_y.flatten()))
-        weights = 1.0 / (1e-2 * len(self.proxy_dataset.data_y) + ranks)
-        sampler = torch.utils.data.WeightedRandomSampler(
-                weights=weights, num_samples=len(self.proxy_dataset.data_y), replacement=True
-                )
+        # 只有当proxy_dataset不为None时，才初始化与proxy model相关的组件
+        self.has_proxy = proxy_dataset is not None
+        if self.has_proxy:
+            ranks = torch.argsort(torch.argsort(-1 * self.proxy_dataset.data_y.flatten()))
+            weights = 1.0 / (1e-2 * len(self.proxy_dataset.data_y) + ranks)
+            sampler = torch.utils.data.WeightedRandomSampler(
+                    weights=weights, num_samples=len(self.proxy_dataset.data_y), replacement=True
+                    )
+            
+            self.proxy_dataloader = cycle(torch.utils.data.DataLoader(
+                self.proxy_dataset, batch_size=train_batch_size, num_workers=0, sampler=sampler, pin_memory=True, drop_last=True,
+            ))
+        else:
+            # 在没有proxy_dataset的情况下，仍然可以训练扩散模型
+            self.proxy_dataloader = None
 
         self.dataloader = cycle(torch.utils.data.DataLoader(
             self.dataset, batch_size=train_batch_size, num_workers=0, shuffle=True, pin_memory=True, drop_last=True,
-        ))
-        self.proxy_dataloader = cycle(torch.utils.data.DataLoader(
-            self.proxy_dataset, batch_size=train_batch_size, num_workers=0, sampler=sampler, pin_memory=True, drop_last=True,
         ))
         # self.proxy_dataloader = cycle(torch.utils.data.DataLoader(
         #     self.proxy_dataset, batch_size=train_batch_size, num_workers=0, shuffle=True, pin_memory=True, drop_last=True,
@@ -107,7 +114,12 @@ class Trainer(object):
         
         self.renderer = renderer
         self.optimizer = torch.optim.Adam(diffusion_model.parameters(), lr=train_lr)
-        self.proxy_optimizer = torch.optim.Adam(proxy_model.parameters(), lr=proxy_train_lr)
+        
+        # 只有当proxy_model不为None时，才创建proxy_optimizer
+        if self.has_proxy:
+            self.proxy_optimizer = torch.optim.Adam(proxy_model.parameters(), lr=proxy_train_lr)
+        else:
+            self.proxy_optimizer = None
 
         self.bucket = bucket
         self.n_reference = n_reference
@@ -122,7 +134,8 @@ class Trainer(object):
             self.load(epoch=load_checkpoint)
             self.step = load_checkpoint
             
-        if load_proxy_checkpoint is not None:
+        # 只有当有proxy时才加载proxy checkpoint
+        if self.has_proxy and load_proxy_checkpoint is not None:
             self.proxy_load(epoch=load_proxy_checkpoint)
             self.proxy_step = load_proxy_checkpoint
 
@@ -140,6 +153,11 @@ class Trainer(object):
     #-----------------------------------------------------------------------------#
     
     def train_proxy(self, n_train_steps):
+        # 只有当有proxy时才训练proxy model
+        if not self.has_proxy:
+            logger.print("没有proxy_dataset，跳过proxy model训练")
+            return
+            
         timer = Timer()
         for step in tqdm(range(n_train_steps)):
             x, y = next(self.proxy_dataloader)
@@ -340,8 +358,14 @@ class Trainer(object):
         torch.save(data, savepath)
         logger.print(f'[ utils/training ] Saved model to {savepath}')
         
-    def proxy_load(self, epoch=1000):
-        loadpath = os.path.join(self.bucket, logger.prefix, f'proxy_checkpoint/state_{epoch}.pt')
+    def proxy_load(self, epoch=None, path=None):
+        if path is not None:
+            loadpath = path
+        elif epoch is not None:
+            loadpath = os.path.join(self.bucket, logger.prefix, f'proxy_checkpoint/state_{epoch}.pt')
+        else:
+            # 默认加载最新的state.pt文件
+            loadpath = os.path.join(self.bucket, logger.prefix, 'proxy_checkpoint/state.pt')
         # data = logger.load_torch(loadpath)
         data = torch.load(loadpath)
         self.proxy_model.load_state_dict(data['model'])
