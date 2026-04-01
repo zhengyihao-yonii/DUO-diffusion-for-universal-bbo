@@ -7,3 +7,6 @@ generated_datasets/
 trained_models
 samples/
 wandb/
+
+# 第三方克隆（如需纳入版本库可删此行或改用 git submodule）
+thirdparty_benchmark/SOO-Bench/

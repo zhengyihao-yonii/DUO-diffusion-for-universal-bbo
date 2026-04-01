@@ -8,6 +8,11 @@ import argparse
 import design_bench
 from tqdm import tqdm
 import pickle as pkl
+from diffuser.utils.soo_gtopx import (
+    TASKNAME_TO_VAR_NUM,
+    load_gtopx_offline_arrays,
+    is_gtopx_task,
+)
 
 # 任务映射
 TASKNAME2FULL = {
@@ -44,6 +49,8 @@ def get_original_observation_dim(task_name):
         'tfbind10': 10,# TFBind10的原始维度
         'superconductor': 86,  # 超导体任务的原始维度
     }
+    if is_gtopx_task(task_name):
+        return TASKNAME_TO_VAR_NUM[task_name]
     return dim_map.get(task_name, 128)  # 默认返回128
 
 def main(args):
@@ -57,6 +64,8 @@ def main(args):
     # 确定是单任务模式还是多任务模式
     is_multitask = args.tasks is not None
     
+    soo_seed = int(getattr(args, 'seed', 0))
+
     if is_multitask:
         # 多任务模式
         task_list = args.tasks.split(',')
@@ -65,18 +74,24 @@ def main(args):
         all_data = []
         for task_name in tqdm(task_list, desc="加载任务数据"):
             print(f"加载任务: {task_name}")
-            task = design_bench.make(TASKNAME2TASK[task_name],
-                                   dataset_kwargs=dict(
-                                   max_samples=int(TASKNAME2MAX_SAMPLES[task_name] * args.frac),
-                                   distribution=None,
-                                   min_percentile=0)
-                               )
-            
-            if task_name.startswith("tfbind"):
-                task.map_to_logits()
-            
-            # 获取数据并转换为tensor
-            data_x = torch.from_numpy(task.x.reshape(task.x.shape[0], -1)).float()
+            if is_gtopx_task(task_name):
+                x_np, _, _, _ = load_gtopx_offline_arrays(
+                    task_name, frac=args.frac, sigma=0.0, seed=soo_seed
+                )
+                data_x = torch.from_numpy(x_np).float()
+            else:
+                task = design_bench.make(TASKNAME2TASK[task_name],
+                                       dataset_kwargs=dict(
+                                       max_samples=int(TASKNAME2MAX_SAMPLES[task_name] * args.frac),
+                                       distribution=None,
+                                       min_percentile=0)
+                                   )
+                
+                if task_name.startswith("tfbind"):
+                    task.map_to_logits()
+                
+                # 获取数据并转换为tensor
+                data_x = torch.from_numpy(task.x.reshape(task.x.shape[0], -1)).float()
             all_data.append(data_x)
         
         # 使用固定维度进行统一处理
@@ -92,18 +107,24 @@ def main(args):
             raise ValueError("必须指定 --task 或 --tasks 参数")
         
         print(f"单任务模式，加载任务: {args.task}")
-        task = design_bench.make(TASKNAME2TASK[args.task],
-                                dataset_kwargs=dict(
-                                max_samples=int(TASKNAME2MAX_SAMPLES[args.task] * args.frac),
-                                distribution=None,
-                                min_percentile=0)
-                            )
-        
-        if args.task.startswith("tfbind"):
-                task.map_to_logits()
-        
-        # 获取数据
-        data_x = torch.from_numpy(task.x.reshape(task.x.shape[0], -1)).float()
+        if is_gtopx_task(args.task):
+            x_np, _, _, _ = load_gtopx_offline_arrays(
+                args.task, frac=args.frac, sigma=0.0, seed=soo_seed
+            )
+            data_x = torch.from_numpy(x_np).float()
+        else:
+            task = design_bench.make(TASKNAME2TASK[args.task],
+                                    dataset_kwargs=dict(
+                                    max_samples=int(TASKNAME2MAX_SAMPLES[args.task] * args.frac),
+                                    distribution=None,
+                                    min_percentile=0)
+                                )
+            
+            if args.task.startswith("tfbind"):
+                    task.map_to_logits()
+            
+            # 获取数据
+            data_x = torch.from_numpy(task.x.reshape(task.x.shape[0], -1)).float()
         all_data = [data_x]
         
         # 使用固定维度
@@ -292,7 +313,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="训练VAE模型用于降维")
     
     # 任务参数
-    parser.add_argument('--task', type=str, choices=list(TASKNAME2TASK.keys()), help='单任务名称')
+    _all_tasks = sorted(set(TASKNAME2TASK.keys()) | set(TASKNAME_TO_VAR_NUM.keys()))
+    parser.add_argument('--task', type=str, choices=_all_tasks, help='单任务名称')
+    parser.add_argument('--seed', type=int, default=0, help='SOO GTOPX 离线采样随机种子（与 construct_trajectories --seed 对齐）')
     parser.add_argument('--tasks', type=str, help='多任务列表，用逗号分隔，例如: dkitty,ant,tfbind8')
     parser.add_argument('--frac', type=float, default=1.0, help='使用数据集的比例')
     parser.add_argument('--sigma', type=float, default=0.0, help='噪声标准差')

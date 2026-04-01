@@ -1,274 +1,166 @@
 import diffuser.utils as utils
 from ml_logger import logger
 import torch
-from copy import deepcopy
 import numpy as np
-import os 
+import os
 import pickle as pkl
-import gym
 import wandb
-# from config.locomotion_config import Config
-from diffuser.utils.arrays import to_torch, to_np, to_device
+from diffuser.utils.arrays import to_torch
 from diffuser.utils.des_bench import DesignBenchFunctionWrapper
-from diffuser.datasets.d4rl import suppress_output
 from diffuser.models.vae import VAE
-# 添加StandardScaler导入
 from sklearn.preprocessing import StandardScaler
+from diffuser.datasets.sequence import PointRegretDataset
 
 
-def evaluate(**deps):
-    from ml_logger import logger, RUN
-
-    RUN._update(deps)
-    print(deps)
-    
-    # 支持多任务训练和单任务评估
-    # 从deps中获取train_tasks和eval_task参数
-    train_tasks = deps.get('train_tasks', deps.get('task', 'dkitty'))
-    eval_task = deps.get('eval_task', train_tasks.split(',')[0])
-    
-    # 设置is_multitask标志
-    deps['is_multitask'] = len(train_tasks.split(',')) > 1
-    deps['train_tasks_list'] = train_tasks.split(',')
-    
-    # 加载配置文件时使用评估任务的配置
-    print(f"评估任务: {eval_task}")
-    if eval_task == 'ant':
+def _import_config(task_name):
+    if task_name == 'ant':
         from config.ant_config import Config
-    elif eval_task == 'dkitty':
+    elif task_name == 'dkitty':
         from config.dkitty_config import Config
-    elif eval_task == 'tfbind8':
+    elif task_name == 'tfbind8':
         from config.tfbind8_config import Config
-    elif eval_task == 'tfbind10':
+    elif task_name == 'tfbind10':
         from config.tfbind10_config import Config
-    elif eval_task == 'superconductor':
+    elif task_name == 'superconductor':
         from config.superconductor_config import Config
+    elif task_name in ('gtopx2', 'gtopx3', 'gtopx4', 'gtopx6'):
+        from config.gtopx_config import Config
     else:
-        # 默认使用dkitty配置
-        print(f"警告: 未知的评估任务 {eval_task}，使用默认dkitty配置")
+        print(f"警告: 未知的任务 {task_name}，使用默认 dkitty 配置")
         from config.dkitty_config import Config
-    
-    Config._update(deps)
-    
-    # logger.remove('*.pkl')
-    # logger.remove("traceback.err")
-    logger.log_params(Config=vars(Config), RUN=vars(RUN))
+    return Config
 
-    Config.device = 'cuda'
-    
-    # 初始化wandb
-    # 构建自定义的run名称，包含任务和参数信息
-    if hasattr(Config, 'is_multitask') and Config.is_multitask:
-        run_name = f"{Config.eval_task}_multitask_{Config.n_traj}x{Config.horizon}_k{Config.k}_eps{Config.eps}_seed{Config.seed}"
-    else:
-        run_name = f"{Config.train_tasks_list[0]}_{Config.n_traj}x{Config.horizon}_k{Config.k}_eps{Config.eps}_seed{Config.seed}"
-    
-    wandb.init(
-        project='decdiff-opt',
-        config=Config,
-        name=run_name,
-        group=f"{Config.eval_task}_evaluation"
-    )
-    
-    loadpath = os.path.join(logger.prefix, 'checkpoint')
-    
-    if Config.save_checkpoints:
-        loadpath = os.path.join(loadpath, f'state_{Config.n_train_steps}.pt')
-    else:
-        loadpath = os.path.join(loadpath, 'state.pt')
-    
-    state_dict = torch.load(loadpath, map_location=Config.device)
-    
-    # 对于多任务训练的模型，我们需要加载评估任务对应的单独训练的proxy model
-    if hasattr(Config, 'is_multitask') and Config.is_multitask:
-        # 使用评估任务对应的单独训练的proxy model
-        eval_task = Config.eval_task
-        print(f"加载评估任务 {eval_task} 的单独训练的proxy model")
-        
-        # 假设单独训练的proxy model保存在特定路径
-        # 这里我们需要构建一个合理的路径，假设单任务训练的模型保存在类似的路径结构中
-        # 我们需要使用frac和sigma参数来匹配正确的模型
+
+def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, save_suffix=""):
+    """单次评估：加载 proxy、数据集、VAE，条件扩散采样并在 design-bench 上算 reward。
+
+    Config 必须由 evaluate() 传入（已按 checkpoint 对应任务 _import_config + _update）。
+    勿在循环内按 eval_task 再次 import 不同 config.*_config：params_proto 全局 ARGS 会重复注册 --seed 等参数并报错。
+    """
+    from ml_logger import logger
+
+    Config.eval_task = eval_task
+    Config.dataset = eval_task
+    if 'train_tasks_list' in deps:
+        Config.train_tasks_list = deps['train_tasks_list']
+    is_multitask = deps.get('is_multitask', False)
+    Config.is_multitask = is_multitask
+    train_tasks_list = deps.get('train_tasks_list', [eval_task])
+
+    # 多任务：从单独路径加载该任务的 proxy
+    if is_multitask:
+        print(f"加载评估任务 {eval_task} 的 proxy model")
         proxy_model_prefix = f"trained_models/{eval_task}_frac{Config.frac}_sigma{Config.sigma}/{Config.n_traj}x{Config.horizon}_k{Config.k}_eps{Config.eps}/seed{Config.seed}/"
         proxy_loadpath = os.path.join(proxy_model_prefix, 'proxy_checkpoint')
-        
         if Config.save_checkpoints:
-            # 尝试使用默认的proxy_n_train_steps
             try_proxy_steps = [Config.proxy_n_train_steps, 5000, 10000]
             for steps in try_proxy_steps:
                 path_candidate = os.path.join(proxy_loadpath, f'state_{steps}.pt')
                 if os.path.exists(path_candidate):
                     proxy_loadpath = path_candidate
-                    print(f"找到proxy model在: {proxy_loadpath}")
+                    print(f"找到 proxy model: {proxy_loadpath}")
                     break
             else:
-                # 如果找不到指定步数的模型，尝试默认的state.pt
                 proxy_loadpath = os.path.join(proxy_loadpath, 'state.pt')
         else:
             proxy_loadpath = os.path.join(proxy_loadpath, 'state.pt')
-        
-        # 检查文件是否存在
         if os.path.exists(proxy_loadpath):
-            print(f"从 {proxy_loadpath} 加载评估任务的proxy model")
             proxy_state_dict = torch.load(proxy_loadpath, map_location=Config.device)
         else:
-            print(f"警告: 无法找到评估任务 {eval_task} 的proxy model在 {proxy_loadpath}")
-            print("尝试使用默认的proxy model...")
-            # 回退到原始路径
+            print(f"警告: 未找到 {eval_task} 的 proxy，回退到 logger.prefix 下 proxy")
             proxy_loadpath = os.path.join(logger.prefix, 'proxy_checkpoint')
             if Config.save_checkpoints:
-                proxy_loadpath = os.path.join(proxy_loadpath, f'state_{Config.proxy_n_train_steps}.pt')
+                path_candidate = os.path.join(proxy_loadpath, f'state_{Config.proxy_n_train_steps}.pt')
+                proxy_loadpath = path_candidate if os.path.exists(path_candidate) else os.path.join(proxy_loadpath, 'state.pt')
             else:
                 proxy_loadpath = os.path.join(proxy_loadpath, 'state.pt')
-            
-            if os.path.exists(proxy_loadpath):
-                proxy_state_dict = torch.load(proxy_loadpath, map_location=Config.device)
-            else:
-                print("错误: 无法找到任何proxy model")
-                raise FileNotFoundError(f"无法找到proxy model在 {proxy_loadpath}")
+            proxy_state_dict = torch.load(proxy_loadpath, map_location=Config.device)
     else:
-        # 单任务模式，保持原有逻辑
         proxy_loadpath = os.path.join(logger.prefix, 'proxy_checkpoint')
-        
         if Config.save_checkpoints:
-            # 尝试使用指定的训练步数
             path_candidate = os.path.join(proxy_loadpath, f'state_{Config.proxy_n_train_steps}.pt')
-            if os.path.exists(path_candidate):
-                proxy_loadpath = path_candidate
-                print(f"找到proxy model在: {proxy_loadpath}")
-            else:
-                # 如果找不到指定步数的模型，尝试默认的state.pt
-                proxy_loadpath = os.path.join(proxy_loadpath, 'state.pt')
-                print(f"未找到指定步数的proxy model，尝试加载: {proxy_loadpath}")
+            proxy_loadpath = path_candidate if os.path.exists(path_candidate) else os.path.join(proxy_loadpath, 'state.pt')
         else:
             proxy_loadpath = os.path.join(proxy_loadpath, 'state.pt')
-        
-        # 检查文件是否存在
-        if os.path.exists(proxy_loadpath):
-            proxy_state_dict = torch.load(proxy_loadpath, map_location=Config.device)
-        else:
-            print("错误: 无法找到proxy model")
-            raise FileNotFoundError(f"无法找到proxy model在 {proxy_loadpath}")
+        proxy_state_dict = torch.load(proxy_loadpath, map_location=Config.device)
 
-    # Load configs
     torch.backends.cudnn.benchmark = True
     utils.set_seed(Config.seed)
 
-    dataset_config = utils.Config(
-        Config.loader,
-        savepath='dataset_config.pkl',
-        # env=Config.dataset,
-        horizon=Config.horizon,
-        data_path=Config.data_path,
-        context_length=Config.context_length,
-        regret=Config.regret,
-        # normalizer=Config.normalizer,
-        # preprocess_fns=Config.preprocess_fns,
-        # use_padding=Config.use_padding,
-        # max_path_length=Config.max_path_length,
-        include_returns=Config.include_returns,
-        # returns_scale=Config.returns_scale,
-    )
+    # 轨迹数据路径：多任务使用混合 pkl（与 train 一致）
+    if is_multitask:
+        data_dir = os.path.dirname(Config.data_path)
+        mixed_data_path = os.path.join(data_dir, "mixed_trajectories_train.p")
+        if not os.path.isfile(mixed_data_path):
+            raise FileNotFoundError(
+                f"多任务评估需要混合轨迹文件: {mixed_data_path}\n请先运行 construct_trajectories.py 生成。"
+            )
+        dataset = PointRegretDataset(
+            horizon=Config.horizon,
+            data_path=mixed_data_path,
+            context_length=Config.context_length,
+            regret=Config.regret,
+            include_returns=Config.include_returns,
+            task_name=None,
+        )
+    else:
+        dataset_config = utils.Config(
+            Config.loader,
+            savepath='dataset_config.pkl',
+            horizon=Config.horizon,
+            data_path=Config.data_path,
+            context_length=Config.context_length,
+            regret=Config.regret,
+            include_returns=Config.include_returns,
+        )
+        dataset = dataset_config()
 
     proxy_dataset_config = utils.Config(
         Config.proxy_loader,
-        dataset=Config.dataset,
+        dataset=eval_task,
         frac=Config.frac,
         sigma=Config.sigma,
+        soo_seed=int(getattr(Config, 'seed', 1)),
         savepath='proxy_dataset_config.pkl',
     )
-
-    # render_config = utils.Config(
-    #     Config.renderer,
-    #     savepath='render_config.pkl',
-    #     env=Config.dataset,
-    # )
-
-    dataset = dataset_config()
     proxy_dataset = proxy_dataset_config()
-    # renderer = render_config()
     renderer = Config.renderer
     observation_dim = dataset.observation_dim
     original_observation_dim = proxy_dataset.original_observation_dim
     action_dim = dataset.action_dim
-    print(observation_dim, action_dim)
-    
-    # 加载VAE模型用于从隐空间解码到原始空间
+    print(f"[{eval_task}] observation_dim={observation_dim}, action_dim={action_dim}")
+
     vae = None
-    # original_observation_dim = observation_dim  # 默认使用当前的观测维度
-    latent_dim = observation_dim  # 隐空间维度，默认与当前观测维度相同
-    vae_input_output_dim = 128  # 根据用户设计，VAE的输入输出维度固定为128
-    
-    # 尝试加载VAE信息
-    # 根据单任务或多任务模式构建正确的路径
-    if hasattr(Config, 'is_multitask') and Config.is_multitask:
-        # 多任务模式
-        train_tasks_str = '_'.join(Config.train_tasks_list)
+    latent_dim = observation_dim
+    vae_input_output_dim = getattr(Config, 'fixed_dim', 128)
+
+    if is_multitask:
+        train_tasks_str = '_'.join(train_tasks_list)
         vae_info_path = f"./generated_datasets/multi_{train_tasks_str}_frac{Config.frac}_sigma{Config.sigma}/vae_info.p"
     else:
-        # 单任务模式
-        if hasattr(Config, 'train_tasks_list') and len(Config.train_tasks_list) > 0:
-            task_name = Config.train_tasks_list[0]
-        elif hasattr(Config, 'task') and Config.task:
-            task_name = Config.task
-        elif hasattr(Config, 'eval_task') and Config.eval_task:
-            task_name = Config.eval_task
-        else:
-            # 默认使用dkitty
-            task_name = 'dkitty'
-        vae_info_path = f"./generated_datasets/{task_name}_frac{Config.frac}_sigma{Config.sigma}/vae_info.p"
-    
+        vae_info_path = f"./generated_datasets/{eval_task}_frac{Config.frac}_sigma{Config.sigma}/vae_info.p"
+
+    scaler = None
     if os.path.exists(vae_info_path):
         try:
             with open(vae_info_path, 'rb') as f:
                 vae_info = pkl.load(f)
-            
-            # 获取VAE路径
             vae_path = vae_info.get('vae_path')
             latent_dim = vae_info.get('latent_dim', observation_dim)
-            
-            print(f"从zipdataset加载原始观测维度: {original_observation_dim}")
-            print(f"从VAE信息中加载VAE路径: {vae_path}")
-            print(f"从VAE信息中加载隐空间维度: {latent_dim}")
-            print(f"使用固定的VAE输入/输出维度: {vae_input_output_dim}")
-            
-            # 加载VAE模型 - 使用固定的128维输入/输出
             vae = VAE(input_dim=vae_input_output_dim, latent_dim=latent_dim)
             vae.load_state_dict(torch.load(vae_path, map_location=Config.device))
             vae.to(Config.device)
             vae.eval()
-            print(f"VAE模型加载成功")
-            
-            # 加载VAE训练时使用的scaler参数
-            scaler = StandardScaler()
             model_save_dir = os.path.dirname(vae_path)
-            
-            # 多任务模式：加载对应任务的scaler文件
-            if hasattr(Config, 'is_multitask') and Config.is_multitask:
-                scaler_path = os.path.join(model_save_dir, f"scaler_{Config.eval_task}.p")
-                if os.path.exists(scaler_path):
-                    scaler_dict = pkl.load(open(scaler_path, "rb"))
-                    scaler.mean_ = scaler_dict['mean']
-                    scaler.scale_ = scaler_dict['scale']
-                    scaler.n_features_in_ = len(scaler.mean_)
-                    print(f"成功加载多任务scaler参数，均值形状: {scaler.mean_.shape}")
-                else:
-                    print(f"警告: 无法找到任务 {Config.eval_task} 的scaler文件: {scaler_path}")
-                    scaler = None
-            else:
-                # 单任务模式：加载默认的scaler文件
-                scaler_path = os.path.join(model_save_dir, f"scaler_{Config.task}.p")
-                if os.path.exists(scaler_path):
-                    scaler_dict = pkl.load(open(scaler_path, "rb"))
-                    scaler.mean_ = scaler_dict['mean']
-                    scaler.scale_ = scaler_dict['scale']
-                    scaler.n_features_in_ = len(scaler.mean_)
-                    print(f"成功加载单任务scaler参数，均值形状: {scaler.mean_.shape}")
-                else:
-                    print(f"警告: 无法找到任务 {Config.task} 的scaler文件: {scaler_path}")
-                    scaler = None
-
+            scaler_path = os.path.join(model_save_dir, f"scaler_{eval_task}.p")
+            if os.path.exists(scaler_path):
+                scaler = StandardScaler()
+                scaler_dict = pkl.load(open(scaler_path, "rb"))
+                scaler.mean_ = scaler_dict['mean']
+                scaler.scale_ = scaler_dict['scale']
+                scaler.n_features_in_ = len(scaler.mean_)
         except Exception as e:
-            print(f"加载VAE模型时出错: {e}")
+            print(f"加载 VAE 出错: {e}")
             vae = None
 
     if Config.diffusion == 'models.GaussianInvDynDiffusion':
@@ -276,6 +168,7 @@ def evaluate(**deps):
     else:
         transition_dim = observation_dim + action_dim
 
+    num_tasks = len(train_tasks_list) if is_multitask else 1
     model_config = utils.Config(
         Config.model,
         savepath='model_config.pkl',
@@ -286,15 +179,18 @@ def evaluate(**deps):
         dim=Config.dim,
         returns_condition=Config.returns_condition,
         device=Config.device,
+        task_condition=is_multitask,
+        num_tasks=num_tasks,
+        condition_dropout=getattr(Config, 'condition_dropout', 0.25),
+        calc_energy=getattr(Config, 'calc_energy', False),
     )
-    
-    # 更新proxy_model_config的input_dim以匹配原始观测维度
+
     proxy_model_config = utils.Config(
         Config.proxy_model,
         savepath='proxy_model_config.pkl',
-        input_dim=original_observation_dim,  # 使用原始观测维度
+        input_dim=original_observation_dim,
         hidden_dim=Config.proxy_hidden_dim,
-        output_dim=action_dim,  # 与dfgo-main保持一致，设置为action_dim
+        output_dim=action_dim,
         n_ensembles=Config.proxy_n_ensembles,
         device=Config.device,
     )
@@ -309,8 +205,6 @@ def evaluate(**deps):
         loss_type=Config.loss_type,
         clip_denoised=Config.clip_denoised,
         predict_epsilon=Config.predict_epsilon,
-        # hidden_dim=Config.hidden_dim,
-        ## loss weighting
         action_weight=Config.action_weight,
         loss_weights=Config.loss_weights,
         loss_discount=Config.loss_discount,
@@ -318,7 +212,7 @@ def evaluate(**deps):
         device=Config.device,
         condition_guidance_w=Config.condition_guidance_w,
     )
-    
+
     Config.batch_size = 128
     trainer_config = utils.Config(
         utils.Trainer,
@@ -343,162 +237,213 @@ def evaluate(**deps):
     model = model_config()
     proxy_model = proxy_model_config()
     diffusion = diffusion_config(model)
-    
     trainer = trainer_config(diffusion, proxy_model, dataset, proxy_dataset, renderer)
     logger.print(utils.report_parameters(model), color='green')
-    
+
     trainer.step = state_dict['step']
     trainer.model.load_state_dict(state_dict['model'])
     trainer.ema_model.load_state_dict(state_dict['ema'])
-
     trainer.proxy_step = proxy_state_dict['step']
     trainer.proxy_model.load_state_dict(proxy_state_dict['model'])
-    
+    if vae is not None:
+        trainer.vae = vae
+
     device = Config.device
-    context_length = Config.ctx_len
-    
+    context_length = getattr(Config, 'ctx_len', deps.get('ctx_len', 32))
     num_queries = 128
     num_eval = 1
-    
+
+    task_label_idx = 0
+    if is_multitask and hasattr(dataset, 'tasks_list') and dataset.tasks_list:
+        if eval_task in dataset.tasks_list:
+            task_label_idx = dataset.tasks_list.index(eval_task)
+
     contexts = []
     queries = []
-    for e in range(num_eval):        
+    for e in range(num_eval):
         batch = next(trainer.dataloader)
-        
-        # context conditioning
-        conditions = {i: to_torch(batch.trajectories[:, i+Config.horizon-context_length], device=device) for i in range(context_length)}
+        conditions = {i: to_torch(batch.trajectories[:, i + Config.horizon - context_length], device=device) for i in range(context_length)}
         conditions["ctx_len"] = to_torch(np.ones(trainer.batch_size,), device=device) * context_length
-        
-        # classifier-free guidance
+        if is_multitask:
+            conditions["task_idx"] = torch.full((trainer.batch_size,), task_label_idx, dtype=torch.long, device=device)
+
         returns = torch.ones(1, ).to(device=device).unsqueeze(0) * Config.alpha
         returns = returns.repeat(trainer.batch_size, 1)
-        
+
         samples, time = trainer.ema_model.conditional_sample(conditions, values=None, returns=returns)
         samples = samples[..., :observation_dim]
-        print(f"生成的隐空间样本形状: {samples.shape}")
-        
-        # 如果VAE存在，将隐空间样本解码到原始空间
+
         if vae is not None:
             with torch.no_grad():
-                # 确保samples和normalizer参数在同一个设备上
-                # 将samples移至与normalizer参数相同的设备
                 samples_device = samples.device
-                # 将normalizer的maxs和mins移至与samples相同的设备
                 if hasattr(trainer.dataset.normalizer, 'maxs'):
                     trainer.dataset.normalizer.maxs = trainer.dataset.normalizer.maxs.to(samples_device)
                     trainer.dataset.normalizer.mins = trainer.dataset.normalizer.mins.to(samples_device)
-                # 对隐空间样本进行unnormalize处理
                 unnormalized_samples = trainer.dataset.normalizer.unnormalize(samples)
-                print(f"unnormalize后的隐空间样本形状: {unnormalized_samples.shape}")
-                
                 batch_size, horizon, _ = unnormalized_samples.shape
-                print(f"原始隐空间样本形状: {unnormalized_samples.shape}")
-                
-                # 重塑为[batch_size*horizon, latent_dim]以适应VAE.decode的输入要求
                 samples_flat = unnormalized_samples.reshape(-1, latent_dim)
-                print(f"扁平化后的样本形状: {samples_flat.shape}")
-                
-                # 解码到128维空间 - 在二维进行
                 decoded_flat = vae.decode(samples_flat)
-                print(f"解码后的扁平化形状: {decoded_flat.shape}")
-                
-                # 在二维状态下截断前original_observation_dim维
                 decoded_flat_truncated = decoded_flat[:, :original_observation_dim]
-                print(f"截断后的扁平化形状: {decoded_flat_truncated.shape}")
-                
-                # 使用scaler进行反标准化 - 在二维状态下处理
                 if scaler is not None:
-                    print(f"应用scaler反标准化")
-                    # 转换为numpy进行scaler处理
                     decoded_np = decoded_flat_truncated.cpu().numpy()
-                    # 应用scaler.inverse_transform进行反标准化
                     decoded_inv_transformed = scaler.inverse_transform(decoded_np)
-                    # 转换回tensor
-                    decoded_flat_truncated = torch.tensor(decoded_inv_transformed, 
-                                                         dtype=decoded_flat_truncated.dtype, 
-                                                         device=decoded_flat_truncated.device)
-                    print(f"scaler反标准化后的样本范围: min={decoded_inv_transformed.min()}, max={decoded_inv_transformed.max()}")
-                
-                # 最后重塑回三维[batch_size, horizon, original_observation_dim]
+                    decoded_flat_truncated = torch.tensor(
+                        decoded_inv_transformed,
+                        dtype=decoded_flat_truncated.dtype,
+                        device=decoded_flat_truncated.device,
+                    )
                 decoded_samples = decoded_flat_truncated.reshape(batch_size, horizon, original_observation_dim)
-                print(f"重塑后的三维解码样本形状: {decoded_samples.shape}")
-                
-                
                 samples = decoded_samples
-            print(f"最终样本形状: {samples.shape}")
 
         queries.append(samples[:, context_length:])
         contexts.append(samples[:, :context_length])
 
-    # 确保使用正确的维度进行reshape
     queries = torch.cat(queries, dim=0).reshape(-1, original_observation_dim if vae is not None else observation_dim)
     contexts = torch.cat(contexts, dim=0).reshape(-1, original_observation_dim if vae is not None else observation_dim).cpu().numpy()
-    print(queries.shape, contexts.shape)
-    
-    # 对于解码后的样本，需要调整归一化处理以匹配原始观测空间
     queries_cpu = queries.cpu()
-    
-    # 如果使用了VAE解码，我们需要确保归一化处理正确
+
     if vae is not None:
-            # VAE解码后的样本可能不在原始空间范围内，需要适当处理
-            # 首先将样本转换为numpy数组
-            queries_np = queries_cpu.numpy()
-            # 记录解码后样本的范围
-            print(f"解码后样本范围: min={queries_np.min()}, max={queries_np.max()}")
-            # 使用proxy_dataset的normalizer对解码后的样本进行归一化
-            # 由于在VAE解码前已经进行了unnormalize，这里直接使用queries_cpu
-            queries_unnorm_tensor = queries_cpu.to('cpu')
-            # 对于VAE解码后的样本，我们直接进行归一化
-            queries_norm = trainer.proxy_dataset.normalizer.normalize(queries_unnorm_tensor)
+        queries_norm = trainer.proxy_dataset.normalizer.normalize(queries_cpu.to('cpu'))
     else:
-        # 没有VAE时，使用原始的归一化处理
         queries_unnorm = trainer.dataset.normalizer.unnormalize(queries_cpu)
-        queries_unnorm_tensor = torch.tensor(queries_unnorm, device='cpu')
-        queries_norm = trainer.proxy_dataset.normalizer.normalize(queries_unnorm_tensor)
-    
-    # 归一化后再转移到训练设备
+        queries_norm = trainer.proxy_dataset.normalizer.normalize(torch.tensor(queries_unnorm, device='cpu'))
+
     queries_norm = queries_norm.to(trainer.device)
     queries_proxy_score = trainer.proxy_model(queries_norm).flatten()
-
-    # filtering
     queries = queries[torch.argsort(queries_proxy_score)[-num_queries:]].cpu()
-    
-    # 如果使用了VAE，queries已经在原始空间中，不需要额外的unnormalize操作
+
     if vae is None:
         queries = dataset.normalizer.unnormalize(queries).numpy()
     else:
-        # 已经在原始空间中的样本直接转换为numpy
         queries = queries.numpy()
-            
-    func = DesignBenchFunctionWrapper(deps["task"], normalise=True)
-    if deps["task"].startswith("tfbind"):
+
+    func = DesignBenchFunctionWrapper(
+        eval_task, normalise=True, soo_seed=int(getattr(Config, 'seed', 1))
+    )
+    if eval_task.startswith("tfbind"):
         queries = func.task.to_integers(queries.reshape(num_queries, -1, 3))
     else:
         queries = queries.reshape(num_queries, -1)
     y = func.task.predict(queries)
     y_norm = (y - func.min) / (func.max - func.min)
-    
-    logger.print(f"max_ep_reward: {np.max(y)}, median_ep_reward: {np.median(y)}, mean_ep_reward: {np.mean(y)},", color='green')
-    logger.log_metrics_summary({f"max_ep_reward": np.max(y), "median_ep_reward": np.median(y), "mean_ep_reward": np.mean(y)})
-    
-    logger.print(f"nmax_ep_reward: {np.max(y_norm)}, nmedian_ep_reward: {np.median(y_norm)}, nmean_ep_reward: {np.mean(y_norm)},", color='green')
-    logger.log_metrics_summary({f"nmax_ep_reward": np.max(y_norm), "nmedian_ep_reward": np.median(y_norm), "nmean_ep_reward": np.mean(y_norm)})
-    
-    # 将评估结果保存到wandb
-    wandb.log({
-        "max_ep_reward": np.max(y),
-        "median_ep_reward": np.median(y),
-        "mean_ep_reward": np.mean(y),
-        "nmax_ep_reward": np.max(y_norm),
-        "nmedian_ep_reward": np.median(y_norm),
-        "nmean_ep_reward": np.mean(y_norm),
-        "eval_task": Config.eval_task,
-        "n_traj": Config.n_traj,
-        "horizon": Config.horizon,
-        "k": Config.k,
-        "eps": Config.eps,
-        "seed": Config.seed
+
+    logger.print(
+        f"[{eval_task}] max_ep_reward: {np.max(y)}, median: {np.median(y)}, mean: {np.mean(y)}",
+        color='green',
+    )
+    logger.print(
+        f"[{eval_task}] nmax_ep_reward: {np.max(y_norm)}, nmedian: {np.median(y_norm)}, nmean: {np.mean(y_norm)}",
+        color='green',
+    )
+    logger.log_metrics_summary({
+        f"max_ep_reward_{eval_task}": np.max(y),
+        f"median_ep_reward_{eval_task}": np.median(y),
+        f"mean_ep_reward_{eval_task}": np.mean(y),
+        f"nmax_ep_reward_{eval_task}": np.max(y_norm),
+        f"nmedian_ep_reward_{eval_task}": np.median(y_norm),
+        f"nmean_ep_reward_{eval_task}": np.mean(y_norm),
     })
-    
-    np.savez_compressed(os.path.join(logger.prefix, f'performance_{Config.n_train_steps}_{trainer.batch_size}x{Config.horizon - context_length}_alpha{Config.alpha}'), y=y, y_norm=y_norm, time=time)
-    np.savez_compressed(os.path.join(logger.prefix, f'samples_{Config.n_train_steps}_{trainer.batch_size}x{Config.horizon - context_length}_alpha{Config.alpha}'), queries=queries)
+
+    if log_wandb:
+        wandb.log({
+            f"max_ep_reward/{eval_task}": np.max(y),
+            f"median_ep_reward/{eval_task}": np.median(y),
+            f"mean_ep_reward/{eval_task}": np.mean(y),
+            f"nmax_ep_reward/{eval_task}": np.max(y_norm),
+            f"nmedian_ep_reward/{eval_task}": np.median(y_norm),
+            f"nmean_ep_reward/{eval_task}": np.mean(y_norm),
+            "eval_task": eval_task,
+            "n_traj": Config.n_traj,
+            "horizon": Config.horizon,
+            "k": Config.k,
+            "eps": Config.eps,
+            "seed": Config.seed,
+        })
+
+    tag = save_suffix or eval_task
+    np.savez_compressed(
+        os.path.join(logger.prefix, f'performance_{tag}_{Config.n_train_steps}_{trainer.batch_size}x{Config.horizon - context_length}_alpha{Config.alpha}'),
+        y=y, y_norm=y_norm, time=time,
+    )
+    np.savez_compressed(
+        os.path.join(logger.prefix, f'samples_{tag}_{Config.n_train_steps}_{trainer.batch_size}x{Config.horizon - context_length}_alpha{Config.alpha}'),
+        queries=queries,
+    )
+    return {
+        'eval_task': eval_task,
+        'max': float(np.max(y)),
+        'median': float(np.median(y)),
+        'mean': float(np.mean(y)),
+        'nmax': float(np.max(y_norm)),
+        'nmedian': float(np.median(y_norm)),
+        'nmean': float(np.mean(y_norm)),
+    }
+
+
+def evaluate(**deps):
+    from ml_logger import logger, RUN
+
+    RUN._update(deps)
+    print(deps)
+
+    train_tasks = deps.get('train_tasks', deps.get('task', 'dkitty'))
+    train_tasks_list = [t.strip() for t in str(train_tasks).split(',') if t.strip()]
+    deps['train_tasks_list'] = train_tasks_list
+    is_multitask = len(train_tasks_list) > 1
+    deps['is_multitask'] = is_multitask
+
+    eval_all_tasks = deps.get('eval_all_tasks', False)
+    default_eval = deps.get('eval_task', train_tasks_list[0])
+    if isinstance(default_eval, str) and ',' in default_eval:
+        default_eval = default_eval.split(',')[0].strip()
+    tasks_to_eval = train_tasks_list if (is_multitask and eval_all_tasks) else [default_eval]
+
+    ck_task = deps.get('checkpoint_eval_task') or train_tasks_list[0]
+    Config = _import_config(ck_task)
+    Config._update(deps)
+    Config.eval_task = ck_task
+    Config.train_tasks_list = train_tasks_list
+    Config.is_multitask = is_multitask
+
+    logger.log_params(Config=vars(Config), RUN=vars(RUN))
+    Config.device = 'cuda'
+
+    run_name = (
+        f"multi_eval_{'_'.join(tasks_to_eval)}_{Config.n_traj}x{Config.horizon}"
+        if len(tasks_to_eval) > 1
+        else f"{tasks_to_eval[0]}_{Config.n_traj}x{Config.horizon}_k{Config.k}_eps{Config.eps}_seed{Config.seed}"
+    )
+    wandb.init(project='decdiff-opt', config=Config, name=run_name, group="evaluation")
+
+    loadpath = os.path.join(logger.prefix, 'checkpoint')
+    if Config.save_checkpoints:
+        loadpath = os.path.join(loadpath, f'state_{Config.n_train_steps}.pt')
+    else:
+        loadpath = os.path.join(loadpath, 'state.pt')
+    state_dict = torch.load(loadpath, map_location=Config.device)
+
+    results = []
+    for i, eval_task in enumerate(tasks_to_eval):
+        suffix = f"{eval_task}" if len(tasks_to_eval) > 1 else ""
+        r = _evaluate_single_task(
+            eval_task, deps, state_dict, Config,
+            log_wandb=True,
+            save_suffix=suffix,
+        )
+        results.append(r)
+
+    if len(results) > 1:
+        print("=== 多任务评估汇总（绝对值 / 归一化 [0,1]）===")
+        hdr = f"{'task':<18} {'max':>10} {'median':>10} {'mean':>10} | {'nmax':>10} {'nmedian':>10} {'nmean':>10}"
+        print(hdr)
+        print("-" * len(hdr))
+        for r in results:
+            print(
+                f"{r['eval_task']:<18} {r['max']:10.4f} {r['median']:10.4f} {r['mean']:10.4f} | "
+                f"{r['nmax']:10.4f} {r['nmedian']:10.4f} {r['nmean']:10.4f}"
+            )
+        _wandb_summary = {}
+        for r in results:
+            _wandb_summary[f"summary/max_{r['eval_task']}"] = r['max']
+            _wandb_summary[f"summary/nmax_{r['eval_task']}"] = r['nmax']
+        wandb.log(_wandb_summary)

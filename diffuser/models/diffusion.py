@@ -13,6 +13,18 @@ from .helpers import (
     Losses,
 )
 
+
+def _task_idx_to_one_hot(task_idx, model):
+    """长整型 task 索引 -> one-hot；类别数优先取 model.num_tasks（与训练时任务数一致）。"""
+    if task_idx is None:
+        return None
+    if task_idx.dim() == 1 and task_idx.dtype == torch.long:
+        n_cls = getattr(model, 'num_tasks', None)
+        if n_cls is None:
+            n_cls = int(task_idx.max().item()) + 1
+        return F.one_hot(task_idx, num_classes=n_cls).float()
+    return task_idx
+
 class GaussianDiffusion(nn.Module):
     def __init__(self, model, horizon, observation_dim, action_dim, n_timesteps=1000, n_sample_timesteps=200,
         loss_type='l1', clip_denoised=False, predict_epsilon=True,
@@ -127,11 +139,7 @@ class GaussianDiffusion(nn.Module):
 
         # Extract task_idx from cond if present
         task_idx = cond.get('task_idx') if isinstance(cond, dict) else None
-        if task_idx is not None:
-            # If task_idx is a batch of indices, convert to one-hot encoding
-            if task_idx.dim() == 1 and task_idx.dtype == torch.long:
-                num_tasks = task_idx.max().item() + 1
-                task_idx = F.one_hot(task_idx, num_classes=num_tasks).float()
+        task_idx = _task_idx_to_one_hot(task_idx, self.model)
 
         if self.returns_condition:
             # epsilon could be epsilon or x0 itself
@@ -452,11 +460,7 @@ class GaussianInvDynDiffusion(nn.Module):
     def p_mean_variance(self, x, cond, t, returns=None):
         # Extract task_idx from cond if present
         task_idx = cond.get('task_idx') if isinstance(cond, dict) else None
-        if task_idx is not None:
-            # If task_idx is a batch of indices, convert to one-hot encoding
-            if task_idx.dim() == 1 and task_idx.dtype == torch.long:
-                num_tasks = task_idx.max().item() + 1
-                task_idx = F.one_hot(task_idx, num_classes=num_tasks).float()
+        task_idx = _task_idx_to_one_hot(task_idx, self.model)
 
         if self.returns_condition:
             # epsilon could be epsilon or x0 itself
@@ -546,11 +550,7 @@ class GaussianInvDynDiffusion(nn.Module):
 
         # Extract task_idx from cond if present
         task_idx = cond.get('task_idx') if isinstance(cond, dict) else None
-        if task_idx is not None:
-            # If task_idx is a batch of indices, convert to one-hot encoding
-            if task_idx.dim() == 1 and task_idx.dtype == torch.long:
-                num_tasks = task_idx.max().item() + 1
-                task_idx = F.one_hot(task_idx, num_classes=num_tasks).float()
+        task_idx = _task_idx_to_one_hot(task_idx, self.model)
 
         x_recon = self.model(x_noisy, cond, t, returns, task_idx)
 
@@ -765,11 +765,7 @@ class ActionGaussianDiffusion(nn.Module):
 
         # Extract task_idx from cond if present
         task_idx = cond.get('task_idx') if isinstance(cond, dict) else None
-        if task_idx is not None:
-            # If task_idx is a batch of indices, convert to one-hot encoding
-            if task_idx.dim() == 1 and task_idx.dtype == torch.long:
-                num_tasks = task_idx.max().item() + 1
-                task_idx = F.one_hot(task_idx, num_classes=num_tasks).float()
+        task_idx = _task_idx_to_one_hot(task_idx, self.model)
 
         if self.returns_condition:
             # epsilon could be epsilon or x0 itself
@@ -903,11 +899,7 @@ class ActionGaussianDiffusion(nn.Module):
 
         # Extract task_idx from state if present
         task_idx = state.get('task_idx') if isinstance(state, dict) else None
-        if task_idx is not None:
-            # If task_idx is a batch of indices, convert to one-hot encoding
-            if task_idx.dim() == 1 and task_idx.dtype == torch.long:
-                num_tasks = task_idx.max().item() + 1
-                task_idx = F.one_hot(task_idx, num_classes=num_tasks).float()
+        task_idx = _task_idx_to_one_hot(task_idx, self.model)
 
         pred = self.model(action_noisy, state, t, returns, task_idx)
 

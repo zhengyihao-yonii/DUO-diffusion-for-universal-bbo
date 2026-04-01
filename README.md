@@ -33,6 +33,16 @@ rm -rf design_bench_data.zip
 mv -v design_bench_data <CONDA_PATH>/envs/gtg/lib/python3.8/site-packages
 ```
 
+### SOO-Bench (optional, extended offline BBO benchmarks)
+
+Install under `thirdparty_benchmark/` (same layout as common group setup):
+
+```bash
+bash scripts/setup_soo_bench.sh
+```
+
+See `thirdparty_benchmark/README.md` for manual steps and **why `pip install -e ./revive_hybrid/` from universal-offline-bbo often fails** (upstream no longer ships that folder). Connecting SOO tasks to this repo’s pipeline still requires adapters next to `design_bench` loaders.
+
 ### Code references
 Our implementation is based on "Is Conditional Generative Modeling is all you need for Decision Making?" ([https://github.com/anuragajay/decision-diffuser](https://github.com/anuragajay/decision-diffuser))
 

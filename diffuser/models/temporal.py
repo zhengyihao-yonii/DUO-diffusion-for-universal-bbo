@@ -149,6 +149,7 @@ class TemporalUnet(nn.Module):
         self.task_condition = task_condition
         self.condition_dropout = condition_dropout
         self.calc_energy = calc_energy
+        self.num_tasks = num_tasks  # 供扩散中 one_hot 使用固定类别数（避免 batch 全为 task0 时维数错误）
 
         embed_dim = dim
         self.embeds = []

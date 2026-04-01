@@ -5,8 +5,85 @@ from tqdm import tqdm
 import wandb
 import pickle as pkl
 import os
+import glob
 from diffuser.models.vae import VAE
 from torch.utils.data import DataLoader, ConcatDataset
+from diffuser.utils.training import Trainer
+
+
+def multitask_proxy_prefix(task_name, Config):
+    """与 evaluate 中单任务 proxy 路径一致。"""
+    return (
+        f"trained_models/{task_name}_frac{Config.frac}_sigma{Config.sigma}/"
+        f"{Config.n_traj}x{Config.horizon}_k{Config.k}_eps{Config.eps}/seed{Config.seed}/"
+    )
+
+
+def multitask_proxy_checkpoint_exists(prefix, Config):
+    base = os.path.join(prefix, "proxy_checkpoint")
+    if os.path.isfile(os.path.join(base, "state.pt")):
+        return True
+    if getattr(Config, "save_checkpoints", False):
+        p = os.path.join(base, f"state_{Config.proxy_n_train_steps}.pt")
+        if os.path.isfile(p):
+            return True
+        if glob.glob(os.path.join(base, "state_*.pt")):
+            return True
+    return False
+
+
+def ensure_multitask_proxies(diffusion, dataset, renderer, Config, action_dim, logger):
+    """多任务训练前：为 train_tasks_list 中每个任务检查 proxy；不存在则训练并保存。"""
+    for task_name in Config.train_tasks_list:
+        prefix = multitask_proxy_prefix(task_name, Config)
+        if multitask_proxy_checkpoint_exists(prefix, Config):
+            logger.print(f"[multitask proxy] 已存在，跳过: {task_name}")
+            continue
+        logger.print(f"[multitask proxy] 开始训练任务 {task_name} 的 proxy → {prefix}")
+        proxy_ds = utils.Config(
+            Config.proxy_loader,
+            dataset=task_name,
+            frac=Config.frac,
+            sigma=Config.sigma,
+            soo_seed=int(getattr(Config, 'seed', 1)),
+            savepath=f"proxy_dataset_{task_name}.pkl",
+        )()
+        orig_dim = proxy_ds.original_observation_dim
+        proxy_m = utils.Config(
+            Config.proxy_model,
+            savepath=f"proxy_model_{task_name}.pkl",
+            input_dim=orig_dim,
+            hidden_dim=Config.proxy_hidden_dim,
+            output_dim=action_dim,
+            n_ensembles=Config.proxy_n_ensembles,
+            device=Config.device,
+        )()
+        proxy_trainer = Trainer(
+            diffusion,
+            proxy_m,
+            dataset,
+            proxy_ds,
+            renderer,
+            ema_decay=Config.ema_decay,
+            train_batch_size=Config.batch_size,
+            train_lr=Config.learning_rate,
+            proxy_train_lr=Config.proxy_learning_rate,
+            gradient_accumulate_every=Config.gradient_accumulate_every,
+            log_freq=Config.log_freq,
+            proxy_log_freq=Config.proxy_log_freq,
+            sample_freq=Config.sample_freq,
+            save_freq=Config.save_freq,
+            proxy_save_freq=Config.proxy_save_freq,
+            label_freq=int(Config.n_train_steps // Config.n_saves),
+            save_parallel=Config.save_parallel,
+            n_reference=Config.n_reference,
+            bucket=Config.bucket,
+            train_device=Config.device,
+            save_checkpoints=Config.save_checkpoints,
+            proxy_save_prefix=prefix,
+        )
+        proxy_trainer.train_proxy(n_train_steps=Config.proxy_n_train_steps)
+        logger.print(f"[multitask proxy] 任务 {task_name} proxy 训练完成")
 
 def train_multitask_vae(tasks_list, latent_dim=32, batch_size=64, n_epochs=100, lr=1e-4, device='cuda'):
     """
@@ -25,8 +102,8 @@ def train_multitask_vae(tasks_list, latent_dim=32, batch_size=64, n_epochs=100, 
     """
     print(f"开始在以下数据集上训练多任务VAE: {tasks_list}")
     
-    # 创建VAE模型
-    vae = VAE(latent_dim=latent_dim)
+    # 创建VAE模型（与 train_vae.py 一致：固定 128 维输入）
+    vae = VAE(input_dim=128, latent_dim=latent_dim)
     vae.to(device)
     
     # 准备多任务数据集
@@ -111,6 +188,8 @@ def main(**deps):
         from config.tfbind10_config import Config  
     elif task_to_use == 'superconductor':
         from config.superconductor_config import Config
+    elif task_to_use in ('gtopx2', 'gtopx3', 'gtopx4', 'gtopx6'):
+        from config.gtopx_config import Config
     else:
         from config.dkitty_config import Config
     
@@ -226,6 +305,7 @@ def main(**deps):
             dataset=Config.dataset,
             frac=Config.frac,
             sigma=Config.sigma,
+            soo_seed=int(getattr(Config, 'seed', 1)),
             savepath='proxy_dataset_config.pkl',
         )
         
@@ -380,22 +460,22 @@ def main(**deps):
     # 原始观测维度已经在前面设置
     
     # 确定VAE模型路径
+    fixed_dim = getattr(Config, 'fixed_dim', 128)
     if Config.is_multitask:
-        # 多任务模式下使用统一的VAE模型路径
+        # 与 train_vae.py / construct_trajectories 保存目录一致（含 _dim{fixed_dim}）
         train_tasks_str = '_'.join(Config.train_tasks_list)
-        vae_model_path = f"./trained_models/vae/multi_{train_tasks_str}_frac{Config.frac}_sigma{Config.sigma}/vae_latent32.pt"
+        vae_model_path = f"./trained_models/vae/multi_{train_tasks_str}_frac{Config.frac}_sigma{Config.sigma}_dim{fixed_dim}/vae_latent32.pt"
         print(f"多任务模式，VAE模型路径: {vae_model_path}")
     else:
-        # 单任务模式下使用原路径
         task_name = Config.train_tasks_list[0]
-        vae_model_path = f"./trained_models/vae/{task_name}_frac{Config.frac}_sigma{Config.sigma}/vae_latent32.pt"
+        vae_model_path = f"./trained_models/vae/{task_name}_frac{Config.frac}_sigma{Config.sigma}_dim{fixed_dim}/vae_latent32.pt"
         print(f"单任务模式，VAE模型路径: {vae_model_path}")
     
     # 确保模型目录存在
     os.makedirs(os.path.dirname(vae_model_path), exist_ok=True)
     
-    # 创建VAE模型实例
-    vae = VAE(latent_dim=32)
+    # 创建VAE模型实例（input_dim 与 train_vae / 轨迹构建一致）
+    vae = VAE(input_dim=fixed_dim, latent_dim=32)
     vae.to(Config.device)
     
     # 尝试加载现有模型
@@ -414,7 +494,7 @@ def main(**deps):
                 batch_size=64,
                 n_epochs=100,
                 lr=1e-4,
-                device=Config.device
+                device=Config.device,
             )
             # 保存训练好的VAE模型
             torch.save(vae.state_dict(), vae_model_path)
@@ -476,6 +556,9 @@ def main(**deps):
     proxy_model = proxy_model_config() if not Config.is_multitask else None
 
     diffusion = diffusion_config(model)
+
+    if Config.is_multitask:
+        ensure_multitask_proxies(diffusion, dataset, renderer, Config, action_dim, logger)
 
     # 创建训练器
     trainer = trainer_config(diffusion, proxy_model, dataset, proxy_dataset, renderer)

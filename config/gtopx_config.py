@@ -4,12 +4,12 @@ import torch
 from params_proto.neo_proto import ParamsProto, PrefixProto, Proto
 
 class Config(ParamsProto):
-    # misc
+    # misc（SOO-Bench GTOPX：默认 gtopx2，可用 eval_task / dataset 覆盖为 gtopx3,4,6）
     seed = 100
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     bucket = 'trained_models/'
-    dataset = 'dkitty'
-    fixed_dim = 128  # VAE 输入统一维度（与 train_vae / construct_trajectories 一致）
+    dataset = 'gtopx2'
+    fixed_dim = 128
 
     ## model
     model = 'models.TemporalUnet'
@@ -35,24 +35,15 @@ class Config(ParamsProto):
     data_path = 'generated_datasets/'
     context_length = 32
     regret = False
-    
-    # normalizer = 'CDFNormalizer'
-    # preprocess_fns = []
+
     clip_denoised = True
-    # use_padding = True
     include_returns = False
-    # discount = 0.99
-    # max_path_length = 1000
-    # hidden_dim = 256
-    # ar_inv = False
     train_only_inv = False
-    # termination_penalty = -100
-    # returns_scale = 400.0 # Determined using rewards from the dataset
 
     ## training
     n_steps_per_epoch = 100
     loss_type = 'l2'
-    n_train_steps = 10000  # 500 epoch -> 100 epoch
+    n_train_steps = 10000
     batch_size = 128
     learning_rate = 1e-4
     gradient_accumulate_every = 2
@@ -64,7 +55,7 @@ class Config(ParamsProto):
     save_parallel = False
     n_reference = 8
     save_checkpoints = True
-    
+
     ## proxy_model
     proxy_model = "models.Proxy"
     proxy_hidden_dim = 1024

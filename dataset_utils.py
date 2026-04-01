@@ -8,6 +8,13 @@ from design_bench.datasets.discrete.tf_bind_10_dataset import TFBind10Dataset
 from design_bench.datasets.continuous.ant_morphology_dataset import AntMorphologyDataset
 from design_bench.datasets.continuous.dkitty_morphology_dataset import DKittyMorphologyDataset
 from design_bench.datasets.continuous.superconductor_dataset import SuperconductorDataset
+import design_bench
+from diffuser.utils.soo_gtopx import (
+    TASKNAME_TO_VAR_NUM,
+    load_gtopx_offline_arrays,
+    is_gtopx_task,
+)
+from diffuser.datasets.sequence import TASKNAME2MAX_SAMPLES, TASKNAME2TASK
 
 # 任务映射字典
 TASKNAME2FULL = {
@@ -21,9 +28,14 @@ TASKNAME2FULL = {
 TASKNAME2DIM = {
     'dkitty': 56,
     'ant': 60,
+    # 以下为「原始」维；tfbind 在 train_vae / ZipDataset 中使用 map_to_logits 后维数会变，wrapper 会覆盖 original_dim
     'tfbind8': 8,
     'tfbind10': 10,
     'superconductor': 86,
+    'gtopx2': TASKNAME_TO_VAR_NUM['gtopx2'],
+    'gtopx3': TASKNAME_TO_VAR_NUM['gtopx3'],
+    'gtopx4': TASKNAME_TO_VAR_NUM['gtopx4'],
+    'gtopx6': TASKNAME_TO_VAR_NUM['gtopx6'],
 }
 
 class DesignBenchDatasetWrapper:
@@ -37,28 +49,61 @@ class DesignBenchDatasetWrapper:
         self.frac = frac
         self.sigma = sigma
         
-        # 加载原始数据集
-        self.dataset = TASKNAME2FULL[dataset_name]()
-        self.original_dim = TASKNAME2DIM[dataset_name]
-        
+        if is_gtopx_task(dataset_name):
+            self.dataset = None
+            self.original_dim = TASKNAME2DIM[dataset_name]
+            if self.fixed_length is None:
+                self.fixed_length = self.original_dim
+            x, y_norm, _, _ = load_gtopx_offline_arrays(
+                dataset_name, frac=frac, sigma=sigma, seed=42
+            )
+            self.x = x
+            self.y = y_norm.reshape(-1, 1) if y_norm.ndim == 1 else y_norm
+            self.processed_x = self._preprocess_to_fixed_length(self.x)
+            self.y_normalized = self.y.squeeze(-1) if self.y.ndim > 1 else self.y
+            self.x_tensor = torch.tensor(self.processed_x, dtype=torch.float32)
+            self.y_tensor = torch.tensor(self.y_normalized, dtype=torch.float32)
+            return
+
+        # TFBind：必须与 train_vae.py / ZipDataset 一致，先 map_to_logits 再标准化，否则 VAE scaler 维数与数据不一致
+        if dataset_name.startswith("tfbind"):
+            task = design_bench.make(
+                TASKNAME2TASK[dataset_name],
+                dataset_kwargs=dict(
+                    max_samples=int(TASKNAME2MAX_SAMPLES[dataset_name] * frac),
+                    distribution=None,
+                    min_percentile=0,
+                ),
+            )
+            task.map_to_logits()
+            self.dataset = TASKNAME2FULL[dataset_name]()
+            flat = task.x.reshape(task.x.shape[0], -1).astype(np.float32)
+            self.x = flat
+            self.y = task.y
+            self.original_dim = flat.shape[1]
+        else:
+            # 加载原始数据集（Design-Bench）
+            self.dataset = TASKNAME2FULL[dataset_name]()
+            self.original_dim = TASKNAME2DIM[dataset_name]
+
+            # 获取完整数据
+            x_full = self.dataset.x
+            y_full = self.dataset.y
+
+            # 应用采样比例
+            if frac < 1.0:
+                num_samples = int(len(x_full) * frac)
+                indices = np.random.choice(len(x_full), num_samples, replace=False)
+                self.x = x_full[indices]
+                self.y = y_full[indices]
+            else:
+                self.x = x_full
+                self.y = y_full
+
         # 如果没有指定固定长度，使用原始维度
         if self.fixed_length is None:
             self.fixed_length = self.original_dim
-        
-        # 获取完整数据
-        x_full = self.dataset.x
-        y_full = self.dataset.y
-        
-        # 应用采样比例
-        if frac < 1.0:
-            num_samples = int(len(x_full) * frac)
-            indices = np.random.choice(len(x_full), num_samples, replace=False)
-            self.x = x_full[indices]
-            self.y = y_full[indices]
-        else:
-            self.x = x_full
-            self.y = y_full
-        
+
         # 预处理数据：填充到固定长度
         self.processed_x = self._preprocess_to_fixed_length(self.x)
         

@@ -34,7 +34,8 @@ with suppress_output():
 import torch
 import numpy as np
 
-from diffuser.datasets.sequence import TASKNAME2FULL, TASKNAME2TASK, TASKNAME2MAX_SAMPLES
+from diffuser.datasets.sequence import TASKNAME2FULL, TASKNAME2TASK, TASKNAME2MAX_SAMPLES, SUPPORTED_TASKS
+from diffuser.utils.soo_gtopx import TASKNAME_TO_VAR_NUM, load_gtopx_offline_arrays, is_gtopx_task
 
 def preprocess_data_for_vae(data_x, fixed_dim):
     """
@@ -91,12 +92,16 @@ def reduce_dimension(vae, data_x, scaler, fixed_dim=None, task_start_indices=Non
         
         for task_name in task_start_indices:
             start_idx, end_idx = task_start_indices[task_name]
-            # 获取该任务的原始维度
-            original_dim = dataset_info[task_name]['original_dim']
+            # 与 VAE 训练时一致：优先使用 scaler 的特征数（如 tfbind 经 map_to_logits 后与 TASKNAME2DIM 不同）
+            sc = scaler_dict[task_name]
+            n_feat = getattr(sc, "n_features_in_", None)
+            if n_feat is None and hasattr(sc, "mean_") and sc.mean_ is not None:
+                n_feat = len(sc.mean_)
+            original_dim = int(n_feat) if n_feat else dataset_info[task_name]["original_dim"]
             # 仅使用原始维度的数据进行标准化
             task_x_original = data_x_np[start_idx:end_idx, :original_dim]
             # 使用该任务的scaler进行标准化
-            task_x_scaled = scaler_dict[task_name].transform(task_x_original)
+            task_x_scaled = sc.transform(task_x_original)
             # 将标准化后的数据放回原位置的前original_dim列
             data_x_np[start_idx:end_idx, :original_dim] = task_x_scaled
     elif scaler is not None:
@@ -121,7 +126,7 @@ def reduce_dimension(vae, data_x, scaler, fixed_dim=None, task_start_indices=Non
     # 合并所有批次的结果
     return torch.cat(latent_representations, dim=0)
 
-def construct_trajectories(tasks_list, frac=1.0, sigma=0.0, seed=0, n_traj=None, k=None, eps=None, fixed_dim=128):
+def construct_trajectories(tasks_list, frac=1.0, sigma=0.0, seed=0, n_traj=None, k=None, eps=None, fixed_dim=128, horizon=64):
     """
     构建轨迹，支持单任务和多任务模式
     
@@ -134,8 +139,10 @@ def construct_trajectories(tasks_list, frac=1.0, sigma=0.0, seed=0, n_traj=None,
     - k: 每步选择的候选点数量（可选）
     - eps: 允许的目标值下降范围（可选）
     - fixed_dim: 固定的输入维度，用于统一不同数据集
+    - horizon: 每条轨迹长度（时间步数），需与后续扩散训练 Config.horizon 一致
     """
     set_seed(seed)
+    traj_len = horizon
     
     # Configs for each task (与dfgo-main保持一致)
     # 默认参数配置
@@ -145,6 +152,10 @@ def construct_trajectories(tasks_list, frac=1.0, sigma=0.0, seed=0, n_traj=None,
         "superconductor": 4000,
         "ant": 4000,
         "dkitty": 4000,
+        "gtopx2": 2000,
+        "gtopx3": 2000,
+        "gtopx4": 2000,
+        "gtopx6": 2000,
     }
 
     default_k = {
@@ -153,6 +164,10 @@ def construct_trajectories(tasks_list, frac=1.0, sigma=0.0, seed=0, n_traj=None,
         "superconductor": 20,
         "ant": 20,
         "dkitty": 20,
+        "gtopx2": 20,
+        "gtopx3": 20,
+        "gtopx4": 20,
+        "gtopx6": 20,
     }
 
     default_eps = {
@@ -161,6 +176,10 @@ def construct_trajectories(tasks_list, frac=1.0, sigma=0.0, seed=0, n_traj=None,
         "superconductor": 0.05,
         "ant": 0.05,
         "dkitty": 0.01,
+        "gtopx2": 0.05,
+        "gtopx3": 0.05,
+        "gtopx4": 0.05,
+        "gtopx6": 0.05,
     }
     
     # 统一设置参数，符合用户要求
@@ -227,6 +246,7 @@ def construct_trajectories(tasks_list, frac=1.0, sigma=0.0, seed=0, n_traj=None,
                 self.weight_decay = 1e-5
                 self.num_epochs = 100
                 self.kl_weight = 0.1
+                self.seed = seed
         
         vae_args = VAEArgs()
         
@@ -244,34 +264,41 @@ def construct_trajectories(tasks_list, frac=1.0, sigma=0.0, seed=0, n_traj=None,
         task_name = tasks_list[0]
         print(f"开始加载单任务数据: {task_name}")
         
-        # 加载单个数据集
-        task = design_bench.make(TASKNAME2TASK[task_name],
-                                dataset_kwargs=dict(
-                                max_samples=int(TASKNAME2MAX_SAMPLES[task_name] * frac),
-                                distribution=None,
-                                min_percentile=0)
-                            )
-        fully_observed_task = TASKNAME2FULL[task_name]()
+        if is_gtopx_task(task_name):
+            data_x_np, data_y_np, y_full_min, y_full_max = load_gtopx_offline_arrays(
+                task_name, frac=frac, sigma=sigma, seed=seed
+            )
+            data_x = torch.tensor(data_x_np, dtype=torch.float32)
+            data_y = torch.tensor(data_y_np, dtype=torch.float32)
+            print("GTOPX 参考 y 范围 [全样本分位]", y_full_min, y_full_max)
+            print("离线集 y 归一化后 min/max", float(data_y.min()), float(data_y.max()))
+        else:
+            # 加载单个 Design-Bench 数据集
+            task = design_bench.make(TASKNAME2TASK[task_name],
+                                    dataset_kwargs=dict(
+                                    max_samples=int(TASKNAME2MAX_SAMPLES[task_name] * frac),
+                                    distribution=None,
+                                    min_percentile=0)
+                                )
+            fully_observed_task = TASKNAME2FULL[task_name]()
 
-        if task_name.startswith("tfbind"):
-            task.map_to_logits()
-        
-        # 预处理数据
-        data_x = task.x.reshape(task.x.shape[0], -1).astype(np.float32)
-        data_y = task.y
-        
-        print("bigger dataset min max", fully_observed_task.y.min(), fully_observed_task.y.max())
-        print("smaller dataset min max", data_y.min(), data_y.max())
-        
-        # 归一化y值
-        data_y = (data_y - fully_observed_task.y.min()) / (fully_observed_task.y.max() - fully_observed_task.y.min())
-        data_y = np.clip(data_y + np.random.randn(*data_y.shape) * sigma, 0.0, 1.0)
-        # 与dfgo-main保持一致：先squeeze，再转换为张量
-        data_y = data_y.squeeze(-1)
-        
-        # 转换为张量
-        data_x = torch.tensor(data_x)
-        data_y = torch.tensor(data_y)
+            if task_name.startswith("tfbind"):
+                task.map_to_logits()
+            
+            # 预处理数据
+            data_x = task.x.reshape(task.x.shape[0], -1).astype(np.float32)
+            data_y = task.y
+            
+            print("bigger dataset min max", fully_observed_task.y.min(), fully_observed_task.y.max())
+            print("smaller dataset min max", data_y.min(), data_y.max())
+            
+            # 归一化y值
+            data_y = (data_y - fully_observed_task.y.min()) / (fully_observed_task.y.max() - fully_observed_task.y.min())
+            data_y = np.clip(data_y + np.random.randn(*data_y.shape) * sigma, 0.0, 1.0)
+            # 与dfgo-main保持一致：先squeeze，再转换为张量
+            data_y = data_y.squeeze(-1)
+            data_x = torch.tensor(data_x)
+            data_y = torch.tensor(data_y)
         
         # 创建VAE参数
         class VAEArgs:
@@ -293,13 +320,15 @@ def construct_trajectories(tasks_list, frac=1.0, sigma=0.0, seed=0, n_traj=None,
                 self.weight_decay = 1e-5
                 self.num_epochs = 100
                 self.kl_weight = 0.1
+                self.seed = seed
         
         vae_args = VAEArgs()
         
         # 单任务的任务维度信息
+        odim = TASKNAME_TO_VAR_NUM[task_name] if is_gtopx_task(task_name) else data_x.shape[1]
         task_dims_info = {
             task_name: {
-                'original_dim': data_x.shape[1],
+                'original_dim': odim,
                 'fixed_dim': fixed_dim
             }
         }
@@ -333,7 +362,6 @@ def construct_trajectories(tasks_list, frac=1.0, sigma=0.0, seed=0, n_traj=None,
     points = points_latent
     values = data_y
     N = points.shape[0]
-    traj_len = 64
     
     # 构建输出目录
     if is_multitask:
@@ -636,6 +664,7 @@ if __name__ == "__main__":
     parser.add_argument('--k', type=int, default=None, help="每步选择的候选点数量")
     parser.add_argument('--eps', type=float, default=None, help="允许的目标值下降范围")
     parser.add_argument('--fixed_dim', type=int, default=128, help="固定的输入维度，用于统一不同数据集")
+    parser.add_argument('--horizon', type=int, default=64, help="合成轨迹长度，需与训练时 horizon 一致")
 
     args = parser.parse_args()
     
@@ -648,11 +677,11 @@ if __name__ == "__main__":
     
     # 验证任务列表中的任务是否都受支持
     for task in tasks_list:
-        if task not in TASKNAME2TASK:
+        if task not in SUPPORTED_TASKS:
             print(f"警告: 任务 '{task}' 不被支持，将被忽略")
     
     # 过滤出有效的任务
-    tasks_list = [task for task in tasks_list if task in TASKNAME2TASK]
+    tasks_list = [task for task in tasks_list if task in SUPPORTED_TASKS]
     
     if not tasks_list:
         print("错误: 没有有效的任务列表")
@@ -667,5 +696,6 @@ if __name__ == "__main__":
         n_traj=args.n_traj,
         k=args.k,
         eps=args.eps,
-        fixed_dim=args.fixed_dim
+        fixed_dim=args.fixed_dim,
+        horizon=args.horizon,
     )

@@ -33,6 +33,7 @@ from botorch.test_functions import Branin
 
 
 from diffuser.utils.forward import ForwardModel, ProbabilisticForwardModel
+from diffuser.utils.soo_gtopx import GtopxOracleTask, is_gtopx_task
 
 TASKNAME2TASK = {
         'dkitty': 'DKittyMorphology-Exact-v0',
@@ -86,11 +87,13 @@ class BraninTask:
         return y * self.std_y + self.mean_y
 
 class DesignBenchFunctionWrapper:
-    def __init__(self, taskname, normalise=False, optima=1, oracle=True):
+    def __init__(self, taskname, normalise=False, optima=1, oracle=True, soo_seed: int = 1):
         self.optima = optima
         self.taskname = taskname
         if self.taskname == "branin":
             self.task = BraninTask()
+        elif is_gtopx_task(self.taskname):
+            self.task = GtopxOracleTask(self.taskname, seed=soo_seed)
         else:
             self.task = design_bench.make(TASKNAME2TASK[self.taskname])
 
@@ -132,6 +135,8 @@ class DesignBenchFunctionWrapper:
             #     fully_observed_task = ChEMBLDataset(assay_chembl_id=assay_chembl_id, standard_type=standard_type)
             elif self.taskname == "branin":
                 fully_observed_task = BraninTask("generated_datasets/branin/branin_unif_5000.p")
+            elif is_gtopx_task(self.taskname):
+                fully_observed_task = GtopxOracleTask(self.taskname, seed=soo_seed)
             else:
                 raise NotImplementedError()
 

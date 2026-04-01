@@ -65,6 +65,7 @@ class Trainer(object):
         save_checkpoints=False,
         load_checkpoint=None,
         load_proxy_checkpoint=None,
+        proxy_save_prefix=None,
     ):
         super().__init__()
         self.model = diffusion_model
@@ -123,6 +124,8 @@ class Trainer(object):
 
         self.bucket = bucket
         self.n_reference = n_reference
+        # 若设置，proxy 权重保存到该目录（用于多任务时为各任务单独训练 proxy）
+        self.proxy_save_prefix = proxy_save_prefix
 
         self.reset_parameters()
         self.step = 0
@@ -328,7 +331,8 @@ class Trainer(object):
             'step': self.proxy_step,
             'model': self.proxy_model.state_dict(),
         }
-        savepath = os.path.join(logger.prefix, 'proxy_checkpoint')
+        prefix = self.proxy_save_prefix if self.proxy_save_prefix is not None else logger.prefix
+        savepath = os.path.join(prefix, 'proxy_checkpoint')
         os.makedirs(savepath, exist_ok=True)
         # logger.save_torch(data, savepath)
         if self.save_checkpoints:

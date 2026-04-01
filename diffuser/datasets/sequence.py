@@ -11,6 +11,8 @@ from .normalization import DatasetNormalizer, LimitsNormalizer, SafeLimitsNormal
 from .buffer import ReplayBuffer
 
 import design_bench
+from diffuser.utils.soo_gtopx import GTOPX_TASK_NAMES, load_gtopx_offline_arrays, is_gtopx_task
+
 from design_bench.datasets.discrete.tf_bind_8_dataset import TFBind8Dataset
 from design_bench.datasets.discrete.tf_bind_10_dataset import TFBind10Dataset
 from design_bench.datasets.continuous.ant_morphology_dataset import AntMorphologyDataset
@@ -39,7 +41,19 @@ TASKNAME2MAX_SAMPLES ={
     'tfbind8': 32898,
     'tfbind10': 50000,
     'superconductor': 17014,
+    'gtopx2': 22000,
+    'gtopx3': 18000,
+    'gtopx4': 26000,
+    'gtopx6': 22000,
 }
+
+# construct_trajectories / CLI 校验：Design-Bench 任务名 ∪ SOO GTOPX 短名（须在 TASKNAME2* 定义之后）
+SUPPORTED_TASKS = (
+    set(TASKNAME2TASK.keys())
+    | set(TASKNAME2FULL.keys())
+    | set(TASKNAME2MAX_SAMPLES.keys())
+    | GTOPX_TASK_NAMES
+)
 
 RewardBatch = namedtuple('Batch', 'trajectories conditions returns')
 Batch = namedtuple('Batch', 'trajectories conditions')
@@ -274,7 +288,7 @@ class PointRegretDataset(torch.utils.data.Dataset):
             task_indices = None
             tasks_list = None
         elif len(data_obj) == 7:
-            # 多任务数据格式
+            # 多任务数据格式（tasks_list 顺序决定 task 索引 0..K-1）
             points, values, pointwise_regret, cumulative_regret_to_go, timesteps, task_indices, tasks_list = data_obj
         else:
             raise ValueError(f"Unexpected number of elements in dataset file: {len(data_obj)}")
@@ -305,21 +319,28 @@ class PointRegretDataset(torch.utils.data.Dataset):
         self.normalizer_values.mins = 0.0
         self.normalizer_values.maxs = 1.0
         
-        # Task name to embedding
-        self.task_to_idx = {
-            'ant': 0,
-            'dkitty': 1,
-            'tfbind8': 2,
-            'tfbind10': 3,
-            'superconductor': 4
-        }
-        
-        # 保存任务索引信息
         self.task_indices = task_indices
-        self.tasks_list = tasks_list
+        self.tasks_list = [str(t) for t in tasks_list] if tasks_list is not None else None
         
-        # 如果提供了task_name，使用它；否则使用-1
-        self.task_idx = self.task_to_idx[task_name] if task_name is not None else -1
+        # 任务名 -> 整数标签（与混合轨迹文件中 task_indices 一致）
+        if self.tasks_list:
+            self.task_to_idx = {name: i for i, name in enumerate(self.tasks_list)}
+        else:
+            self.task_to_idx = {
+                'ant': 0,
+                'dkitty': 1,
+                'tfbind8': 2,
+                'tfbind10': 3,
+                'superconductor': 4,
+            }
+        
+        # 如果提供了 task_name，使用其索引；混合数据且 task_name 为 None 时在 __getitem__ 中按轨迹写入
+        if task_name is not None and task_name in self.task_to_idx:
+            self.task_idx = self.task_to_idx[task_name]
+        elif task_name is not None:
+            self.task_idx = -1
+        else:
+            self.task_idx = -1
     
     def __len__(self):
         return self.num_trajectories * (self.size_of_trajectory - self.block_size + 1)
@@ -368,22 +389,31 @@ class PointRegretDataset(torch.utils.data.Dataset):
     
 
 class ZipDataset(torch.utils.data.Dataset):
-    def __init__(self, dataset, frac=1.0, sigma=0.0):
-        task = design_bench.make(TASKNAME2TASK[dataset],
-                                 dataset_kwargs=dict(
-                                 max_samples=int(TASKNAME2MAX_SAMPLES[dataset] * frac),
-                                 distribution=None,
-                                 min_percentile=0)
-                                )
-        
-        if dataset.startswith("tfbind"):
-            task.map_to_logits()
-        self.data_x = torch.from_numpy(task.x.reshape(task.x.shape[0], -1)).float()
-        self.data_y = torch.from_numpy(task.y).float()
-        
-        fully_observed_task = TASKNAME2FULL[dataset]()
-        self.data_y = (self.data_y - fully_observed_task.y.min()) / (fully_observed_task.y.max() - fully_observed_task.y.min())
-        self.data_y = np.clip(self.data_y + np.random.randn(*self.data_y.shape) * sigma, 0.0, 1.0).float()
+    def __init__(self, dataset, frac=1.0, sigma=0.0, soo_seed: int = 1):
+        if is_gtopx_task(dataset):
+            x, y_norm, _, _ = load_gtopx_offline_arrays(
+                dataset, frac=frac, sigma=sigma, seed=soo_seed
+            )
+            self.data_x = torch.from_numpy(x).float()
+            self.data_y = torch.from_numpy(np.asarray(y_norm, dtype=np.float32)).float()
+            if self.data_y.ndim == 1:
+                self.data_y = self.data_y.unsqueeze(-1)
+        else:
+            task = design_bench.make(TASKNAME2TASK[dataset],
+                                     dataset_kwargs=dict(
+                                     max_samples=int(TASKNAME2MAX_SAMPLES[dataset] * frac),
+                                     distribution=None,
+                                     min_percentile=0)
+                                    )
+            
+            if dataset.startswith("tfbind"):
+                task.map_to_logits()
+            self.data_x = torch.from_numpy(task.x.reshape(task.x.shape[0], -1)).float()
+            self.data_y = torch.from_numpy(task.y).float()
+            
+            fully_observed_task = TASKNAME2FULL[dataset]()
+            self.data_y = (self.data_y - fully_observed_task.y.min()) / (fully_observed_task.y.max() - fully_observed_task.y.min())
+            self.data_y = np.clip(self.data_y + np.random.randn(*self.data_y.shape) * sigma, 0.0, 1.0).float()
         
         self.normalizer = SafeLimitsNormalizer(self.data_x)
         self.original_observation_dim = self.data_x.shape[1]

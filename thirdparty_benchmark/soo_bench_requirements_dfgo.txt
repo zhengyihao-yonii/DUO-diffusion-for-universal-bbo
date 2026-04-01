@@ -1,0 +1,13 @@
+# GTGdfgo：与 Python 3.8 + 常见国内镜像兼容的 SOO-Bench 依赖（核心 OfflineTask 仅需 numpy/torch，通常已由主环境提供）。
+# 上游 requirements.txt 使用 tensorflow_probability==0.24，仅支持 Python ≥3.9；此处将 tfp 固定为 3.8 可用版本。
+# 若你使用 Python 3.9+ 且需要与上游完全一致，可改用 SOO-Bench/requirements.txt 原版。
+
+transformers
+botorch<0.9
+tensorflow
+tensorflow_probability==0.21.0
+higher
+h5py
+tf_keras
+numpy<1.24
+cma
