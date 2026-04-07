@@ -11,10 +11,10 @@ if __name__ == '__main__':
     
     # 多任务评估支持
     parser.add_argument("--train_tasks", type=str, default="dkitty", help="训练数据集列表，用逗号分隔")
-    parser.add_argument("--eval_task", type=str, default="", help="评估任务，如果不指定则使用train_tasks的第一个任务")
+    parser.add_argument("--eval_task", type=str, default="", help="仅评单任务时指定；多任务默认评全部 train_tasks 时可不填（此时若只评一个任务需配合 --eval_only_first）")
     parser.add_argument("--eval_all_tasks", action="store_true", help="多任务时依次评估 train_tasks 中每个任务（多任务时默认开启，可用 --eval_only_first 关闭）")
     parser.add_argument("--eval_only_first", action="store_true", help="多任务时只评估 --eval_task 指定的单个任务，不跑全部训练任务")
-    parser.add_argument("--checkpoint_eval_task", type=str, default="", help="多任务模型 checkpoint 所在 RUN.prefix 中的 eval 后缀（需与训练时一致）；默认同 train_tasks 首任务")
+    parser.add_argument("--checkpoint_eval_task", type=str, default="", help="已弃用：checkpoint 路径不再含 eval 后缀，忽略即可")
     parser.add_argument("--task", type=str, default="", help="兼容旧版API，将被废弃")
     
     # 其他评估参数
@@ -36,11 +36,19 @@ if __name__ == '__main__':
     if args.task:
         args.train_tasks = args.task
         args.eval_task = args.task
+    from diffuser.utils.multitask_canon import canonical_train_tasks_csv, multitask_path_token
+
+    train_tasks_list = [t.strip() for t in args.train_tasks.split(",") if t.strip()]
+    if len(train_tasks_list) > 1:
+        args.train_tasks = canonical_train_tasks_csv(args.train_tasks)
+        train_tasks_list = [t.strip() for t in args.train_tasks.split(",") if t.strip()]
     if not args.eval_task:
-        args.eval_task = args.train_tasks.split(',')[0].strip()
-    
-    train_tasks_list = [t.strip() for t in args.train_tasks.split(',') if t.strip()]
-    train_tasks_str = '_'.join(train_tasks_list)
+        args.eval_task = train_tasks_list[0]
+    train_tasks_str = (
+        multitask_path_token(args.train_tasks)
+        if len(train_tasks_list) > 1
+        else train_tasks_list[0]
+    )
     # 多任务时默认评估全部训练任务（与 run_multitask 预期一致）；仅评一个任务时用 --eval_only_first
     if len(train_tasks_list) > 1:
         if args.eval_only_first:
@@ -48,11 +56,10 @@ if __name__ == '__main__':
         elif not args.eval_all_tasks:
             args.eval_all_tasks = True
     
-    # 多任务模式下的数据路径和运行前缀（与 train.py 一致）
-    ck_eval = args.checkpoint_eval_task or args.train_tasks.split(",")[0].strip()
+    # 多任务模式下的数据路径和运行前缀（与 train.py 一致；与评 ant/dkitty 无关）
     if len(train_tasks_list) > 1:
         args.data_path = f'generated_datasets/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}_vae_latent32_train.p'
-        RUN.prefix = f"trained_models/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}_eval{ck_eval}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}/seed{args.seed}/"
+        RUN.prefix = f"trained_models/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}/seed{args.seed}/"
     else:
         # 单任务模式，保持原有逻辑
         task_name = train_tasks_list[0]

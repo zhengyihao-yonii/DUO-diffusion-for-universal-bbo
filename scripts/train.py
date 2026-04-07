@@ -173,11 +173,17 @@ def main(**deps):
 
     RUN._update(deps)
     print(deps)
-    
-    # 确定使用哪个配置文件
-    # 对于多任务训练，使用主任务的配置文件，默认为dkitty
+
+    from diffuser.utils.multitask_canon import canonical_train_tasks_csv
+
+    if 'train_tasks' in deps and ',' in str(deps.get('train_tasks', '')):
+        deps['train_tasks'] = canonical_train_tasks_csv(deps['train_tasks'])
+
+    # 确定使用哪个配置文件（多任务：与 eval 无关，用 train_tasks 字典序首任务）
     task_to_use = deps.get('eval_task', deps.get('task', 'dkitty'))
-    
+    if 'train_tasks' in deps and ',' in str(deps.get('train_tasks', '')):
+        task_to_use = deps['train_tasks'].split(',')[0].strip()
+
     if task_to_use == 'ant':
         from config.ant_config import Config
     elif task_to_use == 'dkitty':
@@ -199,11 +205,13 @@ def main(**deps):
     # 检查是否为多任务模式
     if 'train_tasks' in deps and ',' in deps['train_tasks']:
         Config.is_multitask = True
-        # 将训练任务列表转换为数组
-        Config.train_tasks_list = deps['train_tasks'].split(',')
+        # 将训练任务列表转换为数组（与路径 multi_<字典序>_ 一致）
+        Config.train_tasks_list = [
+            t.strip() for t in deps['train_tasks'].split(',') if t.strip()
+        ]
         print(f"📊 多任务训练模式启用 📊")
         print(f"📋 训练任务列表: {Config.train_tasks_list}")
-        print(f"🎯 评估任务: {Config.eval_task}")
+        print(f"🎯 Config 锚点任务（与 checkpoint 路径无关）: {task_to_use}")
         print(f"🔍 任务数量: {len(Config.train_tasks_list)}")
     else:
         Config.is_multitask = False
@@ -214,6 +222,11 @@ def main(**deps):
             Config.train_tasks_list = [Config.dataset]
         print(f"📊 单任务训练模式启用 📊")
         print(f"📋 训练任务: {Config.train_tasks_list[0]}")
+
+    # gtopx 等共用 gtopx_config 时类默认 dataset 仍为 gtopx2；必须与真实任务名一致，
+    # 否则 ZipDataset / load_gtopx_offline_arrays 维数错误，evaluate 会与 checkpoint 不一致。
+    if not getattr(Config, "is_multitask", False) and Config.train_tasks_list:
+        Config.dataset = Config.train_tasks_list[0]
 
     # logger.remove('*.pkl')
     # logger.remove("traceback.err")

@@ -22,11 +22,22 @@
 #                    （需与之前成功训练时使用相同的 task/num_runs/START_SEED/参数，以便找到 checkpoint）
 #   BATCH_RUN        可选，仅 EVAL_ONLY=1 时生效：指定要重评的批次号 N（runN_seed*）。不设则使用
 #                    $RESULTS/.gtg_pipeline_batch 中记录的「上一轮完整流水线」批次号。
+#   CUDA_VISIBLE_DEVICES / GPU_ID  见脚本中部「GPU」注释与 scripts/gpu_env.sh。
 #
 # 目录命名：同一次 bash 内为 run{N}_seed{s},{s+1},...（仅 seed 变）；N 仅在「又一次完整 bash（非 EVAL_ONLY）」
 #          结束后 +1，并写入 .gtg_pipeline_batch。无该文件时会根据已有 run*_seed* 推断最大批次。
+#
+# GPU（多卡 / 避免 OOM）:
+#   - 推荐: 运行前 export CUDA_VISIBLE_DEVICES=1
+#   - 或: GPU_ID=2 bash run_singletask.sh ...
+#   - 或: 取消注释下一行:
+# export CUDA_VISIBLE_DEVICES=0
 
 set -uo pipefail
+
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/gpu_env.sh
+source "$_SCRIPT_DIR/scripts/gpu_env.sh"
 
 # 扫描 RESULTS 下 run 前缀的最大批次号（run123_seed456 -> 123）
 _max_batch_from_dirs() {

@@ -64,6 +64,23 @@ python train.py --task <task> --horizon <horizon> --seed <seed>
 python evaluate.py --task <task> --horizon <horizon> --ctx_len <ctx_len> --alpha <alpha> --seed <seed>
 ```
 
+### Multitask checkpoints and evaluation
+
+- Training and evaluation share the same directory: `trained_models/multi_<tasks>_frac..._sigma.../` (no `_eval<task>` suffix). The same weights are used whether you evaluate on ant, dkitty, or all tasks.
+- `run_multitask.sh` defaults to **evaluating every task in `train_tasks`**. To evaluate only one task, set `EVAL_ALL=0` (and optionally `EVAL_SINGLE_TASK=dkitty`).
+- If you have old checkpoints under `..._evaldkitty/` or `..._evalant/`, move or symlink the inner `seed*/` tree into the path **without** the `_eval*` segment.
+
+### Multi-GPU servers
+
+Pipeline scripts `run_multitask.sh` and `run_singletask.sh` source `scripts/gpu_env.sh`. To pin a **physical** GPU and reduce OOM from multiple jobs sharing GPU 0:
+
+```bash
+export CUDA_VISIBLE_DEVICES=2
+bash run_multitask.sh "dkitty,ant" 3 1000 50 0.05 dkitty 64 1.0 0.0
+```
+
+Or in one line: `GPU_ID=2 bash run_multitask.sh ...` (only if `CUDA_VISIBLE_DEVICES` is unset). You can also uncomment `export CUDA_VISIBLE_DEVICES=...` near the top of those run scripts.
+
 ### Additional Experiments
 You can run the following commands to train and evaluate our method on practical settings of Design-Bench tasks.
 

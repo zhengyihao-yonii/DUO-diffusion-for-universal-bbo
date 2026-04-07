@@ -130,6 +130,20 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
     action_dim = dataset.action_dim
     print(f"[{eval_task}] observation_dim={observation_dim}, action_dim={action_dim}")
 
+    # 与 ZipDataset 一致的离线训练子集上 y 的最优值（非全局最优；亦非上面 DesignBench 仅用于归一化的全库 min/max）
+    from diffuser.utils.offline_train_best import offline_training_best_y
+
+    _y_tr_best = offline_training_best_y(
+        eval_task,
+        frac=float(Config.frac),
+        sigma=float(Config.sigma),
+        seed=int(getattr(Config, "seed", 1)),
+    )
+    logger.print(
+        f"[{eval_task}] offline_train_best_y: {_y_tr_best}",
+        color="green",
+    )
+
     vae = None
     latent_dim = observation_dim
     vae_input_output_dim = getattr(Config, 'fixed_dim', 128)
@@ -386,8 +400,14 @@ def evaluate(**deps):
     RUN._update(deps)
     print(deps)
 
+    from diffuser.utils.multitask_canon import canonical_train_tasks_csv
+
     train_tasks = deps.get('train_tasks', deps.get('task', 'dkitty'))
-    train_tasks_list = [t.strip() for t in str(train_tasks).split(',') if t.strip()]
+    train_tasks = str(train_tasks)
+    if ',' in train_tasks:
+        train_tasks = canonical_train_tasks_csv(train_tasks)
+        deps['train_tasks'] = train_tasks
+    train_tasks_list = [t.strip() for t in train_tasks.split(',') if t.strip()]
     deps['train_tasks_list'] = train_tasks_list
     is_multitask = len(train_tasks_list) > 1
     deps['is_multitask'] = is_multitask
@@ -398,7 +418,8 @@ def evaluate(**deps):
         default_eval = default_eval.split(',')[0].strip()
     tasks_to_eval = train_tasks_list if (is_multitask and eval_all_tasks) else [default_eval]
 
-    ck_task = deps.get('checkpoint_eval_task') or train_tasks_list[0]
+    # 多任务 checkpoint 与「评谁」无关：配置锚点用字典序首任务（与 train.py 一致）
+    ck_task = train_tasks_list[0]
     Config = _import_config(ck_task)
     Config._update(deps)
     Config.eval_task = ck_task
@@ -406,7 +427,7 @@ def evaluate(**deps):
     Config.is_multitask = is_multitask
 
     logger.log_params(Config=vars(Config), RUN=vars(RUN))
-    Config.device = 'cuda'
+    # 不覆盖 Config.device：与 train 一致，尊重 --device 及 CUDA_VISIBLE_DEVICES 下的默认 cuda
 
     run_name = (
         f"multi_eval_{'_'.join(tasks_to_eval)}_{Config.n_traj}x{Config.horizon}"

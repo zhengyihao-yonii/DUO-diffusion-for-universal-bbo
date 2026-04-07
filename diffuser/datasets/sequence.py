@@ -391,7 +391,7 @@ class PointRegretDataset(torch.utils.data.Dataset):
 class ZipDataset(torch.utils.data.Dataset):
     def __init__(self, dataset, frac=1.0, sigma=0.0, soo_seed: int = 1):
         if is_gtopx_task(dataset):
-            x, y_norm, _, _ = load_gtopx_offline_arrays(
+            x, y_norm, _, _, _ = load_gtopx_offline_arrays(
                 dataset, frac=frac, sigma=sigma, seed=soo_seed
             )
             self.data_x = torch.from_numpy(x).float()

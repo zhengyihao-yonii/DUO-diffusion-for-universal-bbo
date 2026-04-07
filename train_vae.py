@@ -67,15 +67,16 @@ def main(args):
     soo_seed = int(getattr(args, 'seed', 0))
 
     if is_multitask:
-        # 多任务模式
-        task_list = args.tasks.split(',')
+        # 多任务模式（与 construct_trajectories / multi_* 路径一致：字典序）
+        task_list = sorted(t.strip() for t in args.tasks.split(",") if t.strip())
+        args.tasks = ",".join(task_list)
         print(f"多任务模式，加载任务列表: {task_list}")
         
         all_data = []
         for task_name in tqdm(task_list, desc="加载任务数据"):
             print(f"加载任务: {task_name}")
             if is_gtopx_task(task_name):
-                x_np, _, _, _ = load_gtopx_offline_arrays(
+                x_np, _, _, _, _ = load_gtopx_offline_arrays(
                     task_name, frac=args.frac, sigma=0.0, seed=soo_seed
                 )
                 data_x = torch.from_numpy(x_np).float()
@@ -108,7 +109,7 @@ def main(args):
         
         print(f"单任务模式，加载任务: {args.task}")
         if is_gtopx_task(args.task):
-            x_np, _, _, _ = load_gtopx_offline_arrays(
+            x_np, _, _, _, _ = load_gtopx_offline_arrays(
                 args.task, frac=args.frac, sigma=0.0, seed=soo_seed
             )
             data_x = torch.from_numpy(x_np).float()

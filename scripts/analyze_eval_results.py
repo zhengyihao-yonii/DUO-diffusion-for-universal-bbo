@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Aggregate evaluate.log metrics across runs (run*_seed* / run*) per experiment,
-then compare GTGdfgo vs GTG results in one report (CSV + Markdown).
+then compare GTGdfgo vs GTG results in one report (CSV + Markdown + LaTeX table).
 
 Metrics: max_ep_reward -> max, nmax_ep_reward -> nmax (mean ± std over runs).
 """
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -16,13 +17,16 @@ from typing import Any
 
 import numpy as np
 
-ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+# CSI: color (…m) and cursor / erase (…F, …J, …), etc.
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
+# Task names are alphanumeric/underscore (dkitty, ant, gtopx2); avoid matching
+# progress bars like "[########" or broken escapes after partial strip.
 BRACKET_MAX = re.compile(
-    r"\[([^\]]+)\]\s+max_ep_reward:\s*([-\d.eE+]+(?:e[-+]?\d+)?|nan|inf)"
+    r"\[([a-zA-Z0-9_]+)\]\s+max_ep_reward:\s*([-\d.eE+]+(?:e[-+]?\d+)?|nan|inf)"
 )
 BRACKET_NMAX = re.compile(
-    r"\[([^\]]+)\]\s+nmax_ep_reward:\s*([-\d.eE+]+(?:e[-+]?\d+)?|nan|inf)"
+    r"\[([a-zA-Z0-9_]+)\]\s+nmax_ep_reward:\s*([-\d.eE+]+(?:e[-+]?\d+)?|nan|inf)"
 )
 # (?<!n) avoids matching the suffix "max_ep_reward" inside "nmax_ep_reward"
 PLAIN_MAX = re.compile(
@@ -30,6 +34,15 @@ PLAIN_MAX = re.compile(
 )
 PLAIN_NMAX = re.compile(
     r"nmax_ep_reward:\s*([-\d.eE+]+(?:e[-+]?\d+)?|nan|inf)"
+)
+
+# One line in evaluate.log: Task name: gtopx2 optima: 1 Dataset min/max: a/b
+TASK_DATASET_LINE = re.compile(
+    r"Task name:\s*(\S+)[^\n]*Dataset min/max:\s*([-\d.eE+]+)/([-\d.eE+]+)"
+)
+# evaluate.py 打印：与训练子集一致的离线最优 y（优先用于 D(best) 列）
+OFFLINE_TRAIN_BEST_LINE = re.compile(
+    r"\[([a-zA-Z0-9_]+)\]\s+offline_train_best_y:\s*([-\d.eE+]+(?:e[-+]?\d+)?|nan|inf)"
 )
 
 
@@ -209,6 +222,159 @@ def build_comparison_rows(
 
 DECIMALS = 3
 
+# (task_key, LaTeX row label, single-task experiment directory under results/)
+LATEX_TASK_ROWS: list[tuple[str, str, str]] = [
+    ("ant", "Ant", "ant_multiple_runs"),
+    ("dkitty", "D'Kitty", "dkitty_multiple_runs"),
+    ("tfbind8", "TF Bind 8", "tfbind8_multiple_runs"),
+    ("tfbind10", "TF Bind 10", "tfbind10_multiple_runs"),
+    ("gtopx2", "GTOPX 2", "gtopx2_multiple_runs"),
+    ("gtopx3", "GTOPX 3", "gtopx3_multiple_runs"),
+    ("gtopx4", "GTOPX 4", "gtopx4_multiple_runs"),
+    ("gtopx6", "GTOPX 6", "gtopx6_multiple_runs"),
+]
+
+# Multitask experiment dirs to fill the last column (first exp containing the task wins)
+LATEX_MULTITASK_EXPS: list[str] = [
+    "multitask_ant_dkitty",
+]
+
+
+def parse_dataset_best_raw(text: str, task_key: str) -> float | None:
+    """Fallback: DesignBenchFunctionWrapper 打印的全库 y 范围；max(min,max) 通常等于全库最优 y。"""
+    for m in TASK_DATASET_LINE.finditer(text):
+        if m.group(1) != task_key:
+            continue
+        lo, hi = _safe_float(m.group(2)), _safe_float(m.group(3))
+        return max(lo, hi)
+    return None
+
+
+def parse_offline_train_best_y(text: str, task_key: str) -> float | None:
+    """与训练数据子集一致的最优 y（新 evaluate 会打印）。"""
+    last: float | None = None
+    for m in OFFLINE_TRAIN_BEST_LINE.finditer(text):
+        if m.group(1) != task_key:
+            continue
+        last = _safe_float(m.group(2))
+    return last
+
+
+def read_dataset_best_from_experiment(
+    results_root: Path, exp_name: str, task_key: str
+) -> float | None:
+    exp = results_root / exp_name
+    if not exp.is_dir():
+        return None
+    for evaluate_log in sorted(exp.glob("*/evaluate.log")):
+        text = strip_ansi(
+            evaluate_log.read_text(encoding="utf-8", errors="replace")
+        )
+        v = parse_offline_train_best_y(text, task_key)
+        if v is not None:
+            return v
+    for evaluate_log in sorted(exp.glob("*/evaluate.log")):
+        text = strip_ansi(
+            evaluate_log.read_text(encoding="utf-8", errors="replace")
+        )
+        v = parse_dataset_best_raw(text, task_key)
+        if v is not None:
+            return v
+    return None
+
+
+def fmt_pm_latex(m: Any, s: Any) -> str:
+    """Un-normalized max: mean $\\pm$ std for LaTeX math mode."""
+    if m == "" or m is None:
+        return "--"
+    try:
+        mf, sf = float(m), float(s)
+    except (TypeError, ValueError):
+        return "--"
+    if np.isnan(mf):
+        return "nan"
+    if sf and not np.isnan(sf):
+        return rf"{mf:.{DECIMALS}f} $\pm$ {sf:.{DECIMALS}f}"
+    return rf"{mf:.{DECIMALS}f} $\pm$ {0:.{DECIMALS}f}"
+
+
+def stats_cell_latex(
+    bucket: dict[str, dict[str, Any]], exp: str, task_key: str
+) -> str:
+    exp_tasks = bucket.get(exp)
+    if not exp_tasks:
+        return "--"
+    st = exp_tasks.get(task_key)
+    if not st:
+        return "--"
+    return fmt_pm_latex(st.get("max_mean"), st.get("max_std"))
+
+
+def multitask_cell_latex(
+    gtgdfgo: dict[str, dict[str, dict[str, Any]]], task_key: str
+) -> str:
+    for exp in LATEX_MULTITASK_EXPS:
+        cell = stats_cell_latex(gtgdfgo, exp, task_key)
+        if cell != "--":
+            return cell
+    return "--"
+
+
+def d_best_cell(
+    gtgdfgo_root: Path,
+    exp_name: str,
+    task_key: str,
+    overrides: dict[str, float],
+) -> str:
+    if task_key in overrides:
+        return f"{overrides[task_key]:.{DECIMALS}f}"
+    v = read_dataset_best_from_experiment(gtgdfgo_root, exp_name, task_key)
+    if v is None:
+        return "--"
+    return f"{v:.{DECIMALS}f}"
+
+
+def write_latex(
+    path: Path,
+    gtgdfgo_root: Path,
+    gtg: dict[str, dict[str, dict[str, Any]]],
+    gtgdfgo: dict[str, dict[str, dict[str, Any]]],
+    d_best_overrides: dict[str, float],
+    caption: str,
+    label: str,
+) -> None:
+    lines = [
+        r"% Requires: \usepackage{booktabs} (and graphicx for \resizebox).",
+        r"\begin{table*}[t!]",
+        rf"\caption{{{caption}}}",
+        r"\vspace{0.3em}",
+        r"\centering",
+        r"\resizebox{0.75\linewidth}{!}{",
+        r"\begin{tabular}{l|c|ccc}",
+        r"\toprule",
+        r"Task & $\mathcal{D}$(best) & GTG & GTGdfgo (single) & GTGdfgo (multi) \\",
+        r"\midrule",
+    ]
+    for task_key, latex_name, exp_name in LATEX_TASK_ROWS:
+        db = d_best_cell(gtgdfgo_root, exp_name, task_key, d_best_overrides)
+        gtg_c = stats_cell_latex(gtg, exp_name, task_key)
+        g1 = stats_cell_latex(gtgdfgo, exp_name, task_key)
+        g2 = multitask_cell_latex(gtgdfgo, task_key)
+        lines.append(
+            f"{latex_name} & {db} & {gtg_c} & {g1} & {g2} \\\\"
+        )
+    lines.extend(
+        [
+            r"\bottomrule",
+            r"\end{tabular}",
+            r"}",
+            rf"\label{{{label}}}",
+            r"\end{table*}",
+            "",
+        ]
+    )
+    path.write_text("\n".join(lines), encoding="utf-8")
+
 
 def _round_csv_value(key: str, v: Any) -> Any:
     if key.endswith(("_mean", "_std")) and isinstance(v, (int, float)) and not isinstance(v, bool):
@@ -299,11 +465,42 @@ def main() -> None:
         default=None,
         help="输出前缀（默认写入 GTGdfgo/results/eval_comparison）",
     )
+    ap.add_argument(
+        "--no-latex",
+        action="store_true",
+        help="不生成 LaTeX 表（.tex）",
+    )
+    ap.add_argument(
+        "--d-best-json",
+        type=Path,
+        default=None,
+        help="可选 JSON：覆盖各 task key 的 $\\mathcal{D}$(best)，如 {\"ant\": 165.326, \"dkitty\": 199.363}",
+    )
+    ap.add_argument(
+        "--latex-caption",
+        default=(
+            "Un-normalized max scores (mean $\\pm$ std over runs). "
+            "$\\mathcal{D}$(best): best reward $y$ in the offline training subset "
+            "(same as training ZipDataset; printed as \\texttt{offline\\_train\\_best\\_y} in evaluate). "
+            "Older logs fall back to the full-pool min/max line; use \\texttt{--d-best-json} to override."
+        ),
+        help="LaTeX \\caption{...} 内容（需自行转义特殊字符）",
+    )
+    ap.add_argument(
+        "--latex-label",
+        default="tab:gtg-gtgdfgo-eval",
+        help="LaTeX \\label{...}",
+    )
     args = ap.parse_args()
 
     out_base = args.output
     if out_base is None:
         out_base = Path(__file__).resolve().parent.parent / "results" / "eval_comparison"
+
+    d_best_overrides: dict[str, float] = {}
+    if args.d_best_json is not None and args.d_best_json.is_file():
+        raw = json.loads(args.d_best_json.read_text(encoding="utf-8"))
+        d_best_overrides = {str(k): float(v) for k, v in raw.items()}
 
     gtgdfgo = scan_results_root(args.gtgdfgo)
     gtg = scan_results_root(args.gtg)
@@ -318,6 +515,18 @@ def main() -> None:
 
     print(f"Wrote {csv_path}")
     print(f"Wrote {md_path}")
+    if not args.no_latex:
+        tex_path = out_base.with_suffix(".tex")
+        write_latex(
+            tex_path,
+            args.gtgdfgo,
+            gtg,
+            gtgdfgo,
+            d_best_overrides,
+            caption=args.latex_caption,
+            label=args.latex_label,
+        )
+        print(f"Wrote {tex_path}")
     print(f"GTGdfgo experiments: {len(gtgdfgo)}, GTG experiments: {len(gtg)}, comparison rows: {len(rows)}")
 
 

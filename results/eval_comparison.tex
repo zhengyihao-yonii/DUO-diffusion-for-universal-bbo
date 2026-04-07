@@ -1,0 +1,23 @@
+% Requires: \usepackage{booktabs} (and graphicx for \resizebox).
+\begin{table*}[t!]
+\caption{Un-normalized max scores (mean $\pm$ std over runs). $\mathcal{D}$(best): best reward $y$ in the offline training subset (same as training ZipDataset; printed as \texttt{offline\_train\_best\_y} in evaluate). Older logs fall back to the full-pool min/max line; use \texttt{--d-best-json} to override.}
+\vspace{0.3em}
+\centering
+\resizebox{0.75\linewidth}{!}{
+\begin{tabular}{l|c|ccc}
+\toprule
+Task & $\mathcal{D}$(best) & GTG & GTGdfgo (single) & GTGdfgo (multi) \\
+\midrule
+Ant & 165.326 & 452.330 $\pm$ 61.502 & 523.935 $\pm$ 55.443 & 586.691 $\pm$ 0.000 \\
+D'Kitty & 199.363 & 264.857 $\pm$ 17.571 & 250.007 $\pm$ 14.505 & 289.591 $\pm$ 0.000 \\
+TF Bind 8 & 0.439 & 0.934 $\pm$ 0.030 & 0.954 $\pm$ 0.019 & -- \\
+TF Bind 10 & 0.005 & 0.632 $\pm$ 0.106 & 0.626 $\pm$ 0.148 & -- \\
+GTOPX 2 & -196.663 & -72.163 $\pm$ 8.495 & -102.223 $\pm$ 12.230 & -- \\
+GTOPX 3 & -152.364 & -53.866 $\pm$ 9.877 & -51.762 $\pm$ 3.893 & -- \\
+GTOPX 4 & -216.709 & -72.749 $\pm$ 6.632 & -68.361 $\pm$ 13.480 & -- \\
+GTOPX 6 & -111.666 & -55.834 $\pm$ 9.655 & -49.386 $\pm$ 8.267 & -- \\
+\bottomrule
+\end{tabular}
+}
+\label{tab:gtg-gtgdfgo-eval}
+\end{table*}

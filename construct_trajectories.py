@@ -265,7 +265,7 @@ def construct_trajectories(tasks_list, frac=1.0, sigma=0.0, seed=0, n_traj=None,
         print(f"开始加载单任务数据: {task_name}")
         
         if is_gtopx_task(task_name):
-            data_x_np, data_y_np, y_full_min, y_full_max = load_gtopx_offline_arrays(
+            data_x_np, data_y_np, y_full_min, y_full_max, _ = load_gtopx_offline_arrays(
                 task_name, frac=frac, sigma=sigma, seed=seed
             )
             data_x = torch.tensor(data_x_np, dtype=torch.float32)
@@ -672,16 +672,18 @@ if __name__ == "__main__":
     if args.task:
         args.tasks = args.task
     
-    # 解析任务列表
-    tasks_list = args.tasks.split(',')
-    
+    # 解析任务列表（去空白；多任务时字典序排序，与 train/evaluate 的 multi_* 路径一致）
+    tasks_list = [t.strip() for t in args.tasks.split(',') if t.strip()]
+
     # 验证任务列表中的任务是否都受支持
     for task in tasks_list:
         if task not in SUPPORTED_TASKS:
             print(f"警告: 任务 '{task}' 不被支持，将被忽略")
-    
+
     # 过滤出有效的任务
     tasks_list = [task for task in tasks_list if task in SUPPORTED_TASKS]
+    if len(tasks_list) > 1:
+        tasks_list = sorted(tasks_list)
     
     if not tasks_list:
         print("错误: 没有有效的任务列表")

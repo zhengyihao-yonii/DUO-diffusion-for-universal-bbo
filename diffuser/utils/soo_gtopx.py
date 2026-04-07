@@ -73,10 +73,11 @@ def load_gtopx_offline_arrays(
     seed: int = 1,
     percentile_low: int = 25,
     percentile_high: int = 75,
-) -> Tuple[np.ndarray, np.ndarray, float, float]:
+) -> Tuple[np.ndarray, np.ndarray, float, float, float]:
     """
-    返回 (x, y_normalized_01, y_min_ref, y_max_ref)。
+    返回 (x, y_normalized_01, y_min_ref, y_max_ref, y_train_subset_max)。
     y 用全分位样本上的 min/max 归一化到 [0,1]，与 Design-Bench + ZipDataset 行为一致。
+    y_train_subset_max 为与训练相同的子集（percentile+frac 采样后）上原始 y 的最大值，即「离线训练集最优」。
     """
     if task_name not in TASKNAME_TO_GTOPX_BENCHMARK:
         raise KeyError(f"Unknown GTOPX task short name: {task_name}")
@@ -105,6 +106,7 @@ def load_gtopx_offline_arrays(
 
     denom = y_max - y_min + 1e-12
     y_norm = (y.squeeze(-1) - y_min) / denom
+    y_subset_max = float(np.max(y))
     if sigma > 0.0:
         rng = np.random.RandomState(seed + 17)
         y_norm = np.clip(
@@ -112,7 +114,7 @@ def load_gtopx_offline_arrays(
             0.0,
             1.0,
         )
-    return x, y_norm.astype(np.float32), y_min, y_max
+    return x, y_norm.astype(np.float32), y_min, y_max, y_subset_max
 
 
 class GtopxOracleTask:

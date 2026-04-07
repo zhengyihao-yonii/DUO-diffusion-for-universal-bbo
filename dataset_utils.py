@@ -54,7 +54,7 @@ class DesignBenchDatasetWrapper:
             self.original_dim = TASKNAME2DIM[dataset_name]
             if self.fixed_length is None:
                 self.fixed_length = self.original_dim
-            x, y_norm, _, _ = load_gtopx_offline_arrays(
+            x, y_norm, _, _, _ = load_gtopx_offline_arrays(
                 dataset_name, frac=frac, sigma=sigma, seed=42
             )
             self.x = x
