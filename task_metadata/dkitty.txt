@@ -1,0 +1,4 @@
+Task: D'Kitty morphology (Design-Bench, continuous control).
+Goal: find a quadruped body plan (morphology) that maximizes forward locomotion performance in simulation.
+Design space: 56 continuous parameters controlling link lengths, widths, and related morphological attributes.
+Reward: locomotion score; higher is better. Used as a standard offline optimization benchmark with a fixed offline dataset of (design, reward) pairs.

@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
+from typing import Optional
 import pdb
 import time
 
@@ -15,21 +16,136 @@ from .helpers import (
 
 
 def _task_idx_to_one_hot(task_idx, model):
-    """长整型 task 索引 -> one-hot；类别数优先取 model.num_tasks（与训练时任务数一致）。"""
+    """
+    task 类别索引 -> [batch, num_tasks] one-hot，供 task_mlp(nn.Linear(num_tasks, dim)) 使用。
+    已展开的 one-hot 则原样返回。
+    """
     if task_idx is None:
         return None
-    if task_idx.dim() == 1 and task_idx.dtype == torch.long:
-        n_cls = getattr(model, 'num_tasks', None)
+    if not torch.is_tensor(task_idx):
+        task_idx = torch.as_tensor(task_idx)
+    # 已是 [B, num_tasks]
+    if task_idx.dim() == 2 and task_idx.shape[-1] > 1:
+        return task_idx.float()
+    # batchify / DataLoader 常得到 [B, 1]（对 np.array([idx]) 多了一维）
+    if task_idx.dim() == 2 and task_idx.shape[-1] == 1:
+        task_idx = task_idx.squeeze(-1)
+    if task_idx.dim() == 0:
+        task_idx = task_idx.unsqueeze(0)
+    if task_idx.dim() == 1:
+        task_idx = task_idx.long()
+        n_cls = getattr(model, "num_tasks", None)
         if n_cls is None:
             n_cls = int(task_idx.max().item()) + 1
         return F.one_hot(task_idx, num_classes=n_cls).float()
-    return task_idx
+    return task_idx.float()
+
+
+def _cond_text_embed(cond_or_state):
+    """Optional [batch, D] frozen text embedding from conditions dict (task metadata)."""
+    if not isinstance(cond_or_state, dict):
+        return None
+    return cond_or_state.get('text_embed')
+
+
+def epsilon_task_text_cfg(
+    diffusion: nn.Module,
+    x: torch.Tensor,
+    cond,
+    t,
+    returns,
+    task_idx,
+    text_embed: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """
+    Task × text 联合 classifier-free guidance（双线性形式，与 returns 的 CFG 独立）。
+    当 condition_guidance_w_task / condition_guidance_w_text 均为 0 时，等价于单次前向（全条件）。
+    """
+    m = diffusion.model
+    tc = getattr(m, "task_condition", False)
+    txc = getattr(m, "text_condition", False)
+    wt = float(getattr(diffusion, "condition_guidance_w_task", 0.0))
+    wx = float(getattr(diffusion, "condition_guidance_w_text", 0.0))
+    if not getattr(diffusion, "cfg_apply_task", True):
+        wt = 0.0
+    if not getattr(diffusion, "cfg_apply_text", True):
+        wx = 0.0
+    use_t_emb = getattr(diffusion, "sample_with_task_embedding", True)
+    use_x_emb = getattr(diffusion, "sample_with_text_embedding", True)
+    if not use_t_emb:
+        wt = 0.0
+    if not use_x_emb:
+        wx = 0.0
+
+    def fwd(ft: bool, fx: bool):
+        return diffusion.model(
+            x,
+            cond,
+            t,
+            returns,
+            task_idx=task_idx,
+            text_embed=text_embed,
+            use_dropout=False,
+            force_dropout=False,
+            force_task_dropout=ft,
+            force_text_dropout=fx,
+        )
+
+    if not tc and not txc:
+        return fwd(False, False)
+
+    ft_full = True if not use_t_emb else False
+    fx_full = True if not use_x_emb else False
+
+    if wt <= 0 and wx <= 0:
+        return fwd(ft_full, fx_full)
+
+    if tc and not txc and wt > 0:
+        e0 = fwd(True, False)
+        e1 = fwd(False, False)
+        return e0 + wt * (e1 - e0)
+
+    if not tc and txc and wx > 0:
+        e0 = fwd(False, True)
+        e1 = fwd(False, False)
+        return e0 + wx * (e1 - e0)
+
+    if tc and txc:
+        if wt > 0 and wx > 0:
+            e00 = fwd(True, True)
+            e10 = fwd(False, True)
+            e01 = fwd(True, False)
+            e11 = fwd(False, False)
+            return (
+                e00
+                + wt * (e10 - e00)
+                + wx * (e01 - e00)
+                + (wt * wx) * (e11 - e10 - e01 + e00)
+            )
+        if wt > 0 and wx <= 0:
+            e0 = fwd(True, False)
+            e1 = fwd(False, False)
+            return e0 + wt * (e1 - e0)
+        if wt <= 0 and wx > 0:
+            e0 = fwd(False, True)
+            e1 = fwd(False, False)
+            return e0 + wx * (e1 - e0)
+
+    return fwd(ft_full, fx_full)
+
 
 class GaussianDiffusion(nn.Module):
     def __init__(self, model, horizon, observation_dim, action_dim, n_timesteps=1000, n_sample_timesteps=200,
         loss_type='l1', clip_denoised=False, predict_epsilon=True,
         action_weight=1.0, loss_discount=1.0, loss_weights=None, returns_condition=False,
-        condition_guidance_w=0.1):
+        condition_guidance_w=0.1,
+        condition_guidance_w_task=0.0,
+        condition_guidance_w_text=0.0,
+        cfg_apply_task=True,
+        cfg_apply_text=True,
+        sample_with_task_embedding=True,
+        sample_with_text_embedding=True,
+    ):
         super().__init__()
         self.horizon = horizon
         self.observation_dim = observation_dim
@@ -38,6 +154,12 @@ class GaussianDiffusion(nn.Module):
         self.model = model
         self.returns_condition = returns_condition
         self.condition_guidance_w = condition_guidance_w
+        self.condition_guidance_w_task = float(condition_guidance_w_task)
+        self.condition_guidance_w_text = float(condition_guidance_w_text)
+        self.cfg_apply_task = bool(cfg_apply_task)
+        self.cfg_apply_text = bool(cfg_apply_text)
+        self.sample_with_task_embedding = bool(sample_with_task_embedding)
+        self.sample_with_text_embedding = bool(sample_with_text_embedding)
 
         betas = cosine_beta_schedule(n_timesteps)
         alphas = 1. - betas
@@ -140,14 +262,23 @@ class GaussianDiffusion(nn.Module):
         # Extract task_idx from cond if present
         task_idx = cond.get('task_idx') if isinstance(cond, dict) else None
         task_idx = _task_idx_to_one_hot(task_idx, self.model)
+        text_embed = _cond_text_embed(cond)
 
         if self.returns_condition:
-            # epsilon could be epsilon or x0 itself
-            epsilon_cond = self.model(x, cond, t, returns, task_idx, use_dropout=False)
-            epsilon_uncond = self.model(x, cond, t, returns, task_idx, force_dropout=True)
+            # epsilon could be epsilon or x0 itself（returns CFG；不与此处 task/text 联合 CFG 混用）
+            epsilon_cond = self.model(
+                x, cond, t, returns, task_idx, text_embed=text_embed,
+                use_dropout=False, force_dropout=False,
+                force_task_dropout=False, force_text_dropout=False,
+            )
+            epsilon_uncond = self.model(
+                x, cond, t, returns, task_idx, text_embed=text_embed,
+                force_dropout=True,
+                force_task_dropout=False, force_text_dropout=False,
+            )
             epsilon = epsilon_uncond + self.condition_guidance_w*(epsilon_cond - epsilon_uncond)
         else:
-            epsilon = self.model(x, cond, t, task_idx=task_idx)
+            epsilon = epsilon_task_text_cfg(self, x, cond, t, returns, task_idx, text_embed)
 
         t = t.detach().to(torch.int64)
         x_recon = self.predict_start_from_noise(x, t=t, noise=epsilon)
@@ -324,7 +455,12 @@ class GaussianDiffusion(nn.Module):
             returns.requires_grad = True
             noise.requires_grad = True
 
-        x_recon = self.model(x_noisy, cond, t, returns)
+        task_idx = cond.get('task_idx') if isinstance(cond, dict) else None
+        task_idx = _task_idx_to_one_hot(task_idx, self.model)
+        text_embed = _cond_text_embed(cond)
+        x_recon = self.model(
+            x_noisy, cond, t, returns, task_idx=task_idx, text_embed=text_embed
+        )
 
         if not self.predict_epsilon:
             x_recon = apply_conditioning(x_recon, cond)
@@ -350,7 +486,14 @@ class GaussianInvDynDiffusion(nn.Module):
     def __init__(self, model, horizon, observation_dim, action_dim, n_timesteps=1000,
         loss_type='l1', clip_denoised=False, predict_epsilon=True, hidden_dim=256,
         action_weight=1.0, loss_discount=1.0, loss_weights=None, returns_condition=False,
-        condition_guidance_w=0.1, ar_inv=False, train_only_inv=False):
+        condition_guidance_w=0.1,
+        condition_guidance_w_task=0.0,
+        condition_guidance_w_text=0.0,
+        cfg_apply_task=True,
+        cfg_apply_text=True,
+        sample_with_task_embedding=True,
+        sample_with_text_embedding=True,
+        ar_inv=False, train_only_inv=False):
         super().__init__()
         self.horizon = horizon
         self.observation_dim = observation_dim
@@ -371,6 +514,12 @@ class GaussianInvDynDiffusion(nn.Module):
             )
         self.returns_condition = returns_condition
         self.condition_guidance_w = condition_guidance_w
+        self.condition_guidance_w_task = float(condition_guidance_w_task)
+        self.condition_guidance_w_text = float(condition_guidance_w_text)
+        self.cfg_apply_task = bool(cfg_apply_task)
+        self.cfg_apply_text = bool(cfg_apply_text)
+        self.sample_with_task_embedding = bool(sample_with_task_embedding)
+        self.sample_with_text_embedding = bool(sample_with_text_embedding)
 
         betas = cosine_beta_schedule(n_timesteps)
         alphas = 1. - betas
@@ -461,14 +610,22 @@ class GaussianInvDynDiffusion(nn.Module):
         # Extract task_idx from cond if present
         task_idx = cond.get('task_idx') if isinstance(cond, dict) else None
         task_idx = _task_idx_to_one_hot(task_idx, self.model)
+        text_embed = _cond_text_embed(cond)
 
         if self.returns_condition:
-            # epsilon could be epsilon or x0 itself
-            epsilon_cond = self.model(x, cond, t, returns, task_idx, use_dropout=False)
-            epsilon_uncond = self.model(x, cond, t, returns, task_idx, force_dropout=True)
+            epsilon_cond = self.model(
+                x, cond, t, returns, task_idx, text_embed=text_embed,
+                use_dropout=False, force_dropout=False,
+                force_task_dropout=False, force_text_dropout=False,
+            )
+            epsilon_uncond = self.model(
+                x, cond, t, returns, task_idx, text_embed=text_embed,
+                force_dropout=True,
+                force_task_dropout=False, force_text_dropout=False,
+            )
             epsilon = epsilon_uncond + self.condition_guidance_w*(epsilon_cond - epsilon_uncond)
         else:
-            epsilon = self.model(x, cond, t, task_idx=task_idx)
+            epsilon = epsilon_task_text_cfg(self, x, cond, t, returns, task_idx, text_embed)
 
         t = t.detach().to(torch.int64)
         x_recon = self.predict_start_from_noise(x, t=t, noise=epsilon)
@@ -551,8 +708,9 @@ class GaussianInvDynDiffusion(nn.Module):
         # Extract task_idx from cond if present
         task_idx = cond.get('task_idx') if isinstance(cond, dict) else None
         task_idx = _task_idx_to_one_hot(task_idx, self.model)
+        text_embed = _cond_text_embed(cond)
 
-        x_recon = self.model(x_noisy, cond, t, returns, task_idx)
+        x_recon = self.model(x_noisy, cond, t, returns, task_idx, text_embed=text_embed)
 
         if not self.predict_epsilon:
             x_recon = apply_conditioning(x_recon, cond, 0)
@@ -691,7 +849,14 @@ class ActionGaussianDiffusion(nn.Module):
     def __init__(self, model, horizon, observation_dim, action_dim, n_timesteps=1000,
         loss_type='l1', clip_denoised=False, predict_epsilon=True,
         action_weight=1.0, loss_discount=1.0, loss_weights=None, returns_condition=False,
-        condition_guidance_w=0.1,):
+        condition_guidance_w=0.1,
+        condition_guidance_w_task=0.0,
+        condition_guidance_w_text=0.0,
+        cfg_apply_task=True,
+        cfg_apply_text=True,
+        sample_with_task_embedding=True,
+        sample_with_text_embedding=True,
+    ):
         super().__init__()
         self.observation_dim = observation_dim
         self.action_dim = action_dim
@@ -699,6 +864,12 @@ class ActionGaussianDiffusion(nn.Module):
         self.model = model
         self.returns_condition = returns_condition
         self.condition_guidance_w = condition_guidance_w
+        self.condition_guidance_w_task = float(condition_guidance_w_task)
+        self.condition_guidance_w_text = float(condition_guidance_w_text)
+        self.cfg_apply_task = bool(cfg_apply_task)
+        self.cfg_apply_text = bool(cfg_apply_text)
+        self.sample_with_task_embedding = bool(sample_with_task_embedding)
+        self.sample_with_text_embedding = bool(sample_with_text_embedding)
 
         betas = cosine_beta_schedule(n_timesteps)
         alphas = 1. - betas
@@ -766,14 +937,22 @@ class ActionGaussianDiffusion(nn.Module):
         # Extract task_idx from cond if present
         task_idx = cond.get('task_idx') if isinstance(cond, dict) else None
         task_idx = _task_idx_to_one_hot(task_idx, self.model)
+        text_embed = _cond_text_embed(cond)
 
         if self.returns_condition:
-            # epsilon could be epsilon or x0 itself
-            epsilon_cond = self.model(x, cond, t, returns, task_idx, use_dropout=False)
-            epsilon_uncond = self.model(x, cond, t, returns, task_idx, force_dropout=True)
+            epsilon_cond = self.model(
+                x, cond, t, returns, task_idx, text_embed=text_embed,
+                use_dropout=False, force_dropout=False,
+                force_task_dropout=False, force_text_dropout=False,
+            )
+            epsilon_uncond = self.model(
+                x, cond, t, returns, task_idx, text_embed=text_embed,
+                force_dropout=True,
+                force_task_dropout=False, force_text_dropout=False,
+            )
             epsilon = epsilon_uncond + self.condition_guidance_w*(epsilon_cond - epsilon_uncond)
         else:
-            epsilon = self.model(x, cond, t, task_idx=task_idx)
+            epsilon = epsilon_task_text_cfg(self, x, cond, t, returns, task_idx, text_embed)
 
         t = t.detach().to(torch.int64)
         x_recon = self.predict_start_from_noise(x, t=t, noise=epsilon)
@@ -900,8 +1079,9 @@ class ActionGaussianDiffusion(nn.Module):
         # Extract task_idx from state if present
         task_idx = state.get('task_idx') if isinstance(state, dict) else None
         task_idx = _task_idx_to_one_hot(task_idx, self.model)
+        text_embed = _cond_text_embed(state)
 
-        pred = self.model(action_noisy, state, t, returns, task_idx)
+        pred = self.model(action_noisy, state, t, returns, task_idx, text_embed=text_embed)
 
         assert noise.shape == pred.shape
 

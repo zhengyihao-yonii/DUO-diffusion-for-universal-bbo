@@ -120,6 +120,9 @@ class TemporalUnet(nn.Module):
         condition_dropout=0.1,
         calc_energy=False,
         kernel_size=5,
+        text_condition=False,
+        text_embed_input_dim=384,
+        text_condition_dropout=0.1,
     ):
         super().__init__()
 
@@ -147,6 +150,9 @@ class TemporalUnet(nn.Module):
 
         self.returns_condition = returns_condition
         self.task_condition = task_condition
+        self.text_condition = text_condition
+        self.text_embed_input_dim = int(text_embed_input_dim)
+        self.text_condition_dropout = float(text_condition_dropout)
         self.condition_dropout = condition_dropout
         self.calc_energy = calc_energy
         self.num_tasks = num_tasks  # 供扩散中 one_hot 使用固定类别数（避免 batch 全为 task0 时维数错误）
@@ -173,6 +179,18 @@ class TemporalUnet(nn.Module):
                         act_fn,
                         nn.Linear(dim * 4, dim),
                     )
+            embed_dim += dim
+
+        # Optional: frozen LLM/sentence embedding projected to dim (LDM-style side conditioning).
+        if self.text_condition:
+            self.text_mlp = nn.Sequential(
+                nn.Linear(self.text_embed_input_dim, dim),
+                act_fn,
+                nn.Linear(dim, dim * 4),
+                act_fn,
+                nn.Linear(dim * 4, dim),
+            )
+            self.text_mask_dist = Bernoulli(probs=1.0 - self.text_condition_dropout)
             embed_dim += dim
 
         self.downs = nn.ModuleList([])
@@ -213,11 +231,25 @@ class TemporalUnet(nn.Module):
             nn.Conv1d(dim, transition_dim, 1),
         )
 
-    def forward(self, x, cond, time, returns=None, task_idx=None, use_dropout=True, force_dropout=False):
+    def forward(
+        self,
+        x,
+        cond,
+        time,
+        returns=None,
+        task_idx=None,
+        text_embed=None,
+        use_dropout=True,
+        force_dropout=False,
+        force_task_dropout=False,
+        force_text_dropout=False,
+    ):
         '''
             x : [ batch x horizon x transition ]
             returns : [batch x horizon]
             task_idx: [batch x num_tasks] - one-hot encoded task index
+            text_embed: [batch x text_embed_input_dim] - frozen sentence embedding per sample (optional)
+            force_task_dropout / force_text_dropout: classifier-free 采样时置零对应条件（LDM 式 uncond）
         '''
         if self.calc_energy:
             x_inp = x
@@ -241,11 +273,25 @@ class TemporalUnet(nn.Module):
             embeds.append(returns_embed)
         
         if self.task_condition:
-            if task_idx is not None:
+            if force_task_dropout:
+                task_embed = torch.zeros((embeds[0].shape[0], self.task_dim), device=embeds[0].device, dtype=embeds[0].dtype)
+            elif task_idx is not None:
                 task_embed = self.task_mlp(task_idx)
             else:
                 task_embed = torch.zeros((embeds[0].shape[0], self.task_dim)).to(embeds[0].device)
             embeds.append(task_embed)
+
+        if self.text_condition:
+            if force_text_dropout:
+                te = torch.zeros((embeds[0].shape[0], self.task_dim), device=embeds[0].device, dtype=embeds[0].dtype)
+            elif text_embed is not None:
+                te = self.text_mlp(text_embed)
+                if use_dropout:
+                    mask = self.text_mask_dist.sample(sample_shape=(te.size(0), 1)).to(te.device)
+                    te = mask * te
+            else:
+                te = torch.zeros((embeds[0].shape[0], self.task_dim), device=embeds[0].device, dtype=embeds[0].dtype)
+            embeds.append(te)
         
         # 合并所有嵌入
         t = torch.cat(embeds, dim=-1)
@@ -285,11 +331,24 @@ class TemporalUnet(nn.Module):
         else:
             return x
 
-    def get_pred(self, x, cond, time, returns=None, task_idx=None, use_dropout=True, force_dropout=False):
+    def get_pred(
+        self,
+        x,
+        cond,
+        time,
+        returns=None,
+        task_idx=None,
+        text_embed=None,
+        use_dropout=True,
+        force_dropout=False,
+        force_task_dropout=False,
+        force_text_dropout=False,
+    ):
         '''
             x : [ batch x horizon x transition ]
             returns : [batch x horizon]
             task_idx: [batch x num_tasks] - one-hot encoded task index
+            text_embed: [batch x text_embed_input_dim]
         '''
         x = einops.rearrange(x, 'b h t -> b t h')
 
@@ -307,11 +366,25 @@ class TemporalUnet(nn.Module):
             embeds.append(returns_embed)
         
         if self.task_condition:
-            if task_idx is not None:
+            if force_task_dropout:
+                task_embed = torch.zeros((embeds[0].shape[0], self.task_dim), device=embeds[0].device, dtype=embeds[0].dtype)
+            elif task_idx is not None:
                 task_embed = self.task_mlp(task_idx)
             else:
                 task_embed = torch.zeros((embeds[0].shape[0], self.task_dim)).to(embeds[0].device)
             embeds.append(task_embed)
+
+        if self.text_condition:
+            if force_text_dropout:
+                te = torch.zeros((embeds[0].shape[0], self.task_dim), device=embeds[0].device, dtype=embeds[0].dtype)
+            elif text_embed is not None:
+                te = self.text_mlp(text_embed)
+                if use_dropout:
+                    mask = self.text_mask_dist.sample(sample_shape=(te.size(0), 1)).to(te.device)
+                    te = mask * te
+            else:
+                te = torch.zeros((embeds[0].shape[0], self.task_dim), device=embeds[0].device, dtype=embeds[0].dtype)
+            embeds.append(te)
         
         # 合并所有嵌入
         t = torch.cat(embeds, dim=-1)
@@ -409,12 +482,26 @@ class MLPnet(nn.Module):
                         nn.Linear(1024, transition_dim),
                     )
 
-    def forward(self, x, cond, time, returns=None, task_idx=None, use_dropout=True, force_dropout=False):
+    def forward(
+        self,
+        x,
+        cond,
+        time,
+        returns=None,
+        task_idx=None,
+        text_embed=None,
+        use_dropout=True,
+        force_dropout=False,
+        force_task_dropout=False,
+        force_text_dropout=False,
+        **kwargs,
+    ):
         '''
             x : [ batch x action ]
             cond: [batch x state]
             returns : [batch x 1]
             task_idx: [batch x num_tasks] - one-hot encoded task index
+            text_embed / force_text_dropout: 与 TemporalUnet 对齐；本 MLP 无 text 条件时忽略
         '''
         # Assumes horizon = 1
         t = self.time_mlp(time).unsqueeze(1)
@@ -431,7 +518,9 @@ class MLPnet(nn.Module):
             embeds.append(returns_embed)
         
         if self.task_condition:
-            if task_idx is not None:
+            if force_task_dropout:
+                task_embed = torch.zeros((t.shape[0], 1, self.task_dim), device=t.device, dtype=t.dtype)
+            elif task_idx is not None:
                 task_embed = self.task_mlp(task_idx).unsqueeze(1)
             else:
                 task_embed = torch.zeros((t.shape[0], 1, self.task_dim)).to(t.device)

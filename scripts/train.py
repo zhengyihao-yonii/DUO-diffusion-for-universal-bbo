@@ -6,9 +6,32 @@ import wandb
 import pickle as pkl
 import os
 import glob
+from pathlib import Path
 from diffuser.models.vae import VAE
 from torch.utils.data import DataLoader, ConcatDataset
 from diffuser.utils.training import Trainer
+
+
+def _maybe_build_task_text_embeddings(Config):
+    """If use_text_condition, build [K, D] numpy table from task_metadata/*.txt (cached)."""
+    if not getattr(Config, "use_text_condition", False):
+        return
+    from diffuser.utils.task_text_embedding import build_task_text_embedding_matrix
+
+    root = Path(__file__).resolve().parent.parent
+    meta = root / getattr(Config, "task_metadata_dir", "task_metadata")
+    mat, dim = build_task_text_embedding_matrix(
+        Config.train_tasks_list,
+        metadata_dir=meta,
+        model_name=getattr(
+            Config, "text_encoder_model", "sentence-transformers/all-MiniLM-L6-v2"
+        ),
+    )
+    Config.text_embed_dim = int(dim)
+    Config._task_text_embeds_np = mat
+    print(
+        f"[task text] use_text_condition=True, embed_dim={dim}, metadata_dir={meta}"
+    )
 
 
 def multitask_proxy_prefix(task_name, Config):
@@ -179,7 +202,7 @@ def main(**deps):
     if 'train_tasks' in deps and ',' in str(deps.get('train_tasks', '')):
         deps['train_tasks'] = canonical_train_tasks_csv(deps['train_tasks'])
 
-    # 确定使用哪个配置文件（多任务：与 eval 无关，用 train_tasks 字典序首任务）
+    # 确定使用哪个配置文件（多任务：与 eval 无关，用 canonical 后 train_tasks 的逗号首项，即字典序第一个任务）
     task_to_use = deps.get('eval_task', deps.get('task', 'dkitty'))
     if 'train_tasks' in deps and ',' in str(deps.get('train_tasks', '')):
         task_to_use = deps['train_tasks'].split(',')[0].strip()
@@ -270,6 +293,8 @@ def main(**deps):
             'eval_task': Config.train_tasks_list[0]
         }, allow_val_change=True)
 
+    _maybe_build_task_text_embeddings(Config)
+
     # 多任务模式下，创建混合数据集
     if hasattr(Config, 'is_multitask') and Config.is_multitask:
         print(f"创建多任务数据集: {Config.train_tasks_list}")
@@ -290,7 +315,8 @@ def main(**deps):
             context_length=Config.context_length,
             regret=Config.regret,
             include_returns=Config.include_returns,
-            task_name=None  # 混合文件包含所有任务的信息
+            task_name=None,  # 混合文件包含所有任务的信息
+            task_text_embeds=getattr(Config, "_task_text_embeds_np", None),
         )
         print(f"加载混合轨迹文件: {mixed_data_path}")
         print(f"混合数据集大小: {len(dataset)}")
@@ -310,7 +336,8 @@ def main(**deps):
             context_length=Config.context_length,
             regret=Config.regret,
             include_returns=Config.include_returns,
-            task_name=Config.dataset
+            task_name=Config.dataset,
+            task_text_embeds=getattr(Config, "_task_text_embeds_np", None),
         )
         
         proxy_dataset_config = utils.Config(
@@ -363,6 +390,13 @@ def main(**deps):
             device=Config.device,
             task_condition=Config.is_multitask,
             num_tasks=len(Config.train_tasks_list) if Config.is_multitask else 1,
+            text_condition=getattr(Config, "use_text_condition", False),
+            text_embed_input_dim=int(
+                getattr(Config, "text_embed_dim", 384)
+            ),
+            text_condition_dropout=float(
+                getattr(Config, "text_condition_dropout", 0.1)
+            ),
         )
 
         diffusion_config = utils.Config(
@@ -384,6 +418,12 @@ def main(**deps):
             loss_discount=Config.loss_discount,
             returns_condition=Config.returns_condition,
             condition_guidance_w=Config.condition_guidance_w,
+            condition_guidance_w_task=float(getattr(Config, "condition_guidance_w_task", 0.0)),
+            condition_guidance_w_text=float(getattr(Config, "condition_guidance_w_text", 0.0)),
+            cfg_apply_task=bool(getattr(Config, "cfg_apply_task", True)),
+            cfg_apply_text=bool(getattr(Config, "cfg_apply_text", True)),
+            sample_with_task_embedding=bool(getattr(Config, "sample_with_task_embedding", True)),
+            sample_with_text_embedding=bool(getattr(Config, "sample_with_text_embedding", True)),
             device=Config.device,
         )
         
@@ -413,6 +453,13 @@ def main(**deps):
             device=Config.device,
             task_condition=Config.is_multitask,
             num_tasks=len(Config.train_tasks_list) if Config.is_multitask else 1,
+            text_condition=getattr(Config, "use_text_condition", False),
+            text_embed_input_dim=int(
+                getattr(Config, "text_embed_dim", 384)
+            ),
+            text_condition_dropout=float(
+                getattr(Config, "text_condition_dropout", 0.1)
+            ),
         )
             
         # 非GaussianInvDynDiffusion模型的proxy_model_config定义
@@ -443,6 +490,12 @@ def main(**deps):
             loss_discount=Config.loss_discount,
             returns_condition=Config.returns_condition,
             condition_guidance_w=Config.condition_guidance_w,
+            condition_guidance_w_task=float(getattr(Config, "condition_guidance_w_task", 0.0)),
+            condition_guidance_w_text=float(getattr(Config, "condition_guidance_w_text", 0.0)),
+            cfg_apply_task=bool(getattr(Config, "cfg_apply_task", True)),
+            cfg_apply_text=bool(getattr(Config, "cfg_apply_text", True)),
+            sample_with_task_embedding=bool(getattr(Config, "sample_with_task_embedding", True)),
+            sample_with_text_embedding=bool(getattr(Config, "sample_with_text_embedding", True)),
             device=Config.device,
         )
 

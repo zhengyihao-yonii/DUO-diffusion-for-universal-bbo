@@ -63,6 +63,8 @@ class DesignBenchDatasetWrapper:
             self.y_normalized = self.y.squeeze(-1) if self.y.ndim > 1 else self.y
             self.x_tensor = torch.tensor(self.processed_x, dtype=torch.float32)
             self.y_tensor = torch.tensor(self.y_normalized, dtype=torch.float32)
+            # 与 Design-Bench 路径一致：统一为 [N]，避免多任务合并时 1D/2D 混用导致 torch.cat 失败
+            self.y_tensor = self.y_tensor.reshape(-1)
             return
 
         # TFBind：必须与 train_vae.py / ZipDataset 一致，先 map_to_logits 再标准化，否则 VAE scaler 维数与数据不一致
@@ -113,9 +115,9 @@ class DesignBenchDatasetWrapper:
         if sigma > 0.0:
             self.y_normalized = np.clip(self.y_normalized + np.random.randn(*self.y_normalized.shape) * sigma, 0.0, 1.0)
         
-        # 转换为张量
+        # 转换为张量（Design-Bench 的 y 常为 (N,1)，归一化后仍为 2D；压成 [N] 与 gtopx / 下游 cat 一致）
         self.x_tensor = torch.tensor(self.processed_x, dtype=torch.float32)
-        self.y_tensor = torch.tensor(self.y_normalized, dtype=torch.float32)  # 保持1维，不添加额外维度
+        self.y_tensor = torch.tensor(self.y_normalized, dtype=torch.float32).reshape(-1)
     
     def _preprocess_to_fixed_length(self, data):
         """

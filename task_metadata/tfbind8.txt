@@ -1,0 +1,3 @@
+Task: TF-Bind-8 (Design-Bench, discrete sequence design).
+Goal: optimize an 8-length DNA sequence (represented in a suitable encoding, e.g. logits) to maximize a binding-related laboratory score.
+Design space: discrete combinatorial sequences mapped to a continuous latent/logit space for optimization.

@@ -36,6 +36,7 @@ import numpy as np
 
 from diffuser.datasets.sequence import TASKNAME2FULL, TASKNAME2TASK, TASKNAME2MAX_SAMPLES, SUPPORTED_TASKS
 from diffuser.utils.soo_gtopx import TASKNAME_TO_VAR_NUM, load_gtopx_offline_arrays, is_gtopx_task
+from diffuser.utils.construct_runtime import pairwise_l2_distance_matrix
 
 def preprocess_data_for_vae(data_x, fixed_dim):
     """
@@ -204,7 +205,32 @@ def construct_trajectories(tasks_list, frac=1.0, sigma=0.0, seed=0, n_traj=None,
     
     # 根据任务数量选择不同的数据加载方式
     is_multitask = len(tasks_list) > 1
-    
+
+    # 与 train/evaluate 中 generated_datasets 路径一致；USE_RETURNS 只改 checkpoint，不改此目录
+    if is_multitask:
+        tasks_str = "_".join(tasks_list)
+        output_dir_early = f"./generated_datasets/multi_{tasks_str}_frac{frac}_sigma{sigma}"
+    else:
+        output_dir_early = f"./generated_datasets/{tasks_list[0]}_frac{frac}_sigma{sigma}"
+
+    # 产物已存在则跳过数据加载、VAE、降维（避免仅加 USE_RETURNS 仍整段重跑 Step 1）
+    if is_multitask:
+        mixed_path = os.path.join(output_dir_early, "mixed_trajectories_train.p")
+        if os.path.isfile(mixed_path):
+            print(
+                f"已存在多任务混合轨迹（训练实际加载此文件），跳过数据加载与 VAE：{mixed_path}"
+            )
+            return output_dir_early, None
+    else:
+        tn = tasks_list[0]
+        task_pkl = os.path.join(
+            output_dir_early,
+            f"{tn}_{n_traj[tn]}x{traj_len}_k{k[tn]}_eps{eps[tn]}_vae_latent32_train.p",
+        )
+        if os.path.isfile(task_pkl):
+            print(f"已存在轨迹文件，跳过数据加载与 VAE：{task_pkl}")
+            return output_dir_early, None
+
     # 数据加载和预处理
     if is_multitask:
         print(f"开始加载多任务数据，任务列表: {tasks_list}，固定输入维度: {fixed_dim}")
@@ -392,10 +418,8 @@ def construct_trajectories(tasks_list, frac=1.0, sigma=0.0, seed=0, n_traj=None,
         print("加载预计算的距离矩阵...")
         distances = pkl.load(open(distance_file, "rb"))
     else:
-        print("计算距离矩阵...")
-        distances = torch.zeros((N, N))
-        for i in tqdm(range(N)):
-            distances[i, :] = torch.sqrt(torch.sum((points[i] - points)**2, dim=1))
+        print("计算距离矩阵（优先 GPU 分块 torch.cdist，见 GTG_DISTANCE_ON_GPU / GTG_DEVICE）...")
+        distances = pairwise_l2_distance_matrix(points)
         pkl.dump(distances, open(distance_file, "wb"))
         print(f"距离矩阵已保存至: {distance_file}")
     

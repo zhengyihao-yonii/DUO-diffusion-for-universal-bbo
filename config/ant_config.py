@@ -9,6 +9,8 @@ class Config(ParamsProto):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     bucket = 'trained_models/'
     dataset = 'ant'
+    # 多任务时若首任务为 ant（如 "ant,dkitty"），实验走本文件而非 multi_dataset_config（后者未被 train/evaluate 导入）
+    fixed_dim = 128
 
     ## model
     model = 'models.TemporalUnet'
@@ -25,7 +27,18 @@ class Config(ParamsProto):
     calc_energy = False
     dim = 128
     condition_dropout = 0.25
+    # 任务描述句向量（与 task one-hot 相加）；见 task_metadata/README.md
+    use_text_condition = False
+    task_metadata_dir = 'task_metadata'
+    text_encoder_model = 'sentence-transformers/all-MiniLM-L6-v2'
+    text_condition_dropout = 0.1
     condition_guidance_w = 1.2
+    condition_guidance_w_task = 0.0
+    condition_guidance_w_text = 0.0
+    cfg_apply_task = True
+    cfg_apply_text = True
+    sample_with_task_embedding = True
+    sample_with_text_embedding = True
     test_ret = 0.9
     renderer = None
 

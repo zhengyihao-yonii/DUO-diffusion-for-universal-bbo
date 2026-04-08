@@ -1,3 +1,6 @@
+import glob
+import re
+
 import diffuser.utils as utils
 from ml_logger import logger
 import torch
@@ -5,11 +8,43 @@ import numpy as np
 import os
 import pickle as pkl
 import wandb
+from pathlib import Path
 from diffuser.utils.arrays import to_torch
 from diffuser.utils.des_bench import DesignBenchFunctionWrapper
 from diffuser.models.vae import VAE
 from sklearn.preprocessing import StandardScaler
 from diffuser.datasets.sequence import PointRegretDataset
+
+
+def _resolve_proxy_checkpoint_path(proxy_ckpt_dir, Config):
+    """
+    与 scripts/train.multitask_proxy_checkpoint_exists 判定一致：
+    存在任意 state_*.pt 即视为「有 checkpoint」；加载时优先 state.pt、state_{proxy_n_train_steps}.pt，
+    否则取 state_*.pt 中训练步数最大的文件（避免仅存在 state_1000.pt 时评估仍找不到）。
+    """
+    if not os.path.isdir(proxy_ckpt_dir):
+        return None
+    st = os.path.join(proxy_ckpt_dir, "state.pt")
+    if os.path.isfile(st):
+        return st
+    if getattr(Config, "save_checkpoints", False):
+        n = int(getattr(Config, "proxy_n_train_steps", 5000))
+        p = os.path.join(proxy_ckpt_dir, f"state_{n}.pt")
+        if os.path.isfile(p):
+            return p
+        for alt in (5000, 10000, 1000, 3000):
+            p2 = os.path.join(proxy_ckpt_dir, f"state_{alt}.pt")
+            if os.path.isfile(p2):
+                return p2
+        matches = glob.glob(os.path.join(proxy_ckpt_dir, "state_*.pt"))
+        if matches:
+
+            def _step(path):
+                m = re.search(r"state_(\d+)\.pt$", path)
+                return int(m.group(1)) if m else -1
+
+            return max(matches, key=_step)
+    return None
 
 
 def _import_config(task_name):
@@ -51,37 +86,28 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
     if is_multitask:
         print(f"加载评估任务 {eval_task} 的 proxy model")
         proxy_model_prefix = f"trained_models/{eval_task}_frac{Config.frac}_sigma{Config.sigma}/{Config.n_traj}x{Config.horizon}_k{Config.k}_eps{Config.eps}/seed{Config.seed}/"
-        proxy_loadpath = os.path.join(proxy_model_prefix, 'proxy_checkpoint')
-        if Config.save_checkpoints:
-            try_proxy_steps = [Config.proxy_n_train_steps, 5000, 10000]
-            for steps in try_proxy_steps:
-                path_candidate = os.path.join(proxy_loadpath, f'state_{steps}.pt')
-                if os.path.exists(path_candidate):
-                    proxy_loadpath = path_candidate
-                    print(f"找到 proxy model: {proxy_loadpath}")
-                    break
-            else:
-                proxy_loadpath = os.path.join(proxy_loadpath, 'state.pt')
-        else:
-            proxy_loadpath = os.path.join(proxy_loadpath, 'state.pt')
-        if os.path.exists(proxy_loadpath):
+        proxy_ckpt_dir = os.path.join(proxy_model_prefix, "proxy_checkpoint")
+        proxy_loadpath = _resolve_proxy_checkpoint_path(proxy_ckpt_dir, Config)
+        if proxy_loadpath is not None:
+            print(f"找到 proxy model: {proxy_loadpath}")
             proxy_state_dict = torch.load(proxy_loadpath, map_location=Config.device)
         else:
             print(f"警告: 未找到 {eval_task} 的 proxy，回退到 logger.prefix 下 proxy")
-            proxy_loadpath = os.path.join(logger.prefix, 'proxy_checkpoint')
-            if Config.save_checkpoints:
-                path_candidate = os.path.join(proxy_loadpath, f'state_{Config.proxy_n_train_steps}.pt')
-                proxy_loadpath = path_candidate if os.path.exists(path_candidate) else os.path.join(proxy_loadpath, 'state.pt')
-            else:
-                proxy_loadpath = os.path.join(proxy_loadpath, 'state.pt')
+            fallback_dir = os.path.join(logger.prefix, "proxy_checkpoint")
+            proxy_loadpath = _resolve_proxy_checkpoint_path(fallback_dir, Config)
+            if proxy_loadpath is None:
+                raise FileNotFoundError(
+                    f"无法加载 proxy：既不在 {proxy_ckpt_dir}，也不在 {fallback_dir}。"
+                    f"多任务需先为各任务训练 proxy（trained_models/<task>_.../seed{Config.seed}/proxy_checkpoint/state_*.pt）。"
+                )
             proxy_state_dict = torch.load(proxy_loadpath, map_location=Config.device)
     else:
-        proxy_loadpath = os.path.join(logger.prefix, 'proxy_checkpoint')
-        if Config.save_checkpoints:
-            path_candidate = os.path.join(proxy_loadpath, f'state_{Config.proxy_n_train_steps}.pt')
-            proxy_loadpath = path_candidate if os.path.exists(path_candidate) else os.path.join(proxy_loadpath, 'state.pt')
-        else:
-            proxy_loadpath = os.path.join(proxy_loadpath, 'state.pt')
+        proxy_ckpt_dir = os.path.join(logger.prefix, "proxy_checkpoint")
+        proxy_loadpath = _resolve_proxy_checkpoint_path(proxy_ckpt_dir, Config)
+        if proxy_loadpath is None:
+            raise FileNotFoundError(
+                f"无法加载 proxy：{proxy_ckpt_dir} 下无 state.pt 或 state_*.pt"
+            )
         proxy_state_dict = torch.load(proxy_loadpath, map_location=Config.device)
 
     torch.backends.cudnn.benchmark = True
@@ -102,6 +128,7 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
             regret=Config.regret,
             include_returns=Config.include_returns,
             task_name=None,
+            task_text_embeds=getattr(Config, "_task_text_embeds_np", None),
         )
     else:
         dataset_config = utils.Config(
@@ -112,6 +139,7 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
             context_length=Config.context_length,
             regret=Config.regret,
             include_returns=Config.include_returns,
+            task_text_embeds=getattr(Config, "_task_text_embeds_np", None),
         )
         dataset = dataset_config()
 
@@ -197,6 +225,11 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
         num_tasks=num_tasks,
         condition_dropout=getattr(Config, 'condition_dropout', 0.25),
         calc_energy=getattr(Config, 'calc_energy', False),
+        text_condition=getattr(Config, "use_text_condition", False),
+        text_embed_input_dim=int(getattr(Config, "text_embed_dim", 384)),
+        text_condition_dropout=float(
+            getattr(Config, "text_condition_dropout", 0.1)
+        ),
     )
 
     proxy_model_config = utils.Config(
@@ -225,6 +258,12 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
         returns_condition=Config.returns_condition,
         device=Config.device,
         condition_guidance_w=Config.condition_guidance_w,
+        condition_guidance_w_task=float(getattr(Config, "condition_guidance_w_task", 0.0)),
+        condition_guidance_w_text=float(getattr(Config, "condition_guidance_w_text", 0.0)),
+        cfg_apply_task=bool(getattr(Config, "cfg_apply_task", True)),
+        cfg_apply_text=bool(getattr(Config, "cfg_apply_text", True)),
+        sample_with_task_embedding=bool(getattr(Config, "sample_with_task_embedding", True)),
+        sample_with_text_embedding=bool(getattr(Config, "sample_with_text_embedding", True)),
     )
 
     Config.batch_size = 128
@@ -280,7 +319,29 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
         conditions["ctx_len"] = to_torch(np.ones(trainer.batch_size,), device=device) * context_length
         if is_multitask:
             conditions["task_idx"] = torch.full((trainer.batch_size,), task_label_idx, dtype=torch.long, device=device)
+        if getattr(Config, "use_text_condition", False) and hasattr(
+            Config, "_task_text_embeds_np"
+        ):
+            _ti = task_label_idx if is_multitask else 0
+            _te = torch.from_numpy(Config._task_text_embeds_np[_ti]).float().to(device)
+            conditions["text_embed"] = _te.unsqueeze(0).expand(trainer.batch_size, -1)
 
+        # ------------------------------------------------------------------
+        # 条件于「目标函数值 y」的两种含义（请勿混淆）：
+        #
+        # (A) 轨迹状态里的 y 通道（默认实验：含「只标签 / 标签+文本」等多任务设置）
+        #     batch.trajectories[..., -1] 为归一化后的 objective（construct 中每任务已映到
+        #     [0,1]；PointRegretDataset 再按 [0,1] 做 normalizer）。context 条件通过上面
+        #     conditions[0..ctx_len-1] 注入前 context_length 步，其中已包含各步的 y。
+        #
+        # (B) 显式 returns 条件（经典「再条件于标量 return / test_ret」的 GTG 分支）
+        #     仅当 TemporalUnet.returns_condition=True（Config.returns_condition）时，
+        #     下面的 `returns` 才会进入 returns_mlp；否则传入仍计算但网络不读入（与多任务
+        #     是否加 task/text 无关）。若需 (B)，训练侧还需 include_returns=True 等一致配置。
+        #
+        # Config.alpha：仅当 (B) 开启时作为标量条件强度；默认 gtopx 配置下 returns_condition=False，
+        # 文件名里仍带 alpha 仅为记录 CLI，不改变默认 UNet 前向。
+        # ------------------------------------------------------------------
         returns = torch.ones(1, ).to(device=device).unsqueeze(0) * Config.alpha
         returns = returns.repeat(trainer.batch_size, 1)
 
@@ -425,6 +486,21 @@ def evaluate(**deps):
     Config.eval_task = ck_task
     Config.train_tasks_list = train_tasks_list
     Config.is_multitask = is_multitask
+
+    if getattr(Config, "use_text_condition", False):
+        from diffuser.utils.task_text_embedding import build_task_text_embedding_matrix
+
+        root = Path(__file__).resolve().parent.parent
+        meta = root / getattr(Config, "task_metadata_dir", "task_metadata")
+        mat, dim = build_task_text_embedding_matrix(
+            train_tasks_list,
+            metadata_dir=meta,
+            model_name=getattr(
+                Config, "text_encoder_model", "sentence-transformers/all-MiniLM-L6-v2"
+            ),
+        )
+        Config.text_embed_dim = int(dim)
+        Config._task_text_embeds_np = mat
 
     logger.log_params(Config=vars(Config), RUN=vars(RUN))
     # 不覆盖 Config.device：与 train 一致，尊重 --device 及 CUDA_VISIBLE_DEVICES 下的默认 cuda

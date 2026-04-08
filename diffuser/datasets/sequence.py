@@ -278,7 +278,16 @@ class ValueDataset(SequenceDataset):
     
     
 class PointRegretDataset(torch.utils.data.Dataset):
-    def __init__(self, horizon, data_path, context_length, regret=False, include_returns=False, task_name=None):
+    def __init__(
+        self,
+        horizon,
+        data_path,
+        context_length,
+        regret=False,
+        include_returns=False,
+        task_name=None,
+        task_text_embeds=None,
+    ):
         with open(data_path, "rb") as f:
             data_obj = pkl.load(f)
             
@@ -306,6 +315,10 @@ class PointRegretDataset(torch.utils.data.Dataset):
         self.regret = regret
         self.include_returns = include_returns
         self.task_name = task_name
+        # Optional: [num_tasks, D] float32 numpy — frozen sentence embeddings (see task_metadata/)
+        self.task_text_embeds = (
+            np.asarray(task_text_embeds, dtype=np.float32) if task_text_embeds is not None else None
+        )
 
         # self.add_noise = add_noise
         # self.noise = torch.rand(self.num_trajectories, 1).repeat(1, self.size_of_trajectory) * variance
@@ -349,6 +362,10 @@ class PointRegretDataset(torch.utils.data.Dataset):
         conditions = {}
         conditions["ctx_len"] = np.array([0])
         conditions["task_idx"] = np.array([self.task_idx])
+        if self.task_text_embeds is not None and self.task_idx >= 0:
+            conditions["text_embed"] = np.asarray(
+                self.task_text_embeds[self.task_idx], dtype=np.float32
+            )
         return conditions
 
     def __getitem__(self, idx):
@@ -379,6 +396,13 @@ class PointRegretDataset(torch.utils.data.Dataset):
             if isinstance(task_idx, torch.Tensor):
                 task_idx = task_idx.item()
             conditions["task_idx"] = np.array([task_idx])
+
+        if self.task_text_embeds is not None:
+            tid = conditions["task_idx"]
+            tid = int(tid.flatten()[0]) if hasattr(tid, "flatten") else int(tid)
+            conditions["text_embed"] = np.asarray(
+                self.task_text_embeds[tid], dtype=np.float32
+            )
             
         if self.include_returns:
             returns = values.sum().unsqueeze(-1) / self.block_size

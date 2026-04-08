@@ -17,6 +17,7 @@
 #   PYTHON         Python 解释器，默认 /home/xk/anaconda3/envs/gtg/bin/python
 #   PROJECT        项目根目录（GTGdfgo），默认本脚本所在目录
 #   RESULTS        日志与汇总输出目录
+#   RESULTS_SUFFIX 仅 USE_RETURNS=1 且未显式设置 RESULTS 时追加到默认路径（默认 _retcond）
 #   EVAL_ALL       设为 0 时，多任务只评一个任务（见 --eval_only_first）；默认评 train_tasks 全部。
 #   EVAL_SINGLE_TASK  仅当 EVAL_ALL=0 时有效：要评的那一个任务名（默认 train_tasks 字典序第一个）。
 #   START_SEED     本批第一次运行使用的随机种子，默认 0。设为 3 且 NUM_RUNS=2 则使用 seed 3、4。
@@ -24,6 +25,11 @@
 #                  本批从 max_seed+1 开始（并覆盖 START_SEED）；为 0 或未设置时始终用 START_SEED。
 #   EVAL_ONLY        默认 0。设为 1 时跳过轨迹构建与 train，只对已有 run 目录重写 evaluate.log。
 #   BATCH_RUN        可选，仅 EVAL_ONLY=1：指定批次号 N；否则读 $RESULTS/.gtg_pipeline_batch。
+#   TRAIN_EXTRA      可选，追加传给 train.py 的参数（空格分隔，勿加引号包裹整条）。
+#                    例: TRAIN_EXTRA="--condition_guidance_w_task 1.2 --condition_guidance_w_text 0.8"
+#   EVAL_EXTRA_CMD   可选，追加传给 evaluate.py 的额外参数（勿与脚本内数组 EVAL_EXTRA 混淆）。
+#   USE_RETURNS  设为 1 时，在 TRAIN_EXTRA / EVAL_EXTRA_CMD 基础上再追加
+#                    --returns_condition --include_returns（显式标量 return 条件，与 config 手工改等价）
 #   CUDA_VISIBLE_DEVICES  见脚本中部「GPU」注释；或设 GPU_ID（由 scripts/gpu_env.sh 处理）。
 #
 # 同一次 bash：run{N}_seed* 仅 seed 递增；仅「完整流水线」结束后 N 写入 .gtg_pipeline_batch 并在下次 +1。
@@ -88,7 +94,11 @@ HORIZON="${6:-64}"
 FRAC="${7:-1.0}"
 SIGMA="${8:-0.0}"
 
-RESULTS="${RESULTS:-$PROJECT/results/multitask_$(echo "$TRAIN_TASKS" | tr ',' '_')}"
+_rs=""
+if [[ "${USE_RETURNS:-0}" == "1" ]]; then
+  _rs="${RESULTS_SUFFIX:-_retcond}"
+fi
+RESULTS="${RESULTS:-$PROJECT/results/multitask_$(echo "$TRAIN_TASKS" | tr ',' '_')${_rs}}"
 
 mkdir -p "$RESULTS"
 BATCH_STATE_FILE="$RESULTS/.gtg_pipeline_batch"
@@ -168,6 +178,12 @@ else
   echo "日志: $CONSTRUCT_LOG"
 fi
 
+if [[ "${USE_RETURNS:-0}" == "1" ]]; then
+  TRAIN_EXTRA="${TRAIN_EXTRA:-} --returns_condition --include_returns"
+  EVAL_EXTRA_CMD="${EVAL_EXTRA_CMD:-} --returns_condition --include_returns"
+  echo "[USE_RETURNS] 已追加 --returns_condition --include_returns 至 train / evaluate"
+fi
+
 echo
 echo "=== Step 2: 多次$([ "${EVAL_ONLY:-0}" == "1" ] && echo '仅评估' || echo '训练 + 评估')（本批 $NUM_RUNS 次，seed=$START_SEED..$((START_SEED + NUM_RUNS - 1))）==="
 for ((run = 0; run < NUM_RUNS; run++)); do
@@ -179,6 +195,7 @@ for ((run = 0; run < NUM_RUNS; run++)); do
 
   if [[ "${EVAL_ONLY:-0}" != "1" ]]; then
     echo "  训练扩散..."
+    # shellcheck disable=SC2086
     $PYTHON "$PROJECT/train.py" \
       --train_tasks "$TRAIN_TASKS" \
       --n_traj "$N_TRAJ" \
@@ -188,6 +205,7 @@ for ((run = 0; run < NUM_RUNS; run++)); do
       --horizon "$HORIZON" \
       --frac "$FRAC" \
       --sigma "$SIGMA" \
+      ${TRAIN_EXTRA:-} \
       >"$RUN_DIR/train.log" 2>&1
   else
     echo "  跳过训练（EVAL_ONLY=1），覆盖 evaluate.log"
@@ -199,6 +217,7 @@ for ((run = 0; run < NUM_RUNS; run++)); do
     _single="${EVAL_SINGLE_TASK:-$(echo "$TRAIN_TASKS" | cut -d, -f1)}"
     EVAL_EXTRA+=(--eval_only_first --eval_task "$_single")
   fi
+  # shellcheck disable=SC2086
   $PYTHON "$PROJECT/evaluate.py" \
     --train_tasks "$TRAIN_TASKS" \
     --n_traj "$N_TRAJ" \
@@ -209,6 +228,7 @@ for ((run = 0; run < NUM_RUNS; run++)); do
     --frac "$FRAC" \
     --sigma "$SIGMA" \
     "${EVAL_EXTRA[@]}" \
+    ${EVAL_EXTRA_CMD:-} \
     >"$RUN_DIR/evaluate.log" 2>&1
 
   echo "  完成: $RUN_DIR"

@@ -1,4 +1,5 @@
 import argparse
+import sys
 from ml_logger import logger, instr, needs_relaunch
 from analysis import RUN
 import jaynes
@@ -30,13 +31,45 @@ if __name__ == '__main__':
     parser.add_argument("--eps", type=float, default=0.05)
     parser.add_argument("--n_traj", type=int, default=1000)
 
+    parser.add_argument(
+        "--condition_guidance_w_task",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="评估采样时 task 轴 CFG 权重；不指定则用 config 默认值",
+    )
+    parser.add_argument(
+        "--condition_guidance_w_text",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="评估采样时 text 轴 CFG 权重；不指定则用 config 默认值",
+    )
+    parser.add_argument(
+        "--use_text_condition",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="评估时加载 task_metadata 文本嵌入（须与训练一致）",
+    )
+    parser.add_argument(
+        "--returns_condition",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="与训练一致：采样时 returns 进入 returns_mlp",
+    )
+    parser.add_argument(
+        "--include_returns",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="与训练一致：数据集构造含 returns",
+    )
+
     args = parser.parse_args()
-    
+    sys.argv = [sys.argv[0]]
+
     # 兼容旧版API - 当指定task时，优先使用task参数覆盖train_tasks和eval_task
     if args.task:
         args.train_tasks = args.task
         args.eval_task = args.task
-    from diffuser.utils.multitask_canon import canonical_train_tasks_csv, multitask_path_token
+    from diffuser.utils.multitask_canon import canonical_train_tasks_csv, multitask_path_token, returns_cond_path_infix
 
     train_tasks_list = [t.strip() for t in args.train_tasks.split(",") if t.strip()]
     if len(train_tasks_list) > 1:
@@ -56,15 +89,16 @@ if __name__ == '__main__':
         elif not args.eval_all_tasks:
             args.eval_all_tasks = True
     
+    _ret = returns_cond_path_infix(args)
     # 多任务模式下的数据路径和运行前缀（与 train.py 一致；与评 ant/dkitty 无关）
     if len(train_tasks_list) > 1:
         args.data_path = f'generated_datasets/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}_vae_latent32_train.p'
-        RUN.prefix = f"trained_models/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}/seed{args.seed}/"
+        RUN.prefix = f"trained_models/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}{_ret}/seed{args.seed}/"
     else:
         # 单任务模式，保持原有逻辑
         task_name = train_tasks_list[0]
         args.data_path = f'generated_datasets/{args.train_tasks}_frac{args.frac}_sigma{args.sigma}/{task_name}_{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}_vae_latent32_train.p'
-        RUN.prefix = f"trained_models/{args.train_tasks}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}/seed{args.seed}/"
+        RUN.prefix = f"trained_models/{args.train_tasks}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}{_ret}/seed{args.seed}/"
     
     logger.print(RUN.prefix, color='green')
     jaynes.config("local")

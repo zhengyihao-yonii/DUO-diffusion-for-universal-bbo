@@ -25,6 +25,12 @@ class Config(ParamsProto):
     dim = 32
     condition_dropout = 0.25
     condition_guidance_w = 1.2
+    condition_guidance_w_task = 0.0
+    condition_guidance_w_text = 0.0
+    cfg_apply_task = True
+    cfg_apply_text = True
+    sample_with_task_embedding = True
+    sample_with_text_embedding = True
     test_ret = 0.9
     renderer = None
 

@@ -16,12 +16,15 @@
 #   PYTHON         Python，默认 /home/xk/anaconda3/envs/gtg/bin/python
 #   PROJECT        GTGdfgo 根目录，默认本脚本所在目录
 #   RESULTS        结果目录，默认 PROJECT/results/${task}_multiple_runs
+#                  USE_RETURNS=1 时默认在目录名后追加 RESULTS_SUFFIX（默认 _retcond），与无 returns 结果分开
+#   RESULTS_SUFFIX 仅 USE_RETURNS=1 且未显式设置 RESULTS 时生效；设为空可取消默认后缀
 #   START_SEED     本批第一次使用的随机种子，默认 0
 #   AUTO_CONTINUE  默认 0。设为 1 时在 RESULTS 下扫描 run*_seed*，从 max_seed+1 起跑本批
 #   EVAL_ONLY        默认 0。设为 1 时跳过轨迹构建与 train，只对已有 run*_seed* 目录重写 evaluate.log
 #                    （需与之前成功训练时使用相同的 task/num_runs/START_SEED/参数，以便找到 checkpoint）
 #   BATCH_RUN        可选，仅 EVAL_ONLY=1 时生效：指定要重评的批次号 N（runN_seed*）。不设则使用
 #                    $RESULTS/.gtg_pipeline_batch 中记录的「上一轮完整流水线」批次号。
+#   USE_RETURNS  设为 1 时，train/evaluate 追加 --returns_condition --include_returns（显式标量 return 条件）
 #   CUDA_VISIBLE_DEVICES / GPU_ID  见脚本中部「GPU」注释与 scripts/gpu_env.sh。
 #
 # 目录命名：同一次 bash 内为 run{N}_seed{s},{s+1},...（仅 seed 变）；N 仅在「又一次完整 bash（非 EVAL_ONLY）」
@@ -79,7 +82,11 @@ SIGMA="${8:-0.0}"
 
 PYTHON="${PYTHON:-/home/xk/anaconda3/envs/gtg/bin/python}"
 PROJECT="${PROJECT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
-base_dir="${RESULTS:-$PROJECT/results/${task_name}_multiple_runs}"
+_rs=""
+if [[ "${USE_RETURNS:-0}" == "1" ]]; then
+  _rs="${RESULTS_SUFFIX:-_retcond}"
+fi
+base_dir="${RESULTS:-$PROJECT/results/${task_name}_multiple_runs${_rs}}"
 mkdir -p "$base_dir"
 BATCH_STATE_FILE="$base_dir/.gtg_pipeline_batch"
 
@@ -160,7 +167,19 @@ else
 fi
 
 echo
-echo "=== Step 2: 多次$([ "${EVAL_ONLY:-0}" == "1" ] && echo '仅评估' || echo '训练 + 评估')（本批 $num_runs 次）==="
+# 避免在 echo "..." 内嵌套 $([ "..." == "1" ])，部分 bash 会错误匹配引号导致文末 EOF 报错
+_step2_mode="训练 + 评估"
+if [[ "${EVAL_ONLY:-0}" == "1" ]]; then
+  _step2_mode="仅评估"
+fi
+echo "=== Step 2: 多次${_step2_mode}（本批 ${num_runs} 次）==="
+
+RETURNS_EXTRA=()
+if [[ "${USE_RETURNS:-0}" == "1" ]]; then
+  RETURNS_EXTRA=(--returns_condition --include_returns)
+  echo "[USE_RETURNS] 启用 returns_condition + include_returns"
+fi
+
 for ((run = 0; run < num_runs; run++)); do
   seed=$((START_SEED + run))
   run_dir="$base_dir/run${BATCH_RUN}_seed${seed}"
@@ -179,6 +198,7 @@ for ((run = 0; run < num_runs; run++)); do
       --horizon "$HORIZON" \
       --frac "$FRAC" \
       --sigma "$SIGMA" \
+      "${RETURNS_EXTRA[@]}" \
       >"$run_dir/train.log" 2>&1 || { echo "训练失败: $run_dir/train.log"; continue; }
   else
     echo "  跳过训练（EVAL_ONLY=1），覆盖 evaluate.log"
@@ -194,6 +214,7 @@ for ((run = 0; run < num_runs; run++)); do
     --horizon "$HORIZON" \
     --frac "$FRAC" \
     --sigma "$SIGMA" \
+    "${RETURNS_EXTRA[@]}" \
     >"$run_dir/evaluate.log" 2>&1 || { echo "评估失败: $run_dir/evaluate.log"; continue; }
 
   echo "  完成: $run_dir"
@@ -201,8 +222,9 @@ done
 
 if [[ "${EVAL_ONLY:-0}" != "1" ]]; then
   echo "$BATCH_RUN" >"$BATCH_STATE_FILE"
-  echo "[批次] 已写入 $BATCH_STATE_FILE -> $BATCH_RUN（下次完整流水线将使用 run$((BATCH_RUN + 1))_*）"
+  _next_batch=$((BATCH_RUN + 1))
+  echo "[批次] 已写入 ${BATCH_STATE_FILE} -> ${BATCH_RUN}（下次完整流水线将使用 run${_next_batch}_*）"
 fi
 
 echo
-echo "全部完成。结果目录: $base_dir/"
+echo "全部完成。结果目录: ${base_dir}/"

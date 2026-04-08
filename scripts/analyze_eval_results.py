@@ -4,6 +4,10 @@ Aggregate evaluate.log metrics across runs (run*_seed* / run*) per experiment,
 then compare GTGdfgo vs GTG results in one report (CSV + Markdown + LaTeX table).
 
 Metrics: max_ep_reward -> max, nmax_ep_reward -> nmax (mean ± std over runs).
+
+Per-task columns ``gtgdfgo_msub_*`` / ``gtgdfgo_mfull_*`` look up multitask runs by task:
+subgroup (ant+dkitty, tfbind8+10, four gtopx) vs full 8-task multitask — see
+``TASK_TO_SUBGROUP_MULTITASK_EXP`` and ``FULL_MULTITASK_EXP``.
 """
 from __future__ import annotations
 
@@ -141,6 +145,85 @@ def mean_std(vals: list[float]) -> tuple[float, float]:
     return m, s
 
 
+# 汇总表行顺序：单任务按 ant → dkitty → tfbind8 → tfbind10 → gtopx2…6；
+# 多任务按「联立任务数」从少到多（2 任务：ant+dkitty 先于 tfbind8+10；4：四 gtopx；8：全任务）。
+TASK_ORDER: list[str] = [
+    "ant",
+    "dkitty",
+    "tfbind8",
+    "tfbind10",
+    "gtopx2",
+    "gtopx3",
+    "gtopx4",
+    "gtopx6",
+]
+
+EXPERIMENT_ORDER: list[str] = [
+    "ant_multiple_runs",
+    "dkitty_multiple_runs",
+    "tfbind8_multiple_runs",
+    "tfbind10_multiple_runs",
+    "gtopx2_multiple_runs",
+    "gtopx3_multiple_runs",
+    "gtopx4_multiple_runs",
+    "gtopx6_multiple_runs",
+    "multitask_ant_dkitty",
+    "multitask_tfbind10_tfbind8",
+    "multitask_gtopx2_gtopx3_gtopx4_gtopx6",
+    "multitask_ant_dkitty_gtopx2_gtopx3_gtopx4_gtopx6_tfbind10_tfbind8",
+]
+
+# 全任务一起训练的 multitask 目录名
+FULL_MULTITASK_EXP: str = (
+    "multitask_ant_dkitty_gtopx2_gtopx3_gtopx4_gtopx6_tfbind10_tfbind8"
+)
+
+# 各 task 对应的「小组」multitask（与 FULL_MULTITASK_EXP 区分）
+TASK_TO_SUBGROUP_MULTITASK_EXP: dict[str, str] = {
+    "ant": "multitask_ant_dkitty",
+    "dkitty": "multitask_ant_dkitty",
+    "tfbind8": "multitask_tfbind10_tfbind8",
+    "tfbind10": "multitask_tfbind10_tfbind8",
+    "gtopx2": "multitask_gtopx2_gtopx3_gtopx4_gtopx6",
+    "gtopx3": "multitask_gtopx2_gtopx3_gtopx4_gtopx6",
+    "gtopx4": "multitask_gtopx2_gtopx3_gtopx4_gtopx6",
+    "gtopx6": "multitask_gtopx2_gtopx3_gtopx4_gtopx6",
+}
+
+
+def _experiment_rank(name: str) -> tuple[int, str]:
+    try:
+        return (EXPERIMENT_ORDER.index(name), name)
+    except ValueError:
+        return (10_000, name)
+
+
+def _task_rank(name: str) -> tuple[int, str]:
+    try:
+        return (TASK_ORDER.index(name), name)
+    except ValueError:
+        return (10_000, name)
+
+
+def _ordered_experiment_names(names: set[str]) -> list[str]:
+    head = [e for e in EXPERIMENT_ORDER if e in names]
+    tail = sorted(names - set(head))
+    return head + tail
+
+
+def _ordered_task_names(names: set[str]) -> list[str]:
+    head = [t for t in TASK_ORDER if t in names]
+    tail = sorted(names - set(head))
+    return head + tail
+
+
+def sort_comparison_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        rows,
+        key=lambda r: (_experiment_rank(r["experiment"]), _task_rank(r["task"])),
+    )
+
+
 def scan_results_root(results_root: Path) -> dict[str, dict[str, dict[str, Any]]]:
     """
     Returns:
@@ -191,12 +274,12 @@ def build_comparison_rows(
     gtgdfgo: dict[str, dict[str, dict[str, Any]]],
     gtg: dict[str, dict[str, dict[str, Any]]],
 ) -> list[dict[str, Any]]:
-    exp_names = sorted(set(gtgdfgo.keys()) | set(gtg.keys()))
+    exp_names = _ordered_experiment_names(set(gtgdfgo.keys()) | set(gtg.keys()))
     rows: list[dict[str, Any]] = []
     for exp in exp_names:
         tasks_g = gtgdfgo.get(exp, {})
         tasks_c = gtg.get(exp, {})
-        task_names = sorted(set(tasks_g.keys()) | set(tasks_c.keys()))
+        task_names = _ordered_task_names(set(tasks_g.keys()) | set(tasks_c.keys()))
         for task in task_names:
             row: dict[str, Any] = {
                 "experiment": exp,
@@ -220,6 +303,56 @@ def build_comparison_rows(
     return rows
 
 
+def _lookup_task_stats(
+    bucket: dict[str, dict[str, dict[str, Any]]],
+    exp_name: str | None,
+    task: str,
+) -> dict[str, Any] | None:
+    if not exp_name or exp_name not in bucket:
+        return None
+    return bucket[exp_name].get(task)
+
+
+def _prefix_stats_flat(prefix: str, st: dict[str, Any] | None) -> dict[str, Any]:
+    keys = (
+        f"{prefix}_n_runs",
+        f"{prefix}_max_mean",
+        f"{prefix}_max_std",
+        f"{prefix}_nmax_mean",
+        f"{prefix}_nmax_std",
+    )
+    if st is None:
+        return {k: "" for k in keys}
+    return {
+        f"{prefix}_n_runs": st["n_runs"],
+        f"{prefix}_max_mean": st["max_mean"],
+        f"{prefix}_max_std": st["max_std"],
+        f"{prefix}_nmax_mean": st["nmax_mean"],
+        f"{prefix}_nmax_std": st["nmax_std"],
+    }
+
+
+def enrich_multitask_columns(
+    rows: list[dict[str, Any]],
+    gtgdfgo: dict[str, dict[str, dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """
+    按当前行的 task，从「小组 multitask」与「全任务 multitask」实验中查找同 task 的聚合指标，
+    写入 gtgdfgo_msub_* / gtgdfgo_mfull_*（与该行 experiment 无关，便于横向对比）。
+    """
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        task = row["task"]
+        sub_exp = TASK_TO_SUBGROUP_MULTITASK_EXP.get(task)
+        sub_st = _lookup_task_stats(gtgdfgo, sub_exp, task)
+        full_st = _lookup_task_stats(gtgdfgo, FULL_MULTITASK_EXP, task)
+        new_row = dict(row)
+        new_row.update(_prefix_stats_flat("gtgdfgo_msub", sub_st))
+        new_row.update(_prefix_stats_flat("gtgdfgo_mfull", full_st))
+        out.append(new_row)
+    return out
+
+
 DECIMALS = 3
 
 # (task_key, LaTeX row label, single-task experiment directory under results/)
@@ -233,12 +366,6 @@ LATEX_TASK_ROWS: list[tuple[str, str, str]] = [
     ("gtopx4", "GTOPX 4", "gtopx4_multiple_runs"),
     ("gtopx6", "GTOPX 6", "gtopx6_multiple_runs"),
 ]
-
-# Multitask experiment dirs to fill the last column (first exp containing the task wins)
-LATEX_MULTITASK_EXPS: list[str] = [
-    "multitask_ant_dkitty",
-]
-
 
 def parse_dataset_best_raw(text: str, task_key: str) -> float | None:
     """Fallback: DesignBenchFunctionWrapper 打印的全库 y 范围；max(min,max) 通常等于全库最优 y。"""
@@ -301,6 +428,8 @@ def fmt_pm_latex(m: Any, s: Any) -> str:
 def stats_cell_latex(
     bucket: dict[str, dict[str, Any]], exp: str, task_key: str
 ) -> str:
+    if not exp:
+        return "--"
     exp_tasks = bucket.get(exp)
     if not exp_tasks:
         return "--"
@@ -308,16 +437,6 @@ def stats_cell_latex(
     if not st:
         return "--"
     return fmt_pm_latex(st.get("max_mean"), st.get("max_std"))
-
-
-def multitask_cell_latex(
-    gtgdfgo: dict[str, dict[str, dict[str, Any]]], task_key: str
-) -> str:
-    for exp in LATEX_MULTITASK_EXPS:
-        cell = stats_cell_latex(gtgdfgo, exp, task_key)
-        if cell != "--":
-            return cell
-    return "--"
 
 
 def d_best_cell(
@@ -349,19 +468,21 @@ def write_latex(
         rf"\caption{{{caption}}}",
         r"\vspace{0.3em}",
         r"\centering",
-        r"\resizebox{0.75\linewidth}{!}{",
-        r"\begin{tabular}{l|c|ccc}",
+        r"\resizebox{\linewidth}{!}{",
+        r"\begin{tabular}{l|c|cccc}",
         r"\toprule",
-        r"Task & $\mathcal{D}$(best) & GTG & GTGdfgo (single) & GTGdfgo (multi) \\",
+        r"Task & $\mathcal{D}$(best) & GTG & GTGdfgo (single) & GTGdfgo (multi, subgroup) & GTGdfgo (multi, all tasks) \\",
         r"\midrule",
     ]
     for task_key, latex_name, exp_name in LATEX_TASK_ROWS:
         db = d_best_cell(gtgdfgo_root, exp_name, task_key, d_best_overrides)
         gtg_c = stats_cell_latex(gtg, exp_name, task_key)
         g1 = stats_cell_latex(gtgdfgo, exp_name, task_key)
-        g2 = multitask_cell_latex(gtgdfgo, task_key)
+        sub_exp = TASK_TO_SUBGROUP_MULTITASK_EXP.get(task_key)
+        g_sub = stats_cell_latex(gtgdfgo, sub_exp or "", task_key)
+        g_full = stats_cell_latex(gtgdfgo, FULL_MULTITASK_EXP, task_key)
         lines.append(
-            f"{latex_name} & {db} & {gtg_c} & {g1} & {g2} \\\\"
+            f"{latex_name} & {db} & {gtg_c} & {g1} & {g_sub} & {g_full} \\\\"
         )
     lines.extend(
         [
@@ -423,13 +544,18 @@ def write_markdown(
         f"- GTG results: `{gtg_root}`",
         "",
         "各实验在多次 run（如 `run*_seed*`）上聚合：**max** / **nmax** 为 `mean ± std`（std 为样本标准差，单次 run 时 std 记为 0）。",
+        "仅统计日志中能解析出 `[task] max_ep_reward` / `nmax_ep_reward` 的 run；评估中断或报错（无上述行）的目录不计入 `n`。",
+        "表格行顺序：单任务按 ant → dkitty → tfbind8 → tfbind10 → gtopx；多任务按联立规模从小到大。",
+        "列 **GTGdfgo 小组 multi** / **全任务 multi**：按当前行的 `task`，分别从对应小组 multitask 实验与 `"
+        + FULL_MULTITASK_EXP
+        + "` 中读取该任务的聚合指标（与左侧 `experiment` 列无关）。",
         "",
-        "| experiment | task | GTGdfgo n | max (mean±std) | nmax (mean±std) | GTG n | max (mean±std) | nmax (mean±std) |",
-        "|------------|------|-----------|----------------|-----------------|-------|----------------|-----------------|",
+        "| experiment | task | GTGdfgo n | max | nmax | GTG n | max | nmax | 小组 multi n | 小组 max | 小组 nmax | 全任务 multi n | 全 max | 全 nmax |",
+        "|------------|------|-----------|------|------|-------|------|------|--------------|----------|-----------|----------------|--------|---------|",
     ]
     for r in rows:
         lines.append(
-            "| {exp} | {task} | {gn} | {gmax} | {gnmax} | {cn} | {cmax} | {cnmax} |".format(
+            "| {exp} | {task} | {gn} | {gmax} | {gnmax} | {cn} | {cmax} | {cnmax} | {msn} | {msmax} | {msnmax} | {mfn} | {mfmax} | {mfnmax} |".format(
                 exp=r["experiment"],
                 task=r["task"],
                 gn=r.get("gtgdfgo_n_runs", "") or "—",
@@ -438,6 +564,16 @@ def write_markdown(
                 cn=r.get("gtg_n_runs", "") or "—",
                 cmax=fmt_pm(r.get("gtg_max_mean"), r.get("gtg_max_std")),
                 cnmax=fmt_pm(r.get("gtg_nmax_mean"), r.get("gtg_nmax_std")),
+                msn=r.get("gtgdfgo_msub_n_runs", "") or "—",
+                msmax=fmt_pm(r.get("gtgdfgo_msub_max_mean"), r.get("gtgdfgo_msub_max_std")),
+                msnmax=fmt_pm(
+                    r.get("gtgdfgo_msub_nmax_mean"), r.get("gtgdfgo_msub_nmax_std")
+                ),
+                mfn=r.get("gtgdfgo_mfull_n_runs", "") or "—",
+                mfmax=fmt_pm(r.get("gtgdfgo_mfull_max_mean"), r.get("gtgdfgo_mfull_max_std")),
+                mfnmax=fmt_pm(
+                    r.get("gtgdfgo_mfull_nmax_mean"), r.get("gtgdfgo_mfull_nmax_std")
+                ),
             )
         )
     lines.append("")
@@ -505,7 +641,9 @@ def main() -> None:
     gtgdfgo = scan_results_root(args.gtgdfgo)
     gtg = scan_results_root(args.gtg)
 
-    rows = build_comparison_rows(gtgdfgo, gtg)
+    rows = enrich_multitask_columns(
+        sort_comparison_rows(build_comparison_rows(gtgdfgo, gtg)), gtgdfgo
+    )
     md_path = out_base.with_suffix(".md")
     csv_path = out_base.with_suffix(".csv")
     md_path.parent.mkdir(parents=True, exist_ok=True)

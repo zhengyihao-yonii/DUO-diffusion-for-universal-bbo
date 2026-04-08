@@ -21,11 +21,20 @@ class Config(ParamsProto):
     loss_discount = 1
     predict_epsilon = True
     dim_mults = (1, 4, 8)
+    # 显式「标量 return」条件（returns_mlp）；默认 False。默认 GTG 式目标值在轨迹最后一维
+    # （见 construct / PointRegretDataset，y 已按任务归一化到 [0,1]），不经此开关。
     returns_condition = False
     calc_energy = False
     dim = 128
     condition_dropout = 0.25
     condition_guidance_w = 1.2
+    # Task × text 联合 CFG（采样）；0 表示该轴不参与 CFG（与 returns_condition 的 guidance 独立）
+    condition_guidance_w_task = 0.0
+    condition_guidance_w_text = 0.0
+    cfg_apply_task = True
+    cfg_apply_text = True
+    sample_with_task_embedding = True
+    sample_with_text_embedding = True
     test_ret = 0.9
     renderer = None
 
@@ -37,6 +46,7 @@ class Config(ParamsProto):
     regret = False
 
     clip_denoised = True
+    # 为 True 且 returns_condition=True 时，训练用 RewardBatch 把标量 return 传入扩散损失
     include_returns = False
     train_only_inv = False
 

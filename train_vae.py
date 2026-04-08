@@ -13,6 +13,7 @@ from diffuser.utils.soo_gtopx import (
     load_gtopx_offline_arrays,
     is_gtopx_task,
 )
+from diffuser.utils.construct_runtime import resolve_torch_device
 
 # 任务映射
 TASKNAME2FULL = {
@@ -54,9 +55,12 @@ def get_original_observation_dim(task_name):
     return dim_map.get(task_name, 128)  # 默认返回128
 
 def main(args):
-    # 设置设备
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"使用设备: {device}")
+    # 设备：--device > 环境变量 GTG_DEVICE > 自动 cuda/cpu（construct 传入的 VAEArgs 无 device 时走后两者）
+    explicit = getattr(args, "device", None)
+    if isinstance(explicit, str):
+        explicit = explicit.strip() or None
+    device = resolve_torch_device(explicit)
+    print(f"使用设备: {device}（可用 GTG_DEVICE 或 train_vae --device 指定）")
     
     # 创建trained_models目录
     os.makedirs("trained_models/vae", exist_ok=True)
@@ -337,6 +341,12 @@ if __name__ == "__main__":
     parser.add_argument('--weight_decay', type=float, default=1e-5, help='权重衰减')
     parser.add_argument('--num_epochs', type=int, default=50, help='训练轮数')
     parser.add_argument('--kl_weight', type=float, default=0.1, help='KL散度权重')
-    
+    parser.add_argument(
+        '--device',
+        type=str,
+        default='',
+        help='训练 VAE 的设备：cuda / cuda:0 / cpu；默认空表示用环境变量 GTG_DEVICE 或自动选择',
+    )
+
     args = parser.parse_args()
     main(args)

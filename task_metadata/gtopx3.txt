@@ -1,0 +1,1 @@
+Task: GTOPX benchmark instance 3 (SOO-Bench / synthetic continuous optimization). Same protocol as other GTOPX tasks; differs in dimensionality and landscape.

@@ -1,0 +1,3 @@
+Task: GTOPX benchmark instance 2 (SOO-Bench / synthetic continuous optimization).
+Black-box minimization in a bounded continuous design space; dimension and bounds follow the GTOPX suite.
+Typical reported objectives are negative scores; evaluation uses normalized metrics for comparison across tasks.

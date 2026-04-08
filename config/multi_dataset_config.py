@@ -4,6 +4,8 @@ import torch
 from params_proto.neo_proto import ParamsProto, PrefixProto, Proto
 
 class Config(ParamsProto):
+    # 注意：train/evaluate 不会 import 本文件；多任务实际使用「字典序首任务」的 config（如 ant,dkitty → ant_config）。
+    # 本文件仅作参数模板或与 ParamsProto 手工合并时使用。
     # misc
     seed = 100
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -17,6 +19,11 @@ class Config(ParamsProto):
     ## model
     model = 'models.TemporalUnet'
     diffusion = 'models.GaussianDiffusion'
+    # Optional: task metadata text → sentence embedding (additive to task one-hot). See task_metadata/README.md
+    use_text_condition = False
+    task_metadata_dir = 'task_metadata'
+    text_encoder_model = 'sentence-transformers/all-MiniLM-L6-v2'
+    text_condition_dropout = 0.1
     horizon = 64
     n_diffusion_steps = 200
     action_weight = 10
@@ -29,6 +36,12 @@ class Config(ParamsProto):
     dim = 32
     condition_dropout = 0.25
     condition_guidance_w = 1.2
+    condition_guidance_w_task = 0.0
+    condition_guidance_w_text = 0.0
+    cfg_apply_task = True
+    cfg_apply_text = True
+    sample_with_task_embedding = True
+    sample_with_text_embedding = True
     test_ret = 0.9
     renderer = None
 
