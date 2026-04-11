@@ -19,6 +19,7 @@ class Config(ParamsProto):
     ## model
     model = 'models.TemporalUnet'
     diffusion = 'models.GaussianDiffusion'
+    multitask_text_only = False
     # Optional: task metadata text → sentence embedding (additive to task one-hot). See task_metadata/README.md
     use_text_condition = False
     task_metadata_dir = 'task_metadata'

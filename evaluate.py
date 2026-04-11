@@ -8,6 +8,9 @@ from params_proto.neo_hyper import Sweep
 
 
 if __name__ == '__main__':
+    _cli_args = sys.argv[1:]
+    sys.argv = [sys.argv[0]]
+
     parser = argparse.ArgumentParser()
     
     # 多任务评估支持
@@ -50,6 +53,12 @@ if __name__ == '__main__':
         help="评估时加载 task_metadata 文本嵌入（须与训练一致）",
     )
     parser.add_argument(
+        "--multitask_text_only",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="与训练一致：多任务仅文本分支（无 task_idx）",
+    )
+    parser.add_argument(
         "--returns_condition",
         action="store_true",
         default=argparse.SUPPRESS,
@@ -61,15 +70,26 @@ if __name__ == '__main__':
         default=argparse.SUPPRESS,
         help="与训练一致：数据集构造含 returns",
     )
+    parser.add_argument(
+        "--text_encoder_model",
+        type=str,
+        default=argparse.SUPPRESS,
+        help="sentence-transformers 模型：Hub 名或本机目录（离线请传已下载的模型文件夹绝对路径）",
+    )
 
-    args = parser.parse_args()
-    sys.argv = [sys.argv[0]]
+    args = parser.parse_args(_cli_args)
 
     # 兼容旧版API - 当指定task时，优先使用task参数覆盖train_tasks和eval_task
     if args.task:
         args.train_tasks = args.task
         args.eval_task = args.task
-    from diffuser.utils.multitask_canon import canonical_train_tasks_csv, multitask_path_token, returns_cond_path_infix
+    from diffuser.utils.multitask_canon import (
+        canonical_train_tasks_csv,
+        multitask_path_token,
+        multitask_text_only_path_infix,
+        returns_cond_path_infix,
+        text_cond_path_infix,
+    )
 
     train_tasks_list = [t.strip() for t in args.train_tasks.split(",") if t.strip()]
     if len(train_tasks_list) > 1:
@@ -88,17 +108,24 @@ if __name__ == '__main__':
             args.eval_all_tasks = False
         elif not args.eval_all_tasks:
             args.eval_all_tasks = True
-    
+
+    if getattr(args, "multitask_text_only", False) and len(train_tasks_list) <= 1:
+        raise SystemExit(
+            "错误: --multitask_text_only 仅适用于多任务（train_tasks 需为逗号分隔的多个任务）"
+        )
+
     _ret = returns_cond_path_infix(args)
+    _txt = text_cond_path_infix(args)
+    _mto = multitask_text_only_path_infix(args)
     # 多任务模式下的数据路径和运行前缀（与 train.py 一致；与评 ant/dkitty 无关）
     if len(train_tasks_list) > 1:
         args.data_path = f'generated_datasets/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}_vae_latent32_train.p'
-        RUN.prefix = f"trained_models/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}{_ret}/seed{args.seed}/"
+        RUN.prefix = f"trained_models/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}{_ret}{_txt}{_mto}/seed{args.seed}/"
     else:
         # 单任务模式，保持原有逻辑
         task_name = train_tasks_list[0]
         args.data_path = f'generated_datasets/{args.train_tasks}_frac{args.frac}_sigma{args.sigma}/{task_name}_{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}_vae_latent32_train.p'
-        RUN.prefix = f"trained_models/{args.train_tasks}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}{_ret}/seed{args.seed}/"
+        RUN.prefix = f"trained_models/{args.train_tasks}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}{_ret}{_txt}{_mto}/seed{args.seed}/"
     
     logger.print(RUN.prefix, color='green')
     jaynes.config("local")

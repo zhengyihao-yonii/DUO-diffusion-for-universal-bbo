@@ -4,6 +4,29 @@ from __future__ import annotations
 import os
 
 
+def multitask_text_only_path_infix(args) -> str:
+    """
+    多任务数据 + 仅文本条件（无 task 分支）时插入 checkpoint 路径片段，与「多任务 task+text」区分。
+    默认 ``_mttextonly``；环境变量 ``GTG_MTTEXTONLY_PATH_INFIX`` 可覆盖。
+    """
+    if getattr(args, "multitask_text_only", False):
+        return os.environ.get("GTG_MTTEXTONLY_PATH_INFIX", "_mttextonly")
+    return ""
+
+
+def text_cond_path_infix(args) -> str:
+    """
+    ``--use_text_condition`` 或 ``--multitask_text_only`` 时插入 ``_textcond``（第三种模式脚本内会强制开文本，CLI 可只写后者）。
+    与「仅 task 分类、无 text_mlp」区分。环境变量 ``GTG_TEXTCOND_PATH_INFIX`` 可覆盖。
+    混合轨迹 ``generated_datasets/multi_*/*.p`` 仍共用。
+    """
+    if getattr(args, "use_text_condition", False) or getattr(
+        args, "multitask_text_only", False
+    ):
+        return os.environ.get("GTG_TEXTCOND_PATH_INFIX", "_textcond")
+    return ""
+
+
 def returns_cond_path_infix(args) -> str:
     """
     同时启用 returns_condition 与 include_returns 时返回路径片段，插在 ``..._eps{eps}`` 与 ``/seed`` 之间，

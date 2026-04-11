@@ -2,8 +2,10 @@ import diffuser.utils as utils
 import diffuser.models as models
 import torch
 from tqdm import tqdm
-import wandb
 import pickle as pkl
+
+# 由 main() 成功 import wandb 后赋值；失败则为 None（旧 typing_extensions 下 wandb 无法 import，训练仍应能跑）
+wandb = None
 import os
 import glob
 from pathlib import Path
@@ -184,15 +186,25 @@ def train_multitask_vae(tasks_list, latent_dim=32, batch_size=64, n_epochs=100, 
         print(f'Epoch {epoch+1}, Loss: {avg_loss:.4f}')
         
         # 记录到wandb
-        wandb.log({'vae_epoch': epoch+1, 'vae_loss': avg_loss})
+        if wandb is not None:
+            wandb.log({'vae_epoch': epoch + 1, 'vae_loss': avg_loss})
     
     vae.eval()
     print("多任务VAE训练完成")
     return vae
 
 def main(**deps):
+    global wandb
     from ml_logger import logger, RUN
     import os
+
+    try:
+        import wandb as _wandb
+
+        wandb = _wandb
+    except Exception as e:
+        print(f"[wandb] import 失败，继续训练（不同步 wandb）: {e}", flush=True)
+        wandb = None
 
     RUN._update(deps)
     print(deps)
@@ -246,6 +258,20 @@ def main(**deps):
         print(f"📊 单任务训练模式启用 📊")
         print(f"📋 训练任务: {Config.train_tasks_list[0]}")
 
+    if getattr(Config, "multitask_text_only", False):
+        if not Config.is_multitask:
+            raise ValueError("multitask_text_only 仅适用于多任务（train_tasks 含多个任务）")
+        if not getattr(Config, "use_text_condition", False):
+            Config.use_text_condition = True
+            print("⚠️ multitask_text_only：已自动设置 use_text_condition=True")
+        print(
+            "📌 multitask_text_only：多任务数据 + 仅 text 分支（task_condition=False，batch 无 task_idx）"
+        )
+
+    use_task_branch = Config.is_multitask and not getattr(
+        Config, "multitask_text_only", False
+    )
+
     # gtopx 等共用 gtopx_config 时类默认 dataset 仍为 gtopx2；必须与真实任务名一致，
     # 否则 ZipDataset / load_gtopx_offline_arrays 维数错误，evaluate 会与 checkpoint 不一致。
     if not getattr(Config, "is_multitask", False) and Config.train_tasks_list:
@@ -274,24 +300,30 @@ def main(**deps):
     else:
         run_name = f"{Config.train_tasks_list[0]}_{Config.n_traj}x{Config.horizon}_k{Config.k}_eps{Config.eps}_seed{Config.seed}"
     
-    wandb.init(project='decdiff-opt',
-               config=Config,
-               name=run_name)
+    if wandb is not None:
+        wandb.init(project='decdiff-opt', config=Config, name=run_name)
 
-    # 更新wandb配置，添加多任务相关信息
-    if Config.is_multitask:
-        wandb.config.update({
-            'is_multitask': True,
-            'train_tasks': Config.train_tasks_list,
-            'eval_task': Config.eval_task,
-            'num_tasks': len(Config.train_tasks_list)
-        }, allow_val_change=True)
-    else:
-        wandb.config.update({
-            'is_multitask': False,
-            'train_task': Config.train_tasks_list[0],
-            'eval_task': Config.train_tasks_list[0]
-        }, allow_val_change=True)
+        # 更新wandb配置，添加多任务相关信息
+        if Config.is_multitask:
+            wandb.config.update(
+                {
+                    'is_multitask': True,
+                    'train_tasks': Config.train_tasks_list,
+                    'eval_task': Config.eval_task,
+                    'num_tasks': len(Config.train_tasks_list),
+                    'multitask_text_only': getattr(Config, "multitask_text_only", False),
+                },
+                allow_val_change=True,
+            )
+        else:
+            wandb.config.update(
+                {
+                    'is_multitask': False,
+                    'train_task': Config.train_tasks_list[0],
+                    'eval_task': Config.train_tasks_list[0],
+                },
+                allow_val_change=True,
+            )
 
     _maybe_build_task_text_embeddings(Config)
 
@@ -317,6 +349,7 @@ def main(**deps):
             include_returns=Config.include_returns,
             task_name=None,  # 混合文件包含所有任务的信息
             task_text_embeds=getattr(Config, "_task_text_embeds_np", None),
+            include_task_idx=use_task_branch,
         )
         print(f"加载混合轨迹文件: {mixed_data_path}")
         print(f"混合数据集大小: {len(dataset)}")
@@ -388,7 +421,7 @@ def main(**deps):
             condition_dropout=Config.condition_dropout,
             calc_energy=Config.calc_energy,
             device=Config.device,
-            task_condition=Config.is_multitask,
+            task_condition=use_task_branch,
             num_tasks=len(Config.train_tasks_list) if Config.is_multitask else 1,
             text_condition=getattr(Config, "use_text_condition", False),
             text_embed_input_dim=int(
@@ -451,7 +484,7 @@ def main(**deps):
             condition_dropout=Config.condition_dropout,
             calc_energy=Config.calc_energy,
             device=Config.device,
-            task_condition=Config.is_multitask,
+            task_condition=use_task_branch,
             num_tasks=len(Config.train_tasks_list) if Config.is_multitask else 1,
             text_condition=getattr(Config, "use_text_condition", False),
             text_embed_input_dim=int(
@@ -668,7 +701,8 @@ def main(**deps):
     logger.print(f"   - 训练模式: {'多任务' if Config.is_multitask else '单任务'}")
     
     # 将模式信息添加到wandb
-    wandb.log({'training_mode': 'multitask' if Config.is_multitask else 'singletask'})
+    if wandb is not None:
+        wandb.log({'training_mode': 'multitask' if Config.is_multitask else 'singletask'})
     
     n_epochs = int(Config.n_train_steps // Config.n_steps_per_epoch)
     logger.print(f"🔄 开始训练循环，共{n_epochs}个epoch")
@@ -679,7 +713,8 @@ def main(**deps):
         logger.print(f'✅ Epoch {i} 训练完成')
         
         # 记录epoch信息到wandb
-        wandb.log({'epoch': i, 'total_epochs': n_epochs})
+        if wandb is not None:
+            wandb.log({'epoch': i, 'total_epochs': n_epochs})
     
     # 训练完成后的总结
     logger.print("🎉 扩散模型训练完成! 🎉")
@@ -687,5 +722,6 @@ def main(**deps):
     logger.print(f"   - 完成步数: {trainer.step}")
     
     # 记录训练完成信息到wandb
-    wandb.log({'training_completed': True, 'final_step': trainer.step})
+    if wandb is not None:
+        wandb.log({'training_completed': True, 'final_step': trainer.step})
 

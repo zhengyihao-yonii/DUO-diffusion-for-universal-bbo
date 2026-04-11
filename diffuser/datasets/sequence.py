@@ -287,6 +287,7 @@ class PointRegretDataset(torch.utils.data.Dataset):
         include_returns=False,
         task_name=None,
         task_text_embeds=None,
+        include_task_idx: bool = True,
     ):
         with open(data_path, "rb") as f:
             data_obj = pkl.load(f)
@@ -315,6 +316,8 @@ class PointRegretDataset(torch.utils.data.Dataset):
         self.regret = regret
         self.include_returns = include_returns
         self.task_name = task_name
+        # 多任务混合 pkl：是否在 batch 中提供 task_idx（False = 仅 text_embed，供 multitask_text_only）
+        self.include_task_idx = bool(include_task_idx)
         # Optional: [num_tasks, D] float32 numpy — frozen sentence embeddings (see task_metadata/)
         self.task_text_embeds = (
             np.asarray(task_text_embeds, dtype=np.float32) if task_text_embeds is not None else None
@@ -334,25 +337,17 @@ class PointRegretDataset(torch.utils.data.Dataset):
         
         self.task_indices = task_indices
         self.tasks_list = [str(t) for t in tasks_list] if tasks_list is not None else None
-        
-        # 任务名 -> 整数标签（与混合轨迹文件中 task_indices 一致）
-        if self.tasks_list:
+        # 仅多任务混合 pkl（7 元组）在 batch 里携带 task_idx / text_embed；单任务 pkl（5 元组）与 GTG 一致，只提供 ctx_len，不做任务分类条件。
+        self._multitask_pkl = self.tasks_list is not None
+
+        if self.tasks_list is not None:
             self.task_to_idx = {name: i for i, name in enumerate(self.tasks_list)}
+            if task_name is not None and task_name in self.task_to_idx:
+                self.task_idx = self.task_to_idx[task_name]
+            else:
+                self.task_idx = -1
         else:
-            self.task_to_idx = {
-                'ant': 0,
-                'dkitty': 1,
-                'tfbind8': 2,
-                'tfbind10': 3,
-                'superconductor': 4,
-            }
-        
-        # 如果提供了 task_name，使用其索引；混合数据且 task_name 为 None 时在 __getitem__ 中按轨迹写入
-        if task_name is not None and task_name in self.task_to_idx:
-            self.task_idx = self.task_to_idx[task_name]
-        elif task_name is not None:
-            self.task_idx = -1
-        else:
+            self.task_to_idx = {}
             self.task_idx = -1
     
     def __len__(self):
@@ -361,6 +356,10 @@ class PointRegretDataset(torch.utils.data.Dataset):
     def get_conditions(self, trajectories):
         conditions = {}
         conditions["ctx_len"] = np.array([0])
+        if not self._multitask_pkl:
+            return conditions
+        if not self.include_task_idx:
+            return conditions
         conditions["task_idx"] = np.array([self.task_idx])
         if self.task_text_embeds is not None and self.task_idx >= 0:
             conditions["text_embed"] = np.asarray(
@@ -383,26 +382,21 @@ class PointRegretDataset(torch.utils.data.Dataset):
 
         trajectories = torch.cat([points, values_norm], dim=-1)
         conditions = self.get_conditions(trajectories)
-        
-        # Update task index for multi-task data
-        if hasattr(self, 'task_indices') and self.task_indices is not None:
-            # 确保task_idx是一个标量值
-            # 检查task_indices的维度，如果是二维的（每个轨迹每个时间步都有任务索引），只取第一个元素
-            if self.task_indices.ndim == 2:
-                task_idx = self.task_indices[traj_idx, 0]
-            else:
-                task_idx = self.task_indices[traj_idx]
-            
-            if isinstance(task_idx, torch.Tensor):
-                task_idx = task_idx.item()
-            conditions["task_idx"] = np.array([task_idx])
 
-        if self.task_text_embeds is not None:
-            tid = conditions["task_idx"]
-            tid = int(tid.flatten()[0]) if hasattr(tid, "flatten") else int(tid)
-            conditions["text_embed"] = np.asarray(
-                self.task_text_embeds[tid], dtype=np.float32
-            )
+        if self._multitask_pkl and self.task_indices is not None:
+            if self.task_indices.ndim == 2:
+                tid_scalar = self.task_indices[traj_idx, 0]
+            else:
+                tid_scalar = self.task_indices[traj_idx]
+            if isinstance(tid_scalar, torch.Tensor):
+                tid_scalar = tid_scalar.item()
+            tid = int(tid_scalar)
+            if self.include_task_idx:
+                conditions["task_idx"] = np.array([tid])
+            if self.task_text_embeds is not None:
+                conditions["text_embed"] = np.asarray(
+                    self.task_text_embeds[tid], dtype=np.float32
+                )
             
         if self.include_returns:
             returns = values.sum().unsqueeze(-1) / self.block_size

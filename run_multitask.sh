@@ -16,8 +16,15 @@
 # 环境变量（可选）:
 #   PYTHON         Python 解释器，默认 /home/xk/anaconda3/envs/gtg/bin/python
 #   PROJECT        项目根目录（GTGdfgo），默认本脚本所在目录
-#   RESULTS        日志与汇总输出目录
+#   RESULTS        日志与汇总输出目录。**若已在 shell 中 export 过无后缀的 multitask_* 路径，会覆盖自动命名**；
+#                  本脚本在 TRAIN_EXTRA 含 --use_text_condition / --multitask_text_only 时，若检测到 RESULTS 仍为
+#                  「无文本后缀的基路径」，会自动改为带 _textcond / _mttextonly 的目录。完全自定义请 unset RESULTS 后
+#                  再设 RESULTS=...，或直接使用带后缀的路径。
 #   RESULTS_SUFFIX 仅 USE_RETURNS=1 且未显式设置 RESULTS 时追加到默认路径（默认 _retcond）
+#   TEXTCOND_RESULTS_SUFFIX  文本条件实验在未显式设置 RESULTS 时追加（默认 _textcond）；
+#                            触发条件：USE_TEXT_CONDITION=1，或 TRAIN_EXTRA 含 --use_text_condition
+#   MTTEXTONLY_RESULTS_SUFFIX  多任务仅文本分支（默认 _mttextonly）；
+#                            触发条件：TRAIN_EXTRA 含 --multitask_text_only
 #   EVAL_ALL       设为 0 时，多任务只评一个任务（见 --eval_only_first）；默认评 train_tasks 全部。
 #   EVAL_SINGLE_TASK  仅当 EVAL_ALL=0 时有效：要评的那一个任务名（默认 train_tasks 字典序第一个）。
 #   START_SEED     本批第一次运行使用的随机种子，默认 0。设为 3 且 NUM_RUNS=2 则使用 seed 3、4。
@@ -28,6 +35,11 @@
 #   TRAIN_EXTRA      可选，追加传给 train.py 的参数（空格分隔，勿加引号包裹整条）。
 #                    例: TRAIN_EXTRA="--condition_guidance_w_task 1.2 --condition_guidance_w_text 0.8"
 #   EVAL_EXTRA_CMD   可选，追加传给 evaluate.py 的额外参数（勿与脚本内数组 EVAL_EXTRA 混淆）。
+#   TEXT_ENCODER_MODEL  可选，离线 sentence-transformers 目录的绝对路径（须含 config.json）。
+#                    未设置时，若存在下面「相对 PROJECT」的默认快照目录，则自动解析并仅在启用
+#                    文本条件时向 train/evaluate 追加 --text_encoder_model。
+#                    默认相对路径（PROJECT=GTGdfgo，模型在上一级 zyh_dfgo）:
+#                    ../models--sentence-transformers--all-MiniLM-L6-v2/snapshots/c9745ed1d9f207416be6d2e6f8de32d1f16199bf
 #   USE_RETURNS  设为 1 时，在 TRAIN_EXTRA / EVAL_EXTRA_CMD 基础上再追加
 #                    --returns_condition --include_returns（显式标量 return 条件，与 config 手工改等价）
 #   CUDA_VISIBLE_DEVICES  见脚本中部「GPU」注释；或设 GPU_ID（由 scripts/gpu_env.sh 处理）。
@@ -98,7 +110,31 @@ _rs=""
 if [[ "${USE_RETURNS:-0}" == "1" ]]; then
   _rs="${RESULTS_SUFFIX:-_retcond}"
 fi
-RESULTS="${RESULTS:-$PROJECT/results/multitask_$(echo "$TRAIN_TASKS" | tr ',' '_')${_rs}}"
+_tc=""
+if [[ "${USE_TEXT_CONDITION:-0}" == "1" ]] \
+  || [[ "${TRAIN_EXTRA:-}" == *"--use_text_condition"* ]] \
+  || [[ "${TRAIN_EXTRA:-}" == *"--multitask_text_only"* ]]; then
+  _tc="${TEXTCOND_RESULTS_SUFFIX:-_textcond}"
+fi
+_mto=""
+if [[ "${TRAIN_EXTRA:-}" == *"--multitask_text_only"* ]]; then
+  _mto="${MTTEXTONLY_RESULTS_SUFFIX:-_mttextonly}"
+fi
+
+# 无环境变量时的默认 results 目录（含 _retcond / _textcond / _mttextonly 等后缀）
+_MULTITASK_TOKEN="$(echo "$TRAIN_TASKS" | tr ',' '_')"
+_RESULTS_AUTO="$PROJECT/results/multitask_${_MULTITASK_TOKEN}${_rs}${_tc}${_mto}"
+# 仅含 ret 等、不含文本后缀的「基路径」（与旧版默认 multitask_* 一致）
+_RESULTS_PLAIN="$PROJECT/results/multitask_${_MULTITASK_TOKEN}${_rs}"
+
+RESULTS="${RESULTS:-$_RESULTS_AUTO}"
+
+# 若曾在 shell 里 export RESULTS=.../multitask_ant_dkitty（无 _textcond/_mttextonly），
+# 这里会一直是基路径，看起来像「加了 TRAIN_EXTRA 也没后缀」。此时若 TRAIN_EXTRA 需要后缀，自动对齐到 _RESULTS_AUTO。
+if [[ -n "${_tc}${_mto}" ]] && [[ "$RESULTS" == "$_RESULTS_PLAIN" ]]; then
+  RESULTS="$_RESULTS_AUTO"
+  echo "[run_multitask] 检测到 RESULTS 与无文本后缀基路径相同，已按 TRAIN_EXTRA 改为: $RESULTS"
+fi
 
 mkdir -p "$RESULTS"
 BATCH_STATE_FILE="$RESULTS/.gtg_pipeline_batch"
@@ -153,6 +189,8 @@ echo "  train_tasks: $TRAIN_TASKS"
 echo "  评估: 默认评全部训练任务；EVAL_ALL=${EVAL_ALL:-1}（0=仅评一个，见 EVAL_SINGLE_TASK）"
 echo "  num_runs: $NUM_RUNS  start_seed: $START_SEED  (本批 seed 范围: $START_SEED .. $((START_SEED + NUM_RUNS - 1)))"
 echo "  n_traj: $N_TRAJ  k: $K  eps: $EPS  horizon: $HORIZON  frac: $FRAC  sigma: $SIGMA"
+echo "  TRAIN_EXTRA: ${TRAIN_EXTRA:-<未设置>}"
+echo "  目录后缀: ret=${_rs:-无}  textcond=${_tc:-无}  mttextonly=${_mto:-无}"
 echo "  EVAL_ONLY=${EVAL_ONLY:-0}  BATCH_RUN=${BATCH_RUN}"
 echo "  PROJECT: $PROJECT"
 echo "  RESULTS: $RESULTS"
@@ -182,6 +220,28 @@ if [[ "${USE_RETURNS:-0}" == "1" ]]; then
   TRAIN_EXTRA="${TRAIN_EXTRA:-} --returns_condition --include_returns"
   EVAL_EXTRA_CMD="${EVAL_EXTRA_CMD:-} --returns_condition --include_returns"
   echo "[USE_RETURNS] 已追加 --returns_condition --include_returns 至 train / evaluate"
+fi
+
+# 离线 MiniLM：默认解析 zyh_dfgo 下 HF hub 快照（相对 PROJECT=GTGdfgo）；可 export TEXT_ENCODER_MODEL 覆盖
+_TEXT_ENCODER_REL="../models--sentence-transformers--all-MiniLM-L6-v2/snapshots/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+if [[ -z "${TEXT_ENCODER_MODEL:-}" ]]; then
+  _te_resolve="$(cd "$PROJECT" && realpath "$_TEXT_ENCODER_REL" 2>/dev/null || true)"
+  if [[ -n "$_te_resolve" && -d "$_te_resolve" ]]; then
+    TEXT_ENCODER_MODEL="$_te_resolve"
+  fi
+  unset _te_resolve
+fi
+unset _TEXT_ENCODER_REL
+if [[ -n "${TEXT_ENCODER_MODEL:-}" ]] \
+  && [[ "${TRAIN_EXTRA:-}" != *"--text_encoder_model"* ]] \
+  && [[ "${EVAL_EXTRA_CMD:-}" != *"--text_encoder_model"* ]]; then
+  if [[ "${USE_TEXT_CONDITION:-0}" == "1" ]] \
+    || [[ "${TRAIN_EXTRA:-}" == *"--use_text_condition"* ]] \
+    || [[ "${TRAIN_EXTRA:-}" == *"--multitask_text_only"* ]]; then
+    TRAIN_EXTRA="${TRAIN_EXTRA:-} --text_encoder_model ${TEXT_ENCODER_MODEL}"
+    EVAL_EXTRA_CMD="${EVAL_EXTRA_CMD:-} --text_encoder_model ${TEXT_ENCODER_MODEL}"
+    echo "[TEXT_ENCODER] 已追加 --text_encoder_model -> ${TEXT_ENCODER_MODEL}"
+  fi
 fi
 
 echo

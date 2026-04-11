@@ -24,6 +24,7 @@ class Config(ParamsProto):
     returns_condition = False
     calc_energy = False
     dim = 128
+    multitask_text_only = False
     condition_dropout = 0.25
     condition_guidance_w = 1.2
     condition_guidance_w_task = 0.0

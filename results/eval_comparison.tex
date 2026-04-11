@@ -1,21 +1,24 @@
-% Requires: \usepackage{booktabs} (and graphicx for \resizebox).
+% Requires: \usepackage{booktabs}, \usepackage{graphicx}, \usepackage{xcolor}.
+% Per row: best / runner-up among UniSO (best) + GTG + three GTGdfgo columns.
 \begin{table*}[t!]
-\caption{Un-normalized max scores (mean $\pm$ std over runs). $\mathcal{D}$(best): best reward $y$ in the offline training subset (same as training ZipDataset; printed as \texttt{offline\_train\_best\_y} in evaluate). Older logs fall back to the full-pool min/max line; use \texttt{--d-best-json} to override.}
+\caption{Un-normalized max scores (mean $\pm$ std over runs); \shortstack{UniSO\,best} is the best mean among UniSO-T / UniSO-N columns in \texttt{uniso\_result.tex}. Mean rank: per task, rank methods by mean (higher better); report mean $\pm$ std across tasks. $\mathcal{D}$(best): offline training subset (\texttt{offline\_train\_best\_y}); optional \texttt{results/d\_best.json} overrides.}
 \vspace{0.3em}
 \centering
 \resizebox{\linewidth}{!}{
-\begin{tabular}{l|c|cccc}
+\begin{tabular}{l|c|c|cccc}
 \toprule
-Task & $\mathcal{D}$(best) & GTG & GTGdfgo (single) & GTGdfgo (multi, subgroup) & GTGdfgo (multi, all tasks) \\
+Task & $\mathcal{D}$(best) & \shortstack{UniSO\\best} & GTG & GTGdfgo (single) & GTGdfgo (multi, subgroup) & GTGdfgo (multi, all tasks) \\
 \midrule
-Ant & 165.326 & 452.330 $\pm$ 61.502 & 523.935 $\pm$ 55.443 & 586.691 $\pm$ 0.000 & 570.945 $\pm$ 15.468 \\
-D'Kitty & 199.363 & 264.857 $\pm$ 17.571 & 250.007 $\pm$ 14.505 & 289.591 $\pm$ 0.000 & 296.782 $\pm$ 11.719 \\
-TF Bind 8 & 0.439 & 0.934 $\pm$ 0.030 & 0.954 $\pm$ 0.019 & 0.973 $\pm$ 0.009 & 0.698 $\pm$ 0.101 \\
-TF Bind 10 & 0.005 & 0.632 $\pm$ 0.106 & 0.626 $\pm$ 0.148 & 0.626 $\pm$ 0.131 & 0.215 $\pm$ 0.219 \\
-GTOPX 2 & -196.663 & -72.163 $\pm$ 8.495 & -102.223 $\pm$ 12.230 & -99.293 $\pm$ 22.175 & -99.013 $\pm$ 42.811 \\
-GTOPX 3 & -152.364 & -53.866 $\pm$ 9.877 & -51.762 $\pm$ 3.893 & -58.310 $\pm$ 14.914 & -86.325 $\pm$ 61.474 \\
-GTOPX 4 & -216.709 & -72.749 $\pm$ 6.632 & -68.361 $\pm$ 13.480 & -69.035 $\pm$ 7.255 & -115.660 $\pm$ 60.530 \\
-GTOPX 6 & -111.666 & -55.834 $\pm$ 9.655 & -49.386 $\pm$ 8.267 & -55.267 $\pm$ 7.939 & -82.709 $\pm$ 45.592 \\
+Ant & 165.326 & 455.658 $\pm$ 39.188 & 452.330 $\pm$ 61.502 & 523.935 $\pm$ 55.443 & \textbf{\textcolor{violet}{566.325 $\pm$ 13.636}} & \textbf{\textcolor{blue}{570.945 $\pm$ 15.468}} \\
+D'Kitty & 199.363 & 222.007 $\pm$ 33.677 & 264.857 $\pm$ 17.571 & 250.007 $\pm$ 14.505 & \textbf{\textcolor{violet}{270.165 $\pm$ 38.116}} & \textbf{\textcolor{blue}{296.782 $\pm$ 11.719}} \\
+TF Bind 8 & 0.439 & 0.870 $\pm$ 0.085 & 0.934 $\pm$ 0.030 & \textbf{\textcolor{violet}{0.954 $\pm$ 0.019}} & \textbf{\textcolor{blue}{0.973 $\pm$ 0.009}} & 0.698 $\pm$ 0.101 \\
+TF Bind 10 & 0.005 & \textbf{\textcolor{blue}{0.944 $\pm$ 0.794}} & \textbf{\textcolor{violet}{0.632 $\pm$ 0.106}} & 0.626 $\pm$ 0.148 & 0.626 $\pm$ 0.131 & 0.215 $\pm$ 0.219 \\
+GTOPX 2 & -196.663 & \textbf{\textcolor{blue}{-68.526 $\pm$ 14.058}} & \textbf{\textcolor{violet}{-72.163 $\pm$ 8.495}} & -104.344 $\pm$ 11.523 & -99.293 $\pm$ 22.175 & -99.013 $\pm$ 42.811 \\
+GTOPX 3 & -152.364 & \textbf{\textcolor{blue}{-44.427 $\pm$ 13.456}} & -53.866 $\pm$ 9.877 & \textbf{\textcolor{violet}{-51.762 $\pm$ 3.893}} & -58.310 $\pm$ 14.914 & -86.325 $\pm$ 61.474 \\
+GTOPX 4 & -216.709 & -74.070 $\pm$ 13.131 & -72.749 $\pm$ 6.632 & \textbf{\textcolor{blue}{-68.361 $\pm$ 13.480}} & \textbf{\textcolor{violet}{-69.035 $\pm$ 7.255}} & -115.660 $\pm$ 60.530 \\
+GTOPX 6 & -111.666 & \textbf{\textcolor{blue}{-46.056 $\pm$ 11.547}} & -55.834 $\pm$ 9.655 & \textbf{\textcolor{violet}{-54.001 $\pm$ 9.467}} & -55.267 $\pm$ 7.939 & -82.709 $\pm$ 45.592 \\
+\midrule
+Mean rank & / & 2.625 $\pm$ 1.768 & 3.125 $\pm$ 0.991 & 2.875 $\pm$ 1.356 & 2.625 $\pm$ 1.061 & 3.750 $\pm$ 1.832 \\
 \bottomrule
 \end{tabular}
 }

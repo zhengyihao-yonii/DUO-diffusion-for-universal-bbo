@@ -1,0 +1,26 @@
+\begin{table*}[htbp]
+    \caption{Un-normalized scores in unconstrained tasks from Design-Bench and SOO-Bench, where the best and runner-up results on each task are \textbf{\textcolor{blue}{Blue}} and \textbf{\textcolor{violet}{Violet}}, respectively. $\mathcal{D}$(best) denotes the best score in the offline dataset and BN represents batch normalization for numerical input designs. Single-task experts are trained within one task, while UniSO-T and UniSO-N are done in a multi-task manner.}\vspace{0.3em}
+    \centering
+    \resizebox{\linewidth}{!}{
+    \begin{tabular}{c|c|cc|cc|cc}
+    \toprule
+     &  & \multicolumn{2}{c|}{Single-task \cm{Numeric-input} Experts} & \multicolumn{2}{c|}{UniSO-T} & \multicolumn{2}{c}{UniSO-N} \\ 
+    \cmidrule{3-8} 
+     \multirow{-2}{*}{Task}& \multirow{-2}{*}{$\mathcal{D}$(best)}  & BN + BO & BN + Grad & Vanilla & Improved & Vanilla & Improved \\
+    \midrule
+    Ant & 165.326 & 241.350 ± 288.922 & 229.462 ± 165.869 & \second{446.283 ± 20.635} & \best{455.658 ± 39.188} & 260.058 ± 280.526 & 381.787 ± 88.907 \\
+    D'Kitty & 199.363  & 102.972 ± 130.192 & \second{183.263 ± 62.436} & 168.263 ± 104.068 & \best{222.007 ± 33.677} & 4.872 ± 13.718 & 42.215 ± 71.095 \\
+    Superconductor & 74.000  & \second{83.884 ± 4.099} & \best{97.137 ± 6.113} & 81.047 ± 6.476 & 82.642 ± 3.467 & 78.791 ± 2.981 & 82.033 ± 3.412 \\
+    TF Bind 8 & 0.439 & \second{0.898 ± 0.088} & \best{0.959 ± 0.023} & 0.870 ± 0.085 & 0.857 ± 0.069 & 0.739 ± 0.101 & 0.856 ± 0.043 \\
+    TF Bind 10 & 0.005  & 0.454 ± 0.091 & 0.888 ± 0.229 & \second{0.929 ± 0.802} & \best{0.944 ± 0.794} & 0.471 ± 0.150 & 0.528 ± 0.156 \\
+    GTOPX 2 & -195.586  & \second{-74.763 ± 8.577} & -128.310 ± 15.616 & \best{-68.526 ± 14.058} & -90.106 ± 8.223 & -94.656 ± 25.608 & -88.063 ± 29.409 \\
+    GTOPX 3 & -151.190  & \best{-40.104 ± 2.748} & -151.190 ± 0.000 & -47.440 ± 6.249 & \second{-44.427 ± 13.456} & -63.007 ± 12.559 & -48.848 ± 14.797 \\
+    GTOPX 4 & -215.716 & -87.976 ± 3.497 & -215.710 ± 0.000 & \best{-74.070 ± 13.131} & \second{-74.779 ± 11.032} & -111.437 ± 28.417 & -94.579 ± 11.591 \\
+    GTOPX 6 & -112.599  & -49.660 ± 6.170 & -112.599 ± 0.000 & -50.314 ± 6.481 & \second{-48.244 ± 5.766} & \best{-46.056 ± 11.547} & -52.672 ± 9.042 \\ \midrule
+    Avg. Rank & / & 3.111 ± 1.523 & 4.111 ± 2.183 & \second{2.667 ± 1.247} & \best{2.222 ± 1.133} & 4.778 ± 1.474 & 4.111 ± 0.737 \\
+    \bottomrule
+    \end{tabular}
+    }
+    \label{tab:main-results}
+    \vspace{-1em}
+    \end{table*}

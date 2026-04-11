@@ -5,10 +5,19 @@ import argparse
 from tqdm import tqdm
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import pickle as pkl
-from diffuser.utils import set_seed
-from diffuser.models.vae import VAE
-import torch.nn.functional as F
-from train_vae import main as train_vae_main
+
+# 禁止 `from diffuser.utils import set_seed`：会执行 utils/__init__ → training（曾顶层 import wandb），
+# 旧 typing_extensions 下 wandb 导入失败，construct 在 Step 1 即 exit 1，run_multitask 因 set -e 直接结束。
+def set_seed(seed: int) -> None:
+    import numpy as np
+    import torch
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
 from sklearn.preprocessing import StandardScaler
 from dataset_utils import MultiDatasetLoader, save_dataset_info, load_dataset_info
 
@@ -214,9 +223,23 @@ def construct_trajectories(tasks_list, frac=1.0, sigma=0.0, seed=0, n_traj=None,
         output_dir_early = f"./generated_datasets/{tasks_list[0]}_frac{frac}_sigma{sigma}"
 
     # 产物已存在则跳过数据加载、VAE、降维（避免仅加 USE_RETURNS 仍整段重跑 Step 1）
+    # 多任务必须与单任务一致：按 n_traj/k/eps/horizon 检查各任务 pkl；不能仅因 mixed 存在就跳过，
+    # 否则更换 n_traj 后仍会命中旧的 mixed，且 run_multitask 后续 train 会指向不存在的 data_path。
     if is_multitask:
         mixed_path = os.path.join(output_dir_early, "mixed_trajectories_train.p")
-        if os.path.isfile(mixed_path):
+        all_task_pkls_exist = True
+        for task_name in tasks_list:
+            task_n_traj = n_traj[task_name]
+            task_k = k[task_name]
+            task_eps = eps[task_name]
+            task_pkl = os.path.join(
+                output_dir_early,
+                f"{task_name}_{task_n_traj}x{traj_len}_k{task_k}_eps{task_eps}_vae_latent32_train.p",
+            )
+            if not os.path.isfile(task_pkl):
+                all_task_pkls_exist = False
+                break
+        if os.path.isfile(mixed_path) and all_task_pkls_exist:
             print(
                 f"已存在多任务混合轨迹（训练实际加载此文件），跳过数据加载与 VAE：{mixed_path}"
             )
@@ -230,6 +253,9 @@ def construct_trajectories(tasks_list, frac=1.0, sigma=0.0, seed=0, n_traj=None,
         if os.path.isfile(task_pkl):
             print(f"已存在轨迹文件，跳过数据加载与 VAE：{task_pkl}")
             return output_dir_early, None
+
+    # 延后：避免「仅跳过 Step 1」时 import VAE/train_vae 拉入不必要依赖
+    from train_vae import main as train_vae_main
 
     # 数据加载和预处理
     if is_multitask:
@@ -725,3 +751,4 @@ if __name__ == "__main__":
         fixed_dim=args.fixed_dim,
         horizon=args.horizon,
     )
+    sys.exit(0)

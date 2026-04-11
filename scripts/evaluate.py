@@ -7,8 +7,9 @@ import torch
 import numpy as np
 import os
 import pickle as pkl
-import wandb
 from pathlib import Path
+
+wandb = None
 from diffuser.utils.arrays import to_torch
 from diffuser.utils.des_bench import DesignBenchFunctionWrapper
 from diffuser.models.vae import VAE
@@ -81,6 +82,7 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
     is_multitask = deps.get('is_multitask', False)
     Config.is_multitask = is_multitask
     train_tasks_list = deps.get('train_tasks_list', [eval_task])
+    use_task_branch = is_multitask and not getattr(Config, "multitask_text_only", False)
 
     # 多任务：从单独路径加载该任务的 proxy
     if is_multitask:
@@ -129,6 +131,7 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
             include_returns=Config.include_returns,
             task_name=None,
             task_text_embeds=getattr(Config, "_task_text_embeds_np", None),
+            include_task_idx=use_task_branch,
         )
     else:
         dataset_config = utils.Config(
@@ -221,7 +224,7 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
         dim=Config.dim,
         returns_condition=Config.returns_condition,
         device=Config.device,
-        task_condition=is_multitask,
+        task_condition=use_task_branch,
         num_tasks=num_tasks,
         condition_dropout=getattr(Config, 'condition_dropout', 0.25),
         calc_energy=getattr(Config, 'calc_energy', False),
@@ -317,7 +320,7 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
         batch = next(trainer.dataloader)
         conditions = {i: to_torch(batch.trajectories[:, i + Config.horizon - context_length], device=device) for i in range(context_length)}
         conditions["ctx_len"] = to_torch(np.ones(trainer.batch_size,), device=device) * context_length
-        if is_multitask:
+        if use_task_branch:
             conditions["task_idx"] = torch.full((trainer.batch_size,), task_label_idx, dtype=torch.long, device=device)
         if getattr(Config, "use_text_condition", False) and hasattr(
             Config, "_task_text_embeds_np"
@@ -419,7 +422,7 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
         f"nmean_ep_reward_{eval_task}": np.mean(y_norm),
     })
 
-    if log_wandb:
+    if log_wandb and wandb is not None:
         wandb.log({
             f"max_ep_reward/{eval_task}": np.max(y),
             f"median_ep_reward/{eval_task}": np.median(y),
@@ -456,7 +459,16 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
 
 
 def evaluate(**deps):
+    global wandb
     from ml_logger import logger, RUN
+
+    try:
+        import wandb as _wandb
+
+        wandb = _wandb
+    except Exception as e:
+        print(f"[wandb] import 失败，继续评估（不同步 wandb）: {e}", flush=True)
+        wandb = None
 
     RUN._update(deps)
     print(deps)
@@ -487,6 +499,11 @@ def evaluate(**deps):
     Config.train_tasks_list = train_tasks_list
     Config.is_multitask = is_multitask
 
+    if getattr(Config, "multitask_text_only", False) and not getattr(
+        Config, "use_text_condition", False
+    ):
+        Config.use_text_condition = True
+
     if getattr(Config, "use_text_condition", False):
         from diffuser.utils.task_text_embedding import build_task_text_embedding_matrix
 
@@ -510,7 +527,8 @@ def evaluate(**deps):
         if len(tasks_to_eval) > 1
         else f"{tasks_to_eval[0]}_{Config.n_traj}x{Config.horizon}_k{Config.k}_eps{Config.eps}_seed{Config.seed}"
     )
-    wandb.init(project='decdiff-opt', config=Config, name=run_name, group="evaluation")
+    if wandb is not None:
+        wandb.init(project='decdiff-opt', config=Config, name=run_name, group="evaluation")
 
     loadpath = os.path.join(logger.prefix, 'checkpoint')
     if Config.save_checkpoints:
@@ -543,4 +561,5 @@ def evaluate(**deps):
         for r in results:
             _wandb_summary[f"summary/max_{r['eval_task']}"] = r['max']
             _wandb_summary[f"summary/nmax_{r['eval_task']}"] = r['nmax']
-        wandb.log(_wandb_summary)
+        if wandb is not None:
+            wandb.log(_wandb_summary)

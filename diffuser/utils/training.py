@@ -6,7 +6,6 @@ import einops
 import pdb
 import diffuser
 from copy import deepcopy
-import wandb
 from tqdm import tqdm
 
 from .arrays import batch_to_device, to_np, to_device, apply_dict, to_torch
@@ -186,6 +185,8 @@ class Trainer(object):
                 metrics['proxy_steps'] = self.proxy_step
                 metrics['proxy_loss'] = loss.detach().item()
                 logger.log_metrics_summary(metrics, default_stats='mean')
+                import wandb
+
                 wandb.log(metrics)
 
             self.proxy_step += 1
@@ -215,6 +216,8 @@ class Trainer(object):
                 metrics['steps'] = self.step
                 metrics['loss'] = loss.detach().item()
                 logger.log_metrics_summary(metrics, default_stats='mean')
+                import wandb
+
                 wandb.log(metrics)
 
             # if self.step == 0 and self.sample_freq:
