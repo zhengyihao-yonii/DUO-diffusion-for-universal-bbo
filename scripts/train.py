@@ -1,6 +1,7 @@
 import diffuser.utils as utils
 import diffuser.models as models
 import torch
+
 from tqdm import tqdm
 import pickle as pkl
 
@@ -12,6 +13,12 @@ from pathlib import Path
 from diffuser.models.vae import VAE
 from torch.utils.data import DataLoader, ConcatDataset
 from diffuser.utils.training import Trainer
+from diffuser.cpu_threads import (
+    apply_torch_cpu_threads_from_env,
+    dataloader_num_workers_cap,
+)
+
+apply_torch_cpu_threads_from_env()
 
 
 def _maybe_build_task_text_embeddings(Config):
@@ -154,7 +161,7 @@ def train_multitask_vae(tasks_list, latent_dim=32, batch_size=64, n_epochs=100, 
         combined_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=4
+        num_workers=dataloader_num_workers_cap(4),
     )
     
     # 设置优化器

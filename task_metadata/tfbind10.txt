@@ -1,2 +1,5 @@
-Task: TF-Bind-10 (Design-Bench, discrete sequence design).
-Goal: optimize a 10-length DNA sequence to maximize a binding-related score; larger search space than TF-Bind-8.
+Task: TF-Bind-10
+Type: discrete
+Description: Optimize DNA sequences of length 10 for binding to the SIX6_REF_R1 transcription factor (Design-Bench).
+Goal: Maximize binding affinity in the benchmark’s scoring.
+Design space: combinatorial DNA sequence design (ten categorical positions with four nucleotide choices each, logits or embedding representation in models).

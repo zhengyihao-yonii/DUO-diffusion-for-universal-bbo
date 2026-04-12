@@ -1,5 +1,11 @@
 import os
 import sys
+
+if __name__ == "__main__":
+    from diffuser.cpu_threads import maybe_apply_from_argv_and_env
+
+    maybe_apply_from_argv_and_env()
+
 import random
 import argparse
 from tqdm import tqdm
@@ -715,6 +721,12 @@ if __name__ == "__main__":
     parser.add_argument('--eps', type=float, default=None, help="允许的目标值下降范围")
     parser.add_argument('--fixed_dim', type=int, default=128, help="固定的输入维度，用于统一不同数据集")
     parser.add_argument('--horizon', type=int, default=64, help="合成轨迹长度，需与训练时 horizon 一致")
+    parser.add_argument(
+        '--cpu_threads',
+        type=int,
+        default=None,
+        help="限制 CPU 线程数（OpenMP/BLAS）；等价于环境变量 CPU_THREADS",
+    )
 
     args = parser.parse_args()
     

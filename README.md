@@ -1,103 +1,55 @@
-# GTG
+# GTGdfgo
 
-Official Code for Guided Trajectory Generation with Diffusion Models for Offline Model-based Optimization
+Diffusion-based offline optimization on Design-Bench–style tasks (builds on the GTG / decision-diffuser stack). This repo adds multitask training, optional text conditioning from `task_metadata/`, and shell helpers `run_multitask.sh` / `run_singletask.sh`.
 
-### Environment Setup
-To install dependencies, please run commands as follows:
-```
-# Create conda environment
-conda create -n gtg python=3.8 -y
-conda activate gtg
+**Base dependencies** (MuJoCo, PyTorch, design-bench, jaynes, etc.) match the upstream GTG setup; use the same conda stack as your GTG checkout or install the packages listed in the original GTG README.
 
-# Mujoco Installation
-pip install Cython==0.29.36 numpy==1.22.0 mujoco_py==2.1.2.14
-# Mujoco Compile
-python -c "import mujoco_py"
+---
 
-# Torch Installation
-pip install torch==1.13.1+cu117 torchvision==0.14.1+cu117 torchaudio==0.13.1 --extra-index-url https://download.pytorch.org/whl/cu117
-
-# Design-Bench Installation
-pip install design-bench==2.0.12
-pip install robel==0.1.2 morphing_agents==1.5.1 transforms3d --no-dependencies
-pip install botorch==0.6.4 gpytorch==1.6.0
-
-# Decision Diffuser Installation
-pip install jaynes==0.8.11 ml_logger==0.8.69
-pip install gym==0.13.1 params_proto==2.9.6 scikit-image==0.17.2 scikit-video==1.1.11 scikit-learn==0.23.1 typed-argument-parser einops wandb
-pip install git+https://github.com/Farama-Foundation/d4rl@master#egg=d4rl
-
-# Download Design-Bench Offline Datasets: https://drive.google.com/file/d/11nAyb7_tmlGd0ri5aOK5YP3ZMIYFOmvS/view?usp=drive_link
-unzip design_bench_data.zip
-rm -rf design_bench_data.zip
-mv -v design_bench_data <CONDA_PATH>/envs/gtg/lib/python3.8/site-packages
-```
-
-### SOO-Bench (optional, extended offline BBO benchmarks)
-
-Install under `thirdparty_benchmark/` (same layout as common group setup):
+## Quick start
 
 ```bash
-bash scripts/setup_soo_bench.sh
+# Multitask: construct trajectories → train → eval (see run_multitask.sh for positional args)
+bash run_multitask.sh "dkitty,ant" 3 1000 50 0.05 64 1.0 0.0
 ```
 
-See `thirdparty_benchmark/README.md` for manual steps and **why `pip install -e ./revive_hybrid/` from universal-offline-bbo often fails** (upstream no longer ships that folder). Connecting SOO tasks to this repo’s pipeline still requires adapters next to `design_bench` loaders.
+Single-task wrapper: `bash run_singletask.sh <task> ...` (see script header).
 
-### Code references
-Our implementation is based on "Is Conditional Generative Modeling is all you need for Decision Making?" ([https://github.com/anuragajay/decision-diffuser](https://github.com/anuragajay/decision-diffuser))
+Core Python entrypoints: `construct_trajectories.py`, `train.py`, `evaluate.py`.
 
-### Main Experiments
-You can run the following commands to train and evaluate our method on Design-Bench tasks.
+---
 
-- Constructing Trajectories: To construct trajectories, you should run the following command.
-```
-python construct_trajectories.py --task <task>
-```
+## Environment variables (optional)
 
-- Training Models: To train models, you should run the following command.
-```
-python train.py --task <task> --horizon <horizon> --seed <seed>
-```
+Set these in the shell **before** launching scripts (unless noted).
 
-- Evaluate: To sample candidates and do evalaution, you should run the following command.
-```
-python evaluate.py --task <task> --horizon <horizon> --ctx_len <ctx_len> --alpha <alpha> --seed <seed>
-```
+| Variable | Purpose |
+|----------|---------|
+| `CUDA_VISIBLE_DEVICES` | Physical GPU id(s) visible to PyTorch (e.g. `0` or `2`). |
+| `GPU_ID` | If `CUDA_VISIBLE_DEVICES` is **unset**, `scripts/gpu_env.sh` sets it from `GPU_ID`. |
+| `GTG_DEVICE` | Torch device for VAE / construct helpers (`cuda`, `cuda:0`, `cpu`). Overrides auto-selection in `train_vae` / `resolve_torch_device`. |
+| `GTG_DISTANCE_ON_GPU` | Construct trajectory distance matrix: default use GPU when available; set to `0` to force CPU. |
+| `CPU_THREADS` | Cap OpenMP / BLAS / PyTorch CPU threads (e.g. `4`). Same effect as `--cpu_threads N` on `train.py` / `evaluate.py` / `construct_trajectories.py` / `train_vae.py`. |
+| `PYTHON` | Python interpreter path (default in `run_*.sh` points to a conda `gtg` env; override if needed). |
+| `PROJECT` | Repo root; default is the directory containing the invoked `run_*.sh`. |
+| `RESULTS` | Override auto-generated `results/...` run directory (see `run_multitask.sh` / `run_singletask.sh` comments). |
+| `TEXT_ENCODER_MODEL` | Absolute path to an offline sentence-transformers snapshot (used when text conditioning is enabled). |
+| `USE_RETURNS`, `USE_TEXT_CONDITION`, `TRAIN_EXTRA`, `EVAL_EXTRA_CMD`, `EVAL_ALL`, `START_SEED`, `AUTO_CONTINUE`, `EVAL_ONLY`, … | Pipeline behavior; **full list and defaults** are documented in the header comments of `run_multitask.sh` and `run_singletask.sh`. |
 
-### Multitask checkpoints and evaluation
+---
 
-- Training and evaluation share the same directory: `trained_models/multi_<tasks>_frac..._sigma.../` (no `_eval<task>` suffix). The same weights are used whether you evaluate on ant, dkitty, or all tasks.
-- `run_multitask.sh` defaults to **evaluating every task in `train_tasks`**. To evaluate only one task, set `EVAL_ALL=0` (and optionally `EVAL_SINGLE_TASK=dkitty`).
-- If you have old checkpoints under `..._evaldkitty/` or `..._evalant/`, move or symlink the inner `seed*/` tree into the path **without** the `_eval*` segment.
+## Multitask checkpoints
 
-### Multi-GPU servers
+Training and evaluation share one directory: `trained_models/multi_<tasks>_frac.../` (no per-eval-task suffix). See `run_multitask.sh` comments for `EVAL_ALL` / `EVAL_ONLY`.
 
-Pipeline scripts `run_multitask.sh` and `run_singletask.sh` source `scripts/gpu_env.sh`. To pin a **physical** GPU and reduce OOM from multiple jobs sharing GPU 0:
+---
 
-```bash
-export CUDA_VISIBLE_DEVICES=2
-bash run_multitask.sh "dkitty,ant" 3 1000 50 0.05 dkitty 64 1.0 0.0
-```
+## Task text metadata
 
-Or in one line: `GPU_ID=2 bash run_multitask.sh ...` (only if `CUDA_VISIBLE_DEVICES` is unset). You can also uncomment `export CUDA_VISIBLE_DEVICES=...` near the top of those run scripts.
+Short English blurbs per task for optional text conditioning: see `task_metadata/README.md`.
 
-### Additional Experiments
-You can run the following commands to train and evaluate our method on practical settings of Design-Bench tasks.
+---
 
-- Sparse Setting
-```
-python construct_trajectories.py --task <task> --frac <frac>
+## Optional: SOO benchmarks
 
-python train.py --task <task> --horizon <horizon> --seed <seed> --frac <frac>
-
-python evaluate.py --task <task> --horizon <horizon> --ctx_len <ctx_len> --alpha <alpha> --seed <seed> --frac <frac>
-```
-
-- Noisy Setting
-```
-python construct_trajectories.py --task <task> --sigma <sigma>
-
-python train.py --task <task> --horizon <horizon> --seed <seed> --sigma <sigma>
-
-python evaluate.py --task <task> --horizon <horizon> --ctx_len <ctx_len> --alpha <alpha> --seed <seed> --sigma <sigma>
-```
+`thirdparty_benchmark/` and `bash scripts/setup_soo_bench.sh` — details in `thirdparty_benchmark/README.md`.

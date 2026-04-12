@@ -1,7 +1,18 @@
 import os
 import sys
-import torch
+
+if __name__ == "__main__":
+    from diffuser.cpu_threads import maybe_apply_from_argv_and_env
+
+    maybe_apply_from_argv_and_env()
+
 import numpy as np
+import torch
+
+if __name__ == "__main__":
+    from diffuser.cpu_threads import apply_torch_cpu_threads_from_env
+
+    apply_torch_cpu_threads_from_env()
 from diffuser.models.vae import VAE, train_vae, create_vae_dataloaders
 from sklearn.preprocessing import StandardScaler
 import argparse

@@ -1,0 +1,26 @@
+% Requires: \usepackage{booktabs}, \usepackage{graphicx}, \usepackage{xcolor}.
+% Blocks: Task+D(best) | UniSO | GTG ST/ST+r | DFGO (results/all/).
+\begin{table*}[t!]
+\caption{Full multitask text-conditioned runs: one DFGO column per experiment directory under \texttt{results/all/} (nested \texttt{frac\_F\_sigma\_S} and run-signature folder; prefix \texttt{ret\_} on the inner folder when using returns conditioning). UniSO (best), GTG ST / ST+r, and DFGO. Mean rank: higher mean reward is better; report mean $\pm$ std of per-task ranks.}
+\vspace{0.3em}
+\centering
+\resizebox{\linewidth}{!}{
+\begin{tabular}{l|c|c|cc|c}
+\toprule
+Task & $\mathcal{D}$(best) & \shortstack{UniSO\\best} & \shortstack{GTG\\ST} & \shortstack{GTG\\ST+r} & \shortstack{\texttt{frac1.0\_sigma0.0/w1.2\_1000*64\_k20\_ep\ldots}} \\
+\midrule
+Ant & 165.326 & \textbf{\textcolor{violet}{455.658 $\pm$ 39.188}} & 452.330 $\pm$ 61.502 & 454.594 $\pm$ 29.590 & \textbf{\textcolor{blue}{563.533 $\pm$ 12.455}} \\
+D'Kitty & 199.363 & 222.007 $\pm$ 33.677 & \textbf{\textcolor{violet}{264.857 $\pm$ 17.571}} & 167.231 $\pm$ 79.140 & \textbf{\textcolor{blue}{286.435 $\pm$ 33.333}} \\
+TF Bind 8 & 0.439 & 0.870 $\pm$ 0.085 & \textbf{\textcolor{blue}{0.934 $\pm$ 0.030}} & \textbf{\textcolor{violet}{0.905 $\pm$ 0.065}} & 0.653 $\pm$ 0.212 \\
+TF Bind 10 & 0.005 & \textbf{\textcolor{blue}{0.944 $\pm$ 0.794}} & \textbf{\textcolor{violet}{0.632 $\pm$ 0.106}} & 0.577 $\pm$ 0.049 & 0.356 $\pm$ 0.128 \\
+GTOPX 2 & -196.663 & \textbf{\textcolor{blue}{-68.526 $\pm$ 14.058}} & \textbf{\textcolor{violet}{-72.163 $\pm$ 8.495}} & -84.446 $\pm$ 26.171 & -123.223 $\pm$ 31.257 \\
+GTOPX 3 & -152.364 & \textbf{\textcolor{blue}{-44.427 $\pm$ 13.456}} & \textbf{\textcolor{violet}{-53.866 $\pm$ 9.877}} & -54.650 $\pm$ 15.913 & -83.490 $\pm$ 54.468 \\
+GTOPX 4 & -216.709 & -74.070 $\pm$ 13.131 & \textbf{\textcolor{blue}{-72.749 $\pm$ 6.632}} & \textbf{\textcolor{violet}{-73.852 $\pm$ 13.080}} & -146.776 $\pm$ 93.141 \\
+GTOPX 6 & -111.666 & \textbf{\textcolor{blue}{-46.056 $\pm$ 11.547}} & \textbf{\textcolor{violet}{-55.834 $\pm$ 9.655}} & -58.879 $\pm$ 7.985 & -71.947 $\pm$ 4.645 \\
+\midrule
+Mean rank & / & \textbf{\textcolor{blue}{1.875 $\pm$ 0.991}} & \textbf{\textcolor{violet}{2.000 $\pm$ 0.926}} & 2.875 $\pm$ 0.641 & 3.250 $\pm$ 1.389 \\
+\bottomrule
+\end{tabular}
+}
+\label{tab:gtg-gtgdfgo-eval-all-text}
+\end{table*}

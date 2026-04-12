@@ -1,1 +1,5 @@
-Task: GTOPX benchmark instance 6 (SOO-Bench / synthetic continuous optimization). Same protocol as other GTOPX tasks; differs in dimensionality and landscape.
+Task: GTOPX-6 / Rosetta
+Type: continuous
+Description: Multi-gravity-assist mission to comet 67P; sequence Earth–Earth–Mars–Earth–Earth–67P with deep-space maneuvers.
+Goal: Minimize total mission ΔV to comet arrival.
+Design space: 22 bounded continuous variables (epochs, asymptotic speeds, segment times, DSM fractions, fly-by radii, B-plane angles).

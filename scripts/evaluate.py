@@ -4,6 +4,11 @@ import re
 import diffuser.utils as utils
 from ml_logger import logger
 import torch
+
+from diffuser.cpu_threads import apply_torch_cpu_threads_from_env
+
+apply_torch_cpu_threads_from_env()
+
 import numpy as np
 import os
 import pickle as pkl

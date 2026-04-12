@@ -1,5 +1,11 @@
-import argparse
 import sys
+
+if __name__ == "__main__":
+    from diffuser.cpu_threads import maybe_apply_from_argv_and_env
+
+    maybe_apply_from_argv_and_env()
+
+import argparse
 from ml_logger import logger, instr, needs_relaunch
 from analysis import RUN
 import jaynes
@@ -78,6 +84,12 @@ if __name__ == '__main__':
         action="store_true",
         default=argparse.SUPPRESS,
         help="训练批包含 RewardBatch.returns，与 returns_condition 配对",
+    )
+    parser.add_argument(
+        "--cpu_threads",
+        type=int,
+        default=None,
+        help="限制 CPU 线程数（OpenMP/BLAS/PyTorch）；等价于环境变量 CPU_THREADS（需在进程早期传入，已自动应用）",
     )
 
     args = parser.parse_args(_cli_args)

@@ -43,6 +43,8 @@
 #   USE_RETURNS  设为 1 时，在 TRAIN_EXTRA / EVAL_EXTRA_CMD 基础上再追加
 #                    --returns_condition --include_returns（显式标量 return 条件，与 config 手工改等价）
 #   CUDA_VISIBLE_DEVICES  见脚本中部「GPU」注释；或设 GPU_ID（由 scripts/gpu_env.sh 处理）。
+#   CPU_THREADS      可选，限制 OpenMP/BLAS/PyTorch 使用的 CPU 线程数（如 4），减轻占满宿主机 CPU。
+#                    也可在 train.py / evaluate.py / construct_trajectories.py 使用 --cpu_threads N。
 #
 # 同一次 bash：run{N}_seed* 仅 seed 递增；仅「完整流水线」结束后 N 写入 .gtg_pipeline_batch 并在下次 +1。
 #
@@ -127,11 +129,59 @@ _RESULTS_AUTO="$PROJECT/results/multitask_${_MULTITASK_TOKEN}${_rs}${_tc}${_mto}
 # 仅含 ret 等、不含文本后缀的「基路径」（与旧版默认 multitask_* 一致）
 _RESULTS_PLAIN="$PROJECT/results/multitask_${_MULTITASK_TOKEN}${_rs}"
 
-RESULTS="${RESULTS:-$_RESULTS_AUTO}"
+# 全 8 任务 + textcond + mttextonly：结果存到
+#   results/all/frac<F>_sigma<S>/<子目录>/run<N>_seed<seed>/
+# 第一层：轨迹构造参数 frac、sigma（与脚本 positional 一致）。
+# 第二层：无 returns 条件时为  w<w_text>[_wt<w_task>]_<n_traj>*<horizon>_k<k>_eps<eps>
+#         有 USE_RETURNS=1（retcond）时为  ret_<同上>  （与旧 multitask_*_retcond_textcond_mttextonly 对应）
+# w_text / w_task 来自 TRAIN_EXTRA 中 --condition_guidance_w_text / --condition_guidance_w_task，缺省记为 na。
+_FULL_MT_TOKEN="ant_dkitty_gtopx2_gtopx3_gtopx4_gtopx6_tfbind10_tfbind8"
+_RESULTS_ALL_LAYOUT=""
+_ALL_RUN_LAYOUT=0
+if [[ "$_MULTITASK_TOKEN" == "$_FULL_MT_TOKEN" ]] && [[ -n "${_tc:-}" ]] && [[ -n "${_mto:-}" ]]; then
+  _W_TEXT_VAL=""
+  _W_TASK_VAL=""
+  _parse_tr="${TRAIN_EXTRA:-}"
+  set -- ${_parse_tr}
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "--condition_guidance_w_text" && -n "${2:-}" ]]; then
+      _W_TEXT_VAL="$2"
+      shift 2
+      continue
+    fi
+    if [[ "$1" == "--condition_guidance_w_task" && -n "${2:-}" ]]; then
+      _W_TASK_VAL="$2"
+      shift 2
+      continue
+    fi
+    shift
+  done
+  [[ -z "$_W_TEXT_VAL" ]] && _W_TEXT_VAL="na"
+  [[ -z "$_W_TASK_VAL" ]] && _W_TASK_VAL="na"
+  _PARENT="frac${FRAC}_sigma${SIGMA}"
+  _CHILD_HEAD="w${_W_TEXT_VAL}"
+  if [[ "$_W_TASK_VAL" != "na" ]]; then
+    _CHILD_HEAD="${_CHILD_HEAD}_wt${_W_TASK_VAL}"
+  fi
+  _CHILD="${_CHILD_HEAD}_${N_TRAJ}*${HORIZON}_k${K}_eps${EPS}"
+  if [[ "${USE_RETURNS:-0}" == "1" ]]; then
+    _CHILD="ret_${_CHILD}"
+  fi
+  _RESULTS_ALL_LAYOUT="$PROJECT/results/all/${_PARENT}/${_CHILD}"
+  _ALL_RUN_LAYOUT=1
+  echo "[all-layout] 全任务 textcond+mttextonly：每 run -> ${_RESULTS_ALL_LAYOUT}/run<BATCH>_seed<START_SEED..>（含 ret_ 前缀当 USE_RETURNS=1）"
+fi
+
+_DEFAULT_RESULTS="$_RESULTS_AUTO"
+if [[ "$_ALL_RUN_LAYOUT" == "1" ]]; then
+  _DEFAULT_RESULTS="$_RESULTS_ALL_LAYOUT"
+fi
+RESULTS="${RESULTS:-$_DEFAULT_RESULTS}"
 
 # 若曾在 shell 里 export RESULTS=.../multitask_ant_dkitty（无 _textcond/_mttextonly），
 # 这里会一直是基路径，看起来像「加了 TRAIN_EXTRA 也没后缀」。此时若 TRAIN_EXTRA 需要后缀，自动对齐到 _RESULTS_AUTO。
-if [[ -n "${_tc}${_mto}" ]] && [[ "$RESULTS" == "$_RESULTS_PLAIN" ]]; then
+# all-layout（results/all/...）不参与此纠正。
+if [[ "$_ALL_RUN_LAYOUT" != "1" ]] && [[ -n "${_tc}${_mto}" ]] && [[ "$RESULTS" == "$_RESULTS_PLAIN" ]]; then
   RESULTS="$_RESULTS_AUTO"
   echo "[run_multitask] 检测到 RESULTS 与无文本后缀基路径相同，已按 TRAIN_EXTRA 改为: $RESULTS"
 fi
@@ -144,16 +194,29 @@ START_SEED="${START_SEED:-0}"
 if [[ "${AUTO_CONTINUE:-0}" == "1" ]]; then
   max_s=-1
   shopt -s nullglob
-  for d in "$RESULTS"/run*_seed*/; do
-    [[ -d "$d" ]] || continue
-    base=$(basename "$d")
-    if [[ "$base" =~ _seed([0-9]+)$ ]]; then
-      s="${BASH_REMATCH[1]}"
-      if [[ "$s" =~ ^[0-9]+$ ]] && ((10#$s > max_s)); then
-        max_s=$((10#$s))
+  if [[ "${_ALL_RUN_LAYOUT:-0}" == "1" ]]; then
+    for d in "$RESULTS"/run*_seed*/; do
+      [[ -d "$d" ]] || continue
+      base=$(basename "$d")
+      if [[ "$base" =~ _seed([0-9]+)$ ]]; then
+        s="${BASH_REMATCH[1]}"
+        if [[ "$s" =~ ^[0-9]+$ ]] && ((10#$s > max_s)); then
+          max_s=$((10#$s))
+        fi
       fi
-    fi
-  done
+    done
+  else
+    for d in "$RESULTS"/run*_seed*/; do
+      [[ -d "$d" ]] || continue
+      base=$(basename "$d")
+      if [[ "$base" =~ _seed([0-9]+)$ ]]; then
+        s="${BASH_REMATCH[1]}"
+        if [[ "$s" =~ ^[0-9]+$ ]] && ((10#$s > max_s)); then
+          max_s=$((10#$s))
+        fi
+      fi
+    done
+  fi
   shopt -u nullglob
   if [[ $max_s -ge 0 ]]; then
     START_SEED=$((max_s + 1))

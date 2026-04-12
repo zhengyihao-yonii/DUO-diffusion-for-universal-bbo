@@ -1,5 +1,11 @@
-import argparse
 import sys
+
+if __name__ == "__main__":
+    from diffuser.cpu_threads import maybe_apply_from_argv_and_env
+
+    maybe_apply_from_argv_and_env()
+
+import argparse
 from ml_logger import logger, instr, needs_relaunch
 from analysis import RUN
 import jaynes
@@ -75,6 +81,12 @@ if __name__ == '__main__':
         type=str,
         default=argparse.SUPPRESS,
         help="sentence-transformers 模型：Hub 名或本机目录（离线请传已下载的模型文件夹绝对路径）",
+    )
+    parser.add_argument(
+        "--cpu_threads",
+        type=int,
+        default=None,
+        help="限制 CPU 线程数（OpenMP/BLAS/PyTorch）；等价于环境变量 CPU_THREADS",
     )
 
     args = parser.parse_args(_cli_args)
