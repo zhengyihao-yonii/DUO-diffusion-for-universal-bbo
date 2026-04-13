@@ -1,22 +1,35 @@
 #!/usr/bin/env bash
-#
-# 汇总 GTGdfgo 与 GTG 的 evaluate 结果（scripts/analyze_eval_results.py）。
-# 每次运行会全量更新：宽表 eval_comparison.{csv,md,tex} 与矩阵表 eval_comparison_m12.{csv,md,tex}（含 UniSO best 列与 mean rank）。
-# 路径与可选 d_best 覆盖见脚本内常量（可选文件 results/d_best.json）。
+# 生成 evaluate 汇总表（scripts/analyze_eval_results.py，仓库根为 GTGdfgo）。
 #
 # 用法:
-#   bash run_analyze_eval.sh
+#   bash run_analyze_eval.sh -short   # 宽表 results/analysis_table/eval_comparison.{csv,md,tex}
+#   bash run_analyze_eval.sh -full    # 13 列矩阵 results/analysis_table/eval_comparison_m12.{csv,md,tex}
+#   bash run_analyze_eval.sh -final   # _all 表 results/analysis_table/eval_comparison_all.tex
+#   bash run_analyze_eval.sh          # 以上均生成（--mode all）；UniSO 从 results/analysis_table/uniso_result.tex 读取
 #
-# 环境变量（可选）:
-#   PROJECT   GTGdfgo 根目录，默认为本脚本所在目录
-#   PYTHON    Python 解释器，默认 python3
-#
-# 汇总脚本为 CPU 分析，通常无需设置 GPU。
-
-set -uo pipefail
-
-PROJECT="${PROJECT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+set -euo pipefail
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$_SCRIPT_DIR"
 PYTHON="${PYTHON:-python3}"
-SCRIPT="$PROJECT/scripts/analyze_eval_results.py"
 
-exec "$PYTHON" "$SCRIPT"
+_mode="all"
+case "${1:-}" in
+  -short|--short) _mode=short ;;
+  -full|--full)   _mode=full ;;
+  -final|--final) _mode=final ;;
+  --mode)
+    if [[ -z "${2:-}" ]]; then
+      echo "Usage: $0 --mode {all|short|full|final}" >&2
+      exit 1
+    fi
+    _mode="$2"
+    ;;
+  "")
+    ;;
+  *)
+    echo "Usage: $0 [-short|-full|-final|--mode {all|short|full|final}]" >&2
+    exit 1
+    ;;
+esac
+
+exec "$PYTHON" scripts/analyze_eval_results.py --mode "$_mode"

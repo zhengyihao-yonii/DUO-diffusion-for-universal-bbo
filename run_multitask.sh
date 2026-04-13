@@ -21,10 +21,10 @@
 #                  「无文本后缀的基路径」，会自动改为带 _textcond / _mttextonly 的目录。完全自定义请 unset RESULTS 后
 #                  再设 RESULTS=...，或直接使用带后缀的路径。
 #   RESULTS_SUFFIX 仅 USE_RETURNS=1 且未显式设置 RESULTS 时追加到默认路径（默认 _retcond）
-#   TEXTCOND_RESULTS_SUFFIX  文本条件实验在未显式设置 RESULTS 时追加（默认 _textcond）；
-#                            触发条件：USE_TEXT_CONDITION=1，或 TRAIN_EXTRA 含 --use_text_condition
-#   MTTEXTONLY_RESULTS_SUFFIX  多任务仅文本分支（默认 _mttextonly）；
-#                            触发条件：TRAIN_EXTRA 含 --multitask_text_only
+#   TEXTCOND_RESULTS_SUFFIX  仅 textcond、无 mttextonly 时追加（默认 _textcond）。
+#   MTTEXTONLY_RESULTS_SUFFIX  仅 mttextonly、无 textcond 时追加（默认 _mttextonly）。
+#   TEXTCOND_MTTEXTONLY_SUFFIX  同时 textcond + mttextonly 时默认 multitask_* 目录的单段后缀（默认 _textcond_mttextonly）；
+#                            与旧版 ``_textcond``+``_mttextonly`` 拼接结果相同，便于 subgroup 命名统一。
 #   EVAL_ALL       设为 0 时，多任务只评一个任务（见 --eval_only_first）；默认评 train_tasks 全部。
 #   EVAL_SINGLE_TASK  仅当 EVAL_ALL=0 时有效：要评的那一个任务名（默认 train_tasks 字典序第一个）。
 #   START_SEED     本批第一次运行使用的随机种子，默认 0。设为 3 且 NUM_RUNS=2 则使用 seed 3、4。
@@ -34,6 +34,10 @@
 #   BATCH_RUN        可选，仅 EVAL_ONLY=1：指定批次号 N；否则读 $RESULTS/.gtg_pipeline_batch。
 #   TRAIN_EXTRA      可选，追加传给 train.py 的参数（空格分隔，勿加引号包裹整条）。
 #                    例: TRAIN_EXTRA="--condition_guidance_w_task 1.2 --condition_guidance_w_text 0.8"
+#   CONDITION_GUIDANCE_W_TEXT  可选。全 8 任务文本条件布局下，超参目录名前缀 w<W>_ 中的 W（默认 1.2）；
+#                    若已在 TRAIN_EXTRA 中写了 --condition_guidance_w_text <x>，则以命令行值为准。
+#   结果目录：textcond+mttextonly 时默认写入 results/text_conditioned_only/<tasks>_frac_sigma/w<w_text>_.../；
+#            未用该布局时 multitask_* 默认带 TEXTCOND_MTTEXTONLY_SUFFIX（见上）。
 #   EVAL_EXTRA_CMD   可选，追加传给 evaluate.py 的额外参数（勿与脚本内数组 EVAL_EXTRA 混淆）。
 #   TEXT_ENCODER_MODEL  可选，离线 sentence-transformers 目录的绝对路径（须含 config.json）。
 #                    未设置时，若存在下面「相对 PROJECT」的默认快照目录，则自动解析并仅在启用
@@ -123,53 +127,47 @@ if [[ "${TRAIN_EXTRA:-}" == *"--multitask_text_only"* ]]; then
   _mto="${MTTEXTONLY_RESULTS_SUFFIX:-_mttextonly}"
 fi
 
-# 无环境变量时的默认 results 目录（含 _retcond / _textcond / _mttextonly 等后缀）
 _MULTITASK_TOKEN="$(echo "$TRAIN_TASKS" | tr ',' '_')"
-_RESULTS_AUTO="$PROJECT/results/multitask_${_MULTITASK_TOKEN}${_rs}${_tc}${_mto}"
+# 默认 multitask_* 目录后缀：同时启用 textcond + mttextonly 时用单段 ``_textcond_mttextonly``（subgroup / 全任务通用）
+_TEXTCOND_MTTEXTONLY_SUFFIX="${TEXTCOND_MTTEXTONLY_SUFFIX:-_textcond_mttextonly}"
+if [[ -n "${_tc:-}" ]] && [[ -n "${_mto:-}" ]]; then
+  _RESULTS_AUTO="$PROJECT/results/multitask_${_MULTITASK_TOKEN}${_rs}${_TEXTCOND_MTTEXTONLY_SUFFIX}"
+elif [[ -n "${_tc:-}" ]]; then
+  _RESULTS_AUTO="$PROJECT/results/multitask_${_MULTITASK_TOKEN}${_rs}${_tc}"
+elif [[ -n "${_mto:-}" ]]; then
+  _RESULTS_AUTO="$PROJECT/results/multitask_${_MULTITASK_TOKEN}${_rs}${_mto}"
+else
+  _RESULTS_AUTO="$PROJECT/results/multitask_${_MULTITASK_TOKEN}${_rs}"
+fi
 # 仅含 ret 等、不含文本后缀的「基路径」（与旧版默认 multitask_* 一致）
 _RESULTS_PLAIN="$PROJECT/results/multitask_${_MULTITASK_TOKEN}${_rs}"
 
-# 全 8 任务 + textcond + mttextonly：结果存到
-#   results/all/frac<F>_sigma<S>/<子目录>/run<N>_seed<seed>/
-# 第一层：轨迹构造参数 frac、sigma（与脚本 positional 一致）。
-# 第二层：无 returns 条件时为  w<w_text>[_wt<w_task>]_<n_traj>*<horizon>_k<k>_eps<eps>
-#         有 USE_RETURNS=1（retcond）时为  ret_<同上>  （与旧 multitask_*_retcond_textcond_mttextonly 对应）
-# w_text / w_task 来自 TRAIN_EXTRA 中 --condition_guidance_w_text / --condition_guidance_w_task，缺省记为 na。
+# 任意多任务（含 subgroup）+ textcond + mttextonly：结果存到 text_conditioned_only/（与 results/multi_task 并列）
+#   全 8 任务：results/text_conditioned_only/all_frac<F>_sigma<S>/w<W>_.../（与 eval_comparison_all 聚合键一致）
+#   subgroup：results/text_conditioned_only/<MULTITASK_TOKEN>_frac<F>_sigma<S>/w<W>_.../
+# w<W_text> 为文本条件 guidance 权重（--condition_guidance_w_text，默认 1.2）。
 _FULL_MT_TOKEN="ant_dkitty_gtopx2_gtopx3_gtopx4_gtopx6_tfbind10_tfbind8"
 _RESULTS_ALL_LAYOUT=""
 _ALL_RUN_LAYOUT=0
-if [[ "$_MULTITASK_TOKEN" == "$_FULL_MT_TOKEN" ]] && [[ -n "${_tc:-}" ]] && [[ -n "${_mto:-}" ]]; then
-  _W_TEXT_VAL=""
-  _W_TASK_VAL=""
-  _parse_tr="${TRAIN_EXTRA:-}"
-  set -- ${_parse_tr}
-  while [[ $# -gt 0 ]]; do
-    if [[ "$1" == "--condition_guidance_w_text" && -n "${2:-}" ]]; then
-      _W_TEXT_VAL="$2"
-      shift 2
-      continue
-    fi
-    if [[ "$1" == "--condition_guidance_w_task" && -n "${2:-}" ]]; then
-      _W_TASK_VAL="$2"
-      shift 2
-      continue
-    fi
-    shift
-  done
-  [[ -z "$_W_TEXT_VAL" ]] && _W_TEXT_VAL="na"
-  [[ -z "$_W_TASK_VAL" ]] && _W_TASK_VAL="na"
-  _PARENT="frac${FRAC}_sigma${SIGMA}"
-  _CHILD_HEAD="w${_W_TEXT_VAL}"
-  if [[ "$_W_TASK_VAL" != "na" ]]; then
-    _CHILD_HEAD="${_CHILD_HEAD}_wt${_W_TASK_VAL}"
+if [[ -n "${_tc:-}" ]] && [[ -n "${_mto:-}" ]]; then
+  if [[ "$_MULTITASK_TOKEN" == "$_FULL_MT_TOKEN" ]]; then
+    _TASK_FRAC_SIG="all_frac${FRAC}_sigma${SIGMA}"
+  else
+    _TASK_FRAC_SIG="${_MULTITASK_TOKEN}_frac${FRAC}_sigma${SIGMA}"
   fi
-  _CHILD="${_CHILD_HEAD}_${N_TRAJ}*${HORIZON}_k${K}_eps${EPS}"
+  _W_TEXT="${CONDITION_GUIDANCE_W_TEXT:-}"
+  if [[ -z "$_W_TEXT" ]] && [[ "${TRAIN_EXTRA:-}" == *"--condition_guidance_w_text"* ]]; then
+    _W_TEXT="$(echo "${TRAIN_EXTRA}" | sed -n 's/.*--condition_guidance_w_text[[:space:]]\+\([0-9.]*\).*/\1/p' | head -1)"
+  fi
+  [[ -z "$_W_TEXT" ]] && _W_TEXT="1.2"
+  _HYPER_CORE="${N_TRAJ}*${HORIZON}_k${K}_eps${EPS}"
   if [[ "${USE_RETURNS:-0}" == "1" ]]; then
-    _CHILD="ret_${_CHILD}"
+    _HYPER_CORE="${_HYPER_CORE}_ret"
   fi
-  _RESULTS_ALL_LAYOUT="$PROJECT/results/all/${_PARENT}/${_CHILD}"
+  _HYPER="w${_W_TEXT}_${_HYPER_CORE}"
+  _RESULTS_ALL_LAYOUT="$PROJECT/results/text_conditioned_only/${_TASK_FRAC_SIG}/${_HYPER}"
   _ALL_RUN_LAYOUT=1
-  echo "[all-layout] 全任务 textcond+mttextonly：每 run -> ${_RESULTS_ALL_LAYOUT}/run<BATCH>_seed<START_SEED..>（含 ret_ 前缀当 USE_RETURNS=1）"
+  echo "[text-cond-layout] multitask textcond+mttextonly（含 subgroup）：RESULTS=${_RESULTS_ALL_LAYOUT}（w_text=${_W_TEXT}）"
 fi
 
 _DEFAULT_RESULTS="$_RESULTS_AUTO"
@@ -180,7 +178,7 @@ RESULTS="${RESULTS:-$_DEFAULT_RESULTS}"
 
 # 若曾在 shell 里 export RESULTS=.../multitask_ant_dkitty（无 _textcond/_mttextonly），
 # 这里会一直是基路径，看起来像「加了 TRAIN_EXTRA 也没后缀」。此时若 TRAIN_EXTRA 需要后缀，自动对齐到 _RESULTS_AUTO。
-# all-layout（results/all/...）不参与此纠正。
+# text_conditioned_only 布局不参与此纠正。
 if [[ "$_ALL_RUN_LAYOUT" != "1" ]] && [[ -n "${_tc}${_mto}" ]] && [[ "$RESULTS" == "$_RESULTS_PLAIN" ]]; then
   RESULTS="$_RESULTS_AUTO"
   echo "[run_multitask] 检测到 RESULTS 与无文本后缀基路径相同，已按 TRAIN_EXTRA 改为: $RESULTS"

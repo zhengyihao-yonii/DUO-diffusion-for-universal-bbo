@@ -17,6 +17,10 @@ Single-task wrapper: `bash run_singletask.sh <task> ...` (see script header).
 
 Core Python entrypoints: `construct_trajectories.py`, `train.py`, `evaluate.py`.
 
+**Evaluate tables:** `bash run_analyze_eval.sh` writes everything under **`results/analysis_table/`**: `eval_comparison*`, `eval_comparison_m12*`, `eval_comparison_all*`; UniSO baselines are read from **`results/analysis_table/uniso_result.tex`** (optional **`d_best.json`**). The `_all` table (`-final`) uses **one DFGO column per subfolder** of `results/text_conditioned_only/all_frac1.0_sigma0.0/` (override base name with `EVAL_ALL_TASK_FRAC_SIG`); column titles are the subfolder names (key hyperparameters). Same as `python scripts/analyze_eval_results.py --mode …`.
+
+**Results layout:** Single-task runs use `results/<task>_multiple_runs[_retcond]` only (VAE + trajectory + diffusion, no text). Multitask with text conditioning + `--multitask_text_only` defaults to `results/text_conditioned_only/all_frac<F>_sigma<S>/w<w_text>_.../` for the full 8-task set, or `text_conditioned_only/<token>_frac<F>_sigma<S>/...` for subgroups; the fallback `multitask_*` directory uses `TEXTCOND_MTTEXTONLY_SUFFIX` (default `_textcond_mttextonly`) when both modes are on.
+
 ---
 
 ## Environment variables (optional)

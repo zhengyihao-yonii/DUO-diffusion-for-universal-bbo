@@ -1,13 +1,13 @@
 % Requires: \usepackage{booktabs}, \usepackage{graphicx}, \usepackage{xcolor}.
-% Blocks: Task+D(best) | UniSO | GTG ST/ST+r | DFGO (results/all/).
+% Blocks: Task+D(best) | UniSO | GTG ST/ST+r | DFGO (text_conditioned_only/all_frac…).
 \begin{table*}[t!]
-\caption{Full multitask text-conditioned runs: one DFGO column per experiment directory under \texttt{results/all/} (nested \texttt{frac\_F\_sigma\_S} and run-signature folder; prefix \texttt{ret\_} on the inner folder when using returns conditioning). UniSO (best), GTG ST / ST+r, and DFGO. Mean rank: higher mean reward is better; report mean $\pm$ std of per-task ranks.}
+\caption{DFGO (full multitask, text-conditioned): one column per immediate subfolder of \texttt{results/text\_conditioned\_only/all\_frac1.0\_sigma0.0/} (folder names encode key hyperparameters, e.g.\ \texttt{w1.2\_}$\cdots$); each column pools runs inside that folder only. UniSO (best), GTG ST / ST+r, and DFGO. Mean rank: higher mean reward is better; report mean $\pm$ std of per-task ranks.}
 \vspace{0.3em}
 \centering
 \resizebox{\linewidth}{!}{
 \begin{tabular}{l|c|c|cc|c}
 \toprule
-Task & $\mathcal{D}$(best) & \shortstack{UniSO\\best} & \shortstack{GTG\\ST} & \shortstack{GTG\\ST+r} & \shortstack{\texttt{frac1.0\_sigma0.0/w1.2\_1000*64\_k20\_ep\ldots}} \\
+Task & $\mathcal{D}$(best) & \shortstack{UniSO\\best} & \shortstack{GTG\\ST} & \shortstack{GTG\\ST+r} & \shortstack{\texttt{w1.2\_1000*64\_k20\_eps0.05}} \\
 \midrule
 Ant & 165.326 & \textbf{\textcolor{violet}{455.658 $\pm$ 39.188}} & 452.330 $\pm$ 61.502 & 454.594 $\pm$ 29.590 & \textbf{\textcolor{blue}{563.533 $\pm$ 12.455}} \\
 D'Kitty & 199.363 & 222.007 $\pm$ 33.677 & \textbf{\textcolor{violet}{264.857 $\pm$ 17.571}} & 167.231 $\pm$ 79.140 & \textbf{\textcolor{blue}{286.435 $\pm$ 33.333}} \\

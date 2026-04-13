@@ -9,14 +9,16 @@ Per-task columns ``gtgdfgo_msub_*`` / ``gtgdfgo_mfull_*`` look up multitask runs
 subgroup (ant+dkitty, tfbind8+10, four gtopx) vs full 8-task multitask — see
 ``TASK_TO_SUBGROUP_MULTITASK_EXP`` and ``FULL_MULTITASK_EXP``.
 
-宽表 ``results/eval_comparison.*``、13 列矩阵 ``results/eval_comparison_m12.*``、以及 ``results/eval_comparison_all.*``
-（每个 ``results/all/`` 下叶子实验目录，如 ``frac*_sigma*/w*_…`` 或 ``…/ret_w*_…``，一列 DFGO）每次运行一并生成（无命令行参数）。
-  矩阵列为 UniSO（best，来自 ``results/uniso_result.tex``）+ 12 列方法；文本多任务目录后缀见 ``MATRIX12_TEXT_SUFFIXES``。
+所有汇总表与 UniSO 输入均位于 ``results/analysis_table/``：宽表 ``eval_comparison.*``、矩阵 ``eval_comparison_m12.*``、``eval_comparison_all.*``，以及 ``uniso_result.tex``、``d_best.json``（可选）。
+``eval_comparison_all``（``--mode final``）：``text_conditioned_only/all_frac1.0_sigma0.0/``（可用 ``EVAL_ALL_TASK_FRAC_SIG`` 覆盖）下**每个超参子目录一列** DFGO，列名为子目录名（关键参数）。默认一次生成全部；也可用 ``--mode short|full|final``（见 ``run_analyze_eval.sh``）。
+矩阵列为 UniSO（best，来自 ``results/analysis_table/uniso_result.tex``）+ 12 列方法；文本多任务目录后缀见 ``MATRIX12_TEXT_SUFFIXES``。
 """
 from __future__ import annotations
 
+import argparse
 import csv
 import json
+import os
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -238,14 +240,97 @@ def sort_comparison_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 _ALL_RUN_DIR_RE = re.compile(r"^run[0-9]+_seed[0-9]+$")
 
+TEXT_CONDITIONED_ROOT = "text_conditioned_only"
+MULTI_TASK_ROOT = "multi_task"
+SINGLE_TASK_ROOT = "single_task"
+# 三者并列于 results/；同列聚合键为 ``<root>/<tasks>_frac_sigma``（不含超参子目录名）
+AGGREGATE_EXPERIMENT_ROOTS: tuple[str, ...] = (
+    TEXT_CONDITIONED_ROOT,
+    MULTI_TASK_ROOT,
+    SINGLE_TASK_ROOT,
+)
+# eval_comparison_all：与全 8 任务 textcond 目录 ``text_conditioned_only/all_frac*_sigma*/`` 对齐（默认 all_frac1.0_sigma0.0）
+EVAL_ALL_TASK_FRAC_SIG: str = os.environ.get(
+    "EVAL_ALL_TASK_FRAC_SIG", "all_frac1.0_sigma0.0"
+)
+# eval_comparison_all：每列对应 ``text_conditioned_only/<EVAL_ALL_TASK_FRAC_SIG>/<hyper>/``（hyper 为关键参数目录名）
+EVAL_ALL_EXPERIMENT_PREFIX: str = (
+    f"{TEXT_CONDITIONED_ROOT}/{EVAL_ALL_TASK_FRAC_SIG}"
+)
+
+# GTGdfgo results 布局：``single_task/<task>_frac*_sigma*``、``multi_task/<token>_frac*_sigma*`` 等
+GTGDFGO_TASK_FRAC_SIG: str = os.environ.get("GTGDFGO_TASK_FRAC_SIG", "frac1.0_sigma0.0")
+
+# 旧 ``multitask_*`` 名 -> 新 ``multi_task`` / ``text_conditioned_only`` 下目录 token（不含 frac_sigma）
+MULTITASK_NAME_TO_DIR: dict[str, str] = {
+    "multitask_ant_dkitty": "ant_dkitty",
+    "multitask_tfbind10_tfbind8": "tfbind10_tfbind8",
+    "multitask_gtopx2_gtopx3_gtopx4_gtopx6": "gtopx2_gtopx3_gtopx4_gtopx6",
+}
+
+
+def gtgdfgo_single_task_key(task: str, use_returns: bool) -> str:
+    base = f"{SINGLE_TASK_ROOT}/{task}_{GTGDFGO_TASK_FRAC_SIG}"
+    return f"{base}{RETCOND_INFIX}" if use_returns else base
+
+
+def gtgdfgo_subgroup_multitask_key(task: str, use_returns: bool) -> str | None:
+    old = TASK_TO_SUBGROUP_MULTITASK_EXP.get(task)
+    if not old:
+        return None
+    token = MULTITASK_NAME_TO_DIR.get(old)
+    if not token:
+        return None
+    base = f"{MULTI_TASK_ROOT}/{token}_{GTGDFGO_TASK_FRAC_SIG}"
+    return f"{base}{RETCOND_INFIX}" if use_returns else base
+
+
+def gtgdfgo_full_multitask_key(use_returns: bool) -> str:
+    base = f"{MULTI_TASK_ROOT}/all_{GTGDFGO_TASK_FRAC_SIG}"
+    return f"{base}{RETCOND_INFIX}" if use_returns else base
+
+
+def gtgdfgo_subgroup_text_key(task: str, use_returns: bool) -> str | None:
+    """``text_conditioned_only/<token>_<frac_sigma>[ _retcond]``（无 all_frac 第三段 hyper 名）。"""
+    old = TASK_TO_SUBGROUP_MULTITASK_EXP.get(task)
+    if not old:
+        return None
+    token = MULTITASK_NAME_TO_DIR.get(old)
+    if not token:
+        return None
+    r = RETCOND_INFIX if use_returns else ""
+    return f"{TEXT_CONDITIONED_ROOT}/{token}_{GTGDFGO_TASK_FRAC_SIG}{r}"
+
+
+def _pick_gtgdfgo_all_frac_text_key(
+    bucket: dict[str, dict[str, dict[str, Any]]],
+    use_returns: bool,
+) -> str | None:
+    """``text_conditioned_only/all_<frac_sigma>/<hyper>``：仅 hyper 名以 ``_ret`` 结尾与否与列（ST / ST+r）一致；无则 None。"""
+    prefix = f"{TEXT_CONDITIONED_ROOT}/all_{GTGDFGO_TASK_FRAC_SIG}/"
+    hits: list[str] = []
+    for k in bucket:
+        if not k.startswith(prefix):
+            continue
+        hyper = k[len(prefix) :]
+        if "/" in hyper:
+            continue
+        if hyper.endswith("_ret") == use_returns:
+            hits.append(k)
+    return sorted(hits)[0] if hits else None
+
 
 def _experiment_name_from_eval_log(
     results_root: Path, evaluate_log: Path
 ) -> str | None:
     """
-    - ``<exp>/<run>/evaluate.log`` -> ``<exp>``
-    - ``results/all/<frac_sigma>/<child>/runN_seedM/evaluate.log`` -> ``all/<frac_sigma>/<child>``
-    - 其他 ``all/...`` 布局 -> ``None``（扫描时忽略）
+    - ``<exp>/<run>/evaluate.log`` -> ``<exp>``（普通实验）
+    - ``text_conditioned_only/<EVAL_ALL_TASK_FRAC_SIG>/<hyper>/run*/evaluate.log``
+      -> ``text_conditioned_only/<EVAL_ALL_TASK_FRAC_SIG>/<hyper>``（eval_comparison_all 每列一 hyper）
+    - 其它 ``<agg_root>/<tasks_frac_sigma>/<hyper>/run*/evaluate.log``
+      -> ``<agg_root>/<tasks_frac_sigma>``（同列聚合所有 hyper）
+    - 旧布局 ``text_conditioned_only/multi_task/<tasks_frac_sigma>/<hyper>/run*``（仍兼容至迁移完成）
+      -> ``text_conditioned_only/<tasks_frac_sigma>``
     """
     try:
         rel = evaluate_log.relative_to(results_root.resolve())
@@ -254,12 +339,30 @@ def _experiment_name_from_eval_log(
     parts = rel.parts
     if parts[-1] != "evaluate.log":
         return evaluate_log.parent.parent.name
-    if parts[0] == "all":
-        if len(parts) < 5:
-            return None
-        if not _ALL_RUN_DIR_RE.match(parts[-2]):
-            return None
-        return "/".join(parts[:-2])
+    if not _ALL_RUN_DIR_RE.match(parts[-2]):
+        return evaluate_log.parent.parent.name
+    # 旧：text_conditioned_only/multi_task/<tasks_frac>/<hyper>/run/...
+    if (
+        len(parts) >= 6
+        and parts[0] == TEXT_CONDITIONED_ROOT
+        and parts[1] == MULTI_TASK_ROOT
+    ):
+        return f"{parts[0]}/{parts[2]}"
+    # all_frac*：每个超参子目录单独一列（与 eval_comparison_all 一致）
+    if (
+        len(parts) >= 5
+        and parts[0] == TEXT_CONDITIONED_ROOT
+        and parts[1] == EVAL_ALL_TASK_FRAC_SIG
+    ):
+        return f"{parts[0]}/{parts[1]}/{parts[2]}"
+    # 其它：text_conditioned_only|multi_task|single_task/<tasks_frac>/<hyper>/run/...
+    # hyper 目录名以 ``_ret`` 结尾 → 与无 ret 分两键（对齐 ``*_retcond`` 列）
+    if len(parts) >= 5 and parts[0] in AGGREGATE_EXPERIMENT_ROOTS:
+        hyper = parts[-3]
+        base = f"{parts[0]}/{parts[1]}"
+        if hyper.endswith("_ret"):
+            return f"{base}{RETCOND_INFIX}"
+        return base
     return evaluate_log.parent.parent.name
 
 
@@ -282,6 +385,7 @@ def scan_results_root(results_root: Path) -> dict[str, dict[str, dict[str, Any]]
     logs.extend(sorted(results_root.glob("*/*/evaluate.log")))
     logs.extend(sorted(results_root.glob("*/*/*/evaluate.log")))
     logs.extend(sorted(results_root.glob("*/*/*/*/evaluate.log")))
+    logs.extend(sorted(results_root.glob("*/*/*/*/*/evaluate.log")))
     seen: set[str] = set()
     for p in logs:
         s = str(p.resolve())
@@ -393,9 +497,12 @@ def enrich_multitask_columns(
     out: list[dict[str, Any]] = []
     for row in rows:
         task = row["task"]
-        sub_exp = TASK_TO_SUBGROUP_MULTITASK_EXP.get(task)
-        sub_st = _lookup_task_stats(gtgdfgo, sub_exp, task)
-        full_st = _lookup_task_stats(gtgdfgo, FULL_MULTITASK_EXP, task)
+        sub_st = _lookup_task_stats(
+            gtgdfgo, gtgdfgo_subgroup_multitask_key(task, False), task
+        )
+        full_st = _lookup_task_stats(
+            gtgdfgo, gtgdfgo_full_multitask_key(False), task
+        )
         new_row = dict(row)
         new_row.update(_prefix_stats_flat("gtgdfgo_msub", sub_st))
         new_row.update(_prefix_stats_flat("gtgdfgo_mfull", full_st))
@@ -444,24 +551,40 @@ def parse_offline_train_best_y(text: str, task_key: str) -> float | None:
     return last
 
 
-def read_dataset_best_from_experiment(
-    results_root: Path, exp_name: str, task_key: str
-) -> float | None:
-    exp = results_root / exp_name
-    if not exp.is_dir():
+def _read_dataset_best_under_dir(exp_dir: Path, task_key: str) -> float | None:
+    """在单个实验根目录下（可含多层 hyper/run）从 evaluate.log 解析 D(best)。"""
+    if not exp_dir.is_dir():
         return None
-    for evaluate_log in sorted(exp.glob("*/evaluate.log")):
+    for evaluate_log in sorted(exp_dir.rglob("evaluate.log")):
+        if not _ALL_RUN_DIR_RE.match(evaluate_log.parent.name):
+            continue
         text = strip_ansi(
             evaluate_log.read_text(encoding="utf-8", errors="replace")
         )
         v = parse_offline_train_best_y(text, task_key)
         if v is not None:
             return v
-    for evaluate_log in sorted(exp.glob("*/evaluate.log")):
+    for evaluate_log in sorted(exp_dir.rglob("evaluate.log")):
+        if not _ALL_RUN_DIR_RE.match(evaluate_log.parent.name):
+            continue
         text = strip_ansi(
             evaluate_log.read_text(encoding="utf-8", errors="replace")
         )
         v = parse_dataset_best_raw(text, task_key)
+        if v is not None:
+            return v
+    return None
+
+
+def read_dataset_best_from_experiment(
+    results_root: Path, task_key: str
+) -> float | None:
+    """从 ``results/single_task/<task>_frac*_sigma*/`` 下任意 ``run*_seed*/evaluate.log`` 解析 D(best)。"""
+    st_root = results_root / SINGLE_TASK_ROOT
+    if not st_root.is_dir():
+        return None
+    for base in sorted(p for p in st_root.glob(f"{task_key}_frac*_sigma*") if p.is_dir()):
+        v = _read_dataset_best_under_dir(base, task_key)
         if v is not None:
             return v
     return None
@@ -574,7 +697,8 @@ def parse_uniso_best_per_task(tex_path: Path) -> dict[str, str]:
 def column_mean_rank_stats(means: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """
     means[i,j] = 任务 i、方法 j 的 mean；nan 表示该格无数据。
-    每行内在非 nan 的方法间按 **越大越好** 赋秩（并列取平均秩），再对任务维求 mean / std。
+    每行内**仅对非 nan 的方法**按 **越大越好** 赋秩（并列取平均秩）；全空列在该行不参与比较。
+    若某列在所有任务上均未获得秩，则 Mean rank 对应格为 nan（由 ``fmt_mean_pm_rank`` 显示为 ``--``）。
     """
     n_tasks, n_cols = means.shape
     ranks = np.full((n_tasks, n_cols), np.nan, dtype=np.float64)
@@ -773,21 +897,35 @@ def _matrix12_text_cell(
     full_multitask: bool,
     latex: bool,
 ) -> str:
-    """对 text 多任务列按后缀依次尝试（如仅 ``_textcond`` 与 ``_textcond_mttextonly`` 目录并存时对齐 run_multitask 命名）。"""
+    """text：先尝试旧 ``multitask_*_textcond`` 键；再试 ``text_conditioned_only/<token>_frac*/``；全任务用 ``all_*`` 下 hyper。"""
     for suf in text_suffixes:
         exp = (
             _mfull_text_exp_name(use_returns, suf)
             if full_multitask
             else _msub_text_exp_name(task_key, use_returns, suf)
         )
-        if not exp or exp not in bucket:
-            continue
-        st = bucket[exp].get(task_key)
-        if st is None:
-            continue
-        if latex:
-            return fmt_pm_latex(st.get("max_mean"), st.get("max_std"))
-        return fmt_pm(st.get("max_mean"), st.get("max_std"))
+        if exp and exp in bucket:
+            st = bucket[exp].get(task_key)
+            if st is not None:
+                if latex:
+                    return fmt_pm_latex(st.get("max_mean"), st.get("max_std"))
+                return fmt_pm(st.get("max_mean"), st.get("max_std"))
+    if full_multitask:
+        k = _pick_gtgdfgo_all_frac_text_key(bucket, use_returns)
+        if k and k in bucket:
+            st = bucket[k].get(task_key)
+            if st is not None:
+                if latex:
+                    return fmt_pm_latex(st.get("max_mean"), st.get("max_std"))
+                return fmt_pm(st.get("max_mean"), st.get("max_std"))
+    else:
+        base = gtgdfgo_subgroup_text_key(task_key, use_returns)
+        if base and base in bucket:
+            st = bucket[base].get(task_key)
+            if st is not None:
+                if latex:
+                    return fmt_pm_latex(st.get("max_mean"), st.get("max_std"))
+                return fmt_pm(st.get("max_mean"), st.get("max_std"))
     if latex:
         return "--"
     return "—"
@@ -824,12 +962,16 @@ def matrix12_row(
         )
     out["c01_gtg_st"] = F(gtg, _single_exp_name(task_key, False))
     out["c02_gtg_st_ret"] = F(gtg, _single_exp_name(task_key, True))
-    out["c03_gdf_st"] = F(gtgdfgo, _single_exp_name(task_key, False))
-    out["c04_gdf_st_ret"] = F(gtgdfgo, _single_exp_name(task_key, True))
-    out["c05_gdf_msub_l"] = F(gtgdfgo, _msub_label_exp_name(task_key, False))
-    out["c06_gdf_msub_l_ret"] = F(gtgdfgo, _msub_label_exp_name(task_key, True))
-    out["c07_gdf_mfull_l"] = F(gtgdfgo, _mfull_label_exp_name(False))
-    out["c08_gdf_mfull_l_ret"] = F(gtgdfgo, _mfull_label_exp_name(True))
+    out["c03_gdf_st"] = F(gtgdfgo, gtgdfgo_single_task_key(task_key, False))
+    out["c04_gdf_st_ret"] = F(gtgdfgo, gtgdfgo_single_task_key(task_key, True))
+    out["c05_gdf_msub_l"] = F(
+        gtgdfgo, gtgdfgo_subgroup_multitask_key(task_key, False) or ""
+    )
+    out["c06_gdf_msub_l_ret"] = F(
+        gtgdfgo, gtgdfgo_subgroup_multitask_key(task_key, True) or ""
+    )
+    out["c07_gdf_mfull_l"] = F(gtgdfgo, gtgdfgo_full_multitask_key(False))
+    out["c08_gdf_mfull_l_ret"] = F(gtgdfgo, gtgdfgo_full_multitask_key(True))
     out["c09_gdf_msub_t"] = _matrix12_text_cell(
         gtgdfgo, task_key, False, text_suffixes, full_multitask=False, latex=latex
     )
@@ -990,13 +1132,12 @@ def write_matrix12_latex(
 
 def d_best_cell(
     gtgdfgo_root: Path,
-    exp_name: str,
     task_key: str,
     overrides: dict[str, float],
 ) -> str:
     if task_key in overrides:
         return f"{overrides[task_key]:.{DECIMALS}f}"
-    v = read_dataset_best_from_experiment(gtgdfgo_root, exp_name, task_key)
+    v = read_dataset_best_from_experiment(gtgdfgo_root, task_key)
     if v is None:
         return "--"
     return f"{v:.{DECIMALS}f}"
@@ -1006,19 +1147,40 @@ def collect_all_experiment_keys(
     gtgdfgo: dict[str, dict[str, dict[str, Any]]],
     results_root: Path,
 ) -> list[str]:
-    """``all/<…>`` 实验键：优先来自聚合结果；若无则扫 ``all/**/evaluate.log``。"""
-    keys = sorted({k for k in gtgdfgo if k.startswith("all/")})
-    if keys:
-        return keys
-    all_root = results_root / "all"
-    if not all_root.is_dir():
+    """
+    ``eval_comparison_all``：``text_conditioned_only/<EVAL_ALL_TASK_FRAC_SIG>/`` 下
+    每个**直接子目录**（超参文件夹名 = 关键参数）一列 DFGO；列顺序为目录名字典序。
+    """
+    base = results_root / TEXT_CONDITIONED_ROOT / EVAL_ALL_TASK_FRAC_SIG
+    if not base.is_dir():
         return []
-    seen: set[str] = set()
-    for ev in sorted(all_root.rglob("evaluate.log")):
-        exp = _experiment_name_from_eval_log(results_root, ev)
-        if exp is not None and exp.startswith("all/"):
-            seen.add(exp)
-    return sorted(seen)
+    keys: list[str] = []
+    for hyper in sorted(base.iterdir()):
+        if not hyper.is_dir() or hyper.name.startswith("."):
+            continue
+        if not any(hyper.rglob("evaluate.log")):
+            continue
+        k = f"{EVAL_ALL_EXPERIMENT_PREFIX}/{hyper.name}"
+        keys.append(k)
+    return keys
+
+
+def _tex_col_short_name(exp_key: str) -> str:
+    """LaTeX 列标题：去掉一级根目录前缀，便于排版。"""
+    if exp_key.startswith(f"{TEXT_CONDITIONED_ROOT}/"):
+        return exp_key[len(TEXT_CONDITIONED_ROOT) + 1 :]
+    for p in (f"{r}/" for r in (MULTI_TASK_ROOT, SINGLE_TASK_ROOT)):
+        if exp_key.startswith(p):
+            return exp_key[len(p) :]
+    return exp_key
+
+
+def _tex_col_all_hyper_param_name(exp_key: str) -> str:
+    """eval_comparison_all 列名：仅超参目录名（w1.2_*、n*k*eps、_ret 等）。"""
+    pfx = f"{EVAL_ALL_EXPERIMENT_PREFIX}/"
+    if exp_key.startswith(pfx):
+        return exp_key[len(pfx) :]
+    return _tex_col_short_name(exp_key)
 
 
 def _latex_sig_header(sig: str) -> str:
@@ -1039,18 +1201,18 @@ def write_latex_all_fulltext(
     caption: str,
     label: str,
 ) -> None:
-    """全任务文本条件：每个 ``all/<frac_sigma>/<child>`` 一列 DFGO，另含 Dbest、UniSO、GTG ST / ST+r。"""
+    """多列 DFGO：``all_frac*_sigma*/`` 下每个超参子目录一列，列名为子目录名（关键参数）。"""
     exp_keys = collect_all_experiment_keys(gtgdfgo, gtgdfgo_root)
     if not exp_keys:
         path.write_text(
-            "% No experiments under results/all/ (no evaluate.log); nothing to tabulate.\n",
+            rf"% No data for eval_comparison_all (expected subdirs under {EVAL_ALL_EXPERIMENT_PREFIX}/ with evaluate.log).\n",
             encoding="utf-8",
         )
         return
     n_sub = len(exp_keys)
     tab_spec = "l|c|c|cc|" + ("c" * n_sub)
     hdr_dfgo = " & ".join(
-        _latex_sig_header(k[4:] if k.startswith("all/") else k) for k in exp_keys
+        _latex_sig_header(_tex_col_all_hyper_param_name(k)) for k in exp_keys
     )
     hdr_row = (
         r"Task & $\mathcal{D}$(best) & \shortstack{UniSO\\best} & \shortstack{GTG\\ST} & "
@@ -1058,7 +1220,7 @@ def write_latex_all_fulltext(
     )
     lines = [
         r"% Requires: \usepackage{booktabs}, \usepackage{graphicx}, \usepackage{xcolor}.",
-        r"% Blocks: Task+D(best) | UniSO | GTG ST/ST+r | DFGO (results/all/).",
+        r"% Blocks: Task+D(best) | UniSO | GTG ST/ST+r | DFGO (text_conditioned_only/all_frac…).",
         r"\begin{table*}[t!]",
         rf"\caption{{{caption}}}",
         r"\vspace{0.3em}",
@@ -1074,7 +1236,7 @@ def write_latex_all_fulltext(
     n_cols_data = 3 + n_sub
     means_a = np.full((n_rows, n_cols_data), np.nan, dtype=np.float64)
     for ri, (task_key, latex_name, exp_name) in enumerate(LATEX_TASK_ROWS):
-        db = d_best_cell(gtgdfgo_root, exp_name, task_key, d_best_overrides)
+        db = d_best_cell(gtgdfgo_root, task_key, d_best_overrides)
         u_raw = uniso_by_task.get(task_key, "")
         u_cell = u_raw if u_raw else "--"
         gtg_st = stats_cell_latex(gtg, _single_exp_name(task_key, False), task_key)
@@ -1139,22 +1301,30 @@ def write_latex(
     n_rows = len(LATEX_TASK_ROWS)
     means_w = np.full((n_rows, 5), np.nan, dtype=np.float64)
     for ri, (task_key, latex_name, exp_name) in enumerate(LATEX_TASK_ROWS):
-        db = d_best_cell(gtgdfgo_root, exp_name, task_key, d_best_overrides)
+        db = d_best_cell(gtgdfgo_root, task_key, d_best_overrides)
         u_raw = uniso_by_task.get(task_key, "")
         u_cell = u_raw if u_raw else "--"
         gtg_c = stats_cell_latex(gtg, exp_name, task_key)
-        g1 = stats_cell_latex(gtgdfgo, exp_name, task_key)
-        sub_exp = TASK_TO_SUBGROUP_MULTITASK_EXP.get(task_key)
-        g_sub = stats_cell_latex(gtgdfgo, sub_exp or "", task_key)
-        g_full = stats_cell_latex(gtgdfgo, FULL_MULTITASK_EXP, task_key)
+        g1 = stats_cell_latex(
+            gtgdfgo, gtgdfgo_single_task_key(task_key, False), task_key
+        )
+        g_sub = stats_cell_latex(
+            gtgdfgo, gtgdfgo_subgroup_multitask_key(task_key, False) or "", task_key
+        )
+        g_full = stats_cell_latex(
+            gtgdfgo, gtgdfgo_full_multitask_key(False), task_key
+        )
         u_m = parse_mean_from_text_cell(u_cell)
         gtg_m = _mean_from_task_stats(gtg.get(exp_name, {}).get(task_key))
-        g1_m = _mean_from_task_stats(gtgdfgo.get(exp_name, {}).get(task_key))
+        g1_m = _mean_from_task_stats(
+            gtgdfgo.get(gtgdfgo_single_task_key(task_key, False), {}).get(task_key)
+        )
+        gsk = gtgdfgo_subgroup_multitask_key(task_key, False)
         gsub_m = _mean_from_task_stats(
-            gtgdfgo.get(sub_exp or "", {}).get(task_key) if sub_exp else None
+            gtgdfgo.get(gsk, {}).get(task_key) if gsk else None
         )
         gfull_m = _mean_from_task_stats(
-            gtgdfgo.get(FULL_MULTITASK_EXP, {}).get(task_key)
+            gtgdfgo.get(gtgdfgo_full_multitask_key(False), {}).get(task_key)
         )
         means_w[ri, 0] = np.nan if u_m is None else u_m
         means_w[ri, 1] = np.nan if gtg_m is None else gtg_m
@@ -1268,23 +1438,25 @@ def write_markdown(
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-# 相对本脚本：GTGdfgo 仓库根 -> results/、对照 GTG/results/；输出 eval_comparison* 与 matrix12。
+# 相对本脚本：GTGdfgo 仓库根；实验日志在 results/；汇总表与 UniSO 输入在 results/analysis_table/。
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 GTGDFGO_RESULTS = _PROJECT_ROOT / "results"
 GTG_RESULTS = _PROJECT_ROOT.parent / "GTG" / "results"
-OUTPUT_BASE = _PROJECT_ROOT / "results" / "eval_comparison"
-MATRIX12_BASE = _PROJECT_ROOT / "results" / "eval_comparison_m12"
-UNISO_RESULT_TEX = _PROJECT_ROOT / "results" / "uniso_result.tex"
+ANALYSIS_TABLE_DIR = _PROJECT_ROOT / "results" / "analysis_table"
+OUTPUT_BASE = ANALYSIS_TABLE_DIR / "eval_comparison"
+MATRIX12_BASE = ANALYSIS_TABLE_DIR / "eval_comparison_m12"
+UNISO_RESULT_TEX = ANALYSIS_TABLE_DIR / "uniso_result.tex"
 # run_multitask：仅 --use_text_condition → …_textcond；再加 --multitask_text_only → …_textcond_mttextonly。优先匹配后者。
 MATRIX12_TEXT_SUFFIXES: tuple[str, ...] = ("_textcond_mttextonly", "_textcond")
-D_BEST_JSON = _PROJECT_ROOT / "results" / "d_best.json"
+D_BEST_JSON = ANALYSIS_TABLE_DIR / "d_best.json"
 
 LATEX_CAPTION = (
     "Un-normalized max scores (mean $\\pm$ std over runs); "
-    "\\shortstack{UniSO\\,best} is the best mean among UniSO-T / UniSO-N columns in \\texttt{uniso\\_result.tex}. "
+    "\\shortstack{UniSO\\,best} is the best mean among UniSO-T / UniSO-N columns in "
+    "\\texttt{results/analysis\\_table/uniso\\_result.tex}. "
     "Mean rank: per task, rank methods by mean (higher better); report mean $\\pm$ std across tasks. "
     "$\\mathcal{D}$(best): offline training subset (\\texttt{offline\\_train\\_best\\_y}); "
-    "optional \\texttt{results/d\\_best.json} overrides."
+    "optional \\texttt{results/analysis\\_table/d\\_best.json} overrides."
 )
 LATEX_LABEL = "tab:gtg-gtgdfgo-eval"
 LATEX_CAPTION_MATRIX12 = (
@@ -1293,18 +1465,20 @@ LATEX_CAPTION_MATRIX12 = (
     "Mean rank: per task among UniSO + 12 columns; mean $\\pm$ std across tasks."
 )
 LATEX_LABEL_MATRIX12 = "tab:gtg-gtgdfgo-eval-m12"
-OUTPUT_ALL_BASE = _PROJECT_ROOT / "results" / "eval_comparison_all"
+OUTPUT_ALL_BASE = ANALYSIS_TABLE_DIR / "eval_comparison_all"
+_LATEX_ESC_ALL_SIG = EVAL_ALL_TASK_FRAC_SIG.replace("_", r"\_")
 LATEX_CAPTION_ALL = (
-    "Full multitask text-conditioned runs: one DFGO column per experiment directory under "
-    "\\texttt{results/all/} (nested \\texttt{frac\\_F\\_sigma\\_S} and run-signature folder; "
-    "prefix \\texttt{ret\\_} on the inner folder when using returns conditioning). "
+    "DFGO (full multitask, text-conditioned): one column per immediate subfolder of "
+    f"\\texttt{{results/text\\_conditioned\\_only/{_LATEX_ESC_ALL_SIG}/}} "
+    "(folder names encode key hyperparameters, e.g.\\ \\texttt{w1.2\\_}$\\cdots$); "
+    "each column pools runs inside that folder only. "
     "UniSO (best), GTG ST / ST+r, and DFGO. Mean rank: higher mean reward is better; "
     "report mean $\\pm$ std of per-task ranks."
 )
 LATEX_LABEL_ALL = "tab:gtg-gtgdfgo-eval-all-text"
 
 
-def main() -> None:
+def main(mode: str = "all") -> None:
     d_best_overrides: dict[str, float] = {}
     if D_BEST_JSON.is_file():
         raw = json.loads(D_BEST_JSON.read_text(encoding="utf-8"))
@@ -1315,74 +1489,103 @@ def main() -> None:
     gtgdfgo = scan_results_root(GTGDFGO_RESULTS)
     gtg = scan_results_root(GTG_RESULTS)
 
-    out_base = OUTPUT_BASE
-    rows = enrich_multitask_columns(
-        sort_comparison_rows(build_comparison_rows(gtgdfgo, gtg)), gtgdfgo
-    )
-    md_path = out_base.with_suffix(".md")
-    tex_path = out_base.with_suffix(".tex")
-    md_path.parent.mkdir(parents=True, exist_ok=True)
+    do_short = mode in ("all", "short")
+    do_full = mode in ("all", "full")
+    do_final = mode in ("all", "final")
 
-    write_csv(out_base.with_suffix(".csv"), rows)
-    write_markdown(md_path, GTGDFGO_RESULTS, GTG_RESULTS, rows)
-    write_latex(
-        tex_path,
-        GTGDFGO_RESULTS,
-        gtg,
-        gtgdfgo,
-        d_best_overrides,
-        caption=LATEX_CAPTION,
-        label=LATEX_LABEL,
-        uniso_by_task=uniso_by_task,
-    )
-    print(f"Wrote {out_base.with_suffix('.csv')}")
-    print(f"Wrote {md_path}")
-    print(f"Wrote {tex_path}")
-    print(
-        f"GTGdfgo experiments: {len(gtgdfgo)}, GTG experiments: {len(gtg)}, comparison rows: {len(rows)}"
-    )
+    if do_short:
+        out_base = OUTPUT_BASE
+        rows = enrich_multitask_columns(
+            sort_comparison_rows(build_comparison_rows(gtgdfgo, gtg)), gtgdfgo
+        )
+        md_path = out_base.with_suffix(".md")
+        tex_path = out_base.with_suffix(".tex")
+        md_path.parent.mkdir(parents=True, exist_ok=True)
 
-    all_base = OUTPUT_ALL_BASE
-    all_base.parent.mkdir(parents=True, exist_ok=True)
-    write_latex_all_fulltext(
-        all_base.with_suffix(".tex"),
-        GTGDFGO_RESULTS,
-        gtg,
-        gtgdfgo,
-        d_best_overrides,
-        uniso_by_task,
-        caption=LATEX_CAPTION_ALL,
-        label=LATEX_LABEL_ALL,
-    )
-    print(f"Wrote {all_base.with_suffix('.tex')}")
+        write_csv(out_base.with_suffix(".csv"), rows)
+        write_markdown(md_path, GTGDFGO_RESULTS, GTG_RESULTS, rows)
+        write_latex(
+            tex_path,
+            GTGDFGO_RESULTS,
+            gtg,
+            gtgdfgo,
+            d_best_overrides,
+            caption=LATEX_CAPTION,
+            label=LATEX_LABEL,
+            uniso_by_task=uniso_by_task,
+        )
+        print(f"Wrote {out_base.with_suffix('.csv')}")
+        print(f"Wrote {md_path}")
+        print(f"Wrote {tex_path}")
+        print(
+            f"GTGdfgo experiments: {len(gtgdfgo)}, GTG experiments: {len(gtg)}, comparison rows: {len(rows)}"
+        )
 
-    mbase = MATRIX12_BASE
-    mrows = build_matrix12_rows(
-        gtg, gtgdfgo, MATRIX12_TEXT_SUFFIXES, uniso_by_task
+    if do_final:
+        all_base = OUTPUT_ALL_BASE
+        all_base.parent.mkdir(parents=True, exist_ok=True)
+        write_latex_all_fulltext(
+            all_base.with_suffix(".tex"),
+            GTGDFGO_RESULTS,
+            gtg,
+            gtgdfgo,
+            d_best_overrides,
+            uniso_by_task,
+            caption=LATEX_CAPTION_ALL,
+            label=LATEX_LABEL_ALL,
+        )
+        print(f"Wrote {all_base.with_suffix('.tex')}")
+
+    if do_full:
+        mbase = MATRIX12_BASE
+        mrows = build_matrix12_rows(
+            gtg, gtgdfgo, MATRIX12_TEXT_SUFFIXES, uniso_by_task
+        )
+        mbase.parent.mkdir(parents=True, exist_ok=True)
+        write_matrix12_csv(mbase.with_suffix(".csv"), mrows)
+        write_matrix12_markdown(
+            mbase.with_suffix(".md"),
+            GTG_RESULTS,
+            GTGDFGO_RESULTS,
+            mrows,
+            MATRIX12_TEXT_SUFFIXES,
+        )
+        write_matrix12_latex(
+            mbase.with_suffix(".tex"),
+            LATEX_CAPTION_MATRIX12,
+            LATEX_LABEL_MATRIX12,
+            gtg,
+            gtgdfgo,
+            MATRIX12_TEXT_SUFFIXES,
+            uniso_by_task,
+        )
+        print(f"Wrote {mbase.with_suffix('.csv')}")
+        print(f"Wrote {mbase.with_suffix('.md')}")
+        print(f"Wrote {mbase.with_suffix('.tex')}")
+        print(
+            f"Matrix12 rows: {len(mrows)} (tasks with subgroup multitask mapping)"
+        )
+
+
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Aggregate evaluate.log and write tables under results/analysis_table/ (see README)."
     )
-    mbase.parent.mkdir(parents=True, exist_ok=True)
-    write_matrix12_csv(mbase.with_suffix(".csv"), mrows)
-    write_matrix12_markdown(
-        mbase.with_suffix(".md"),
-        GTG_RESULTS,
-        GTGDFGO_RESULTS,
-        mrows,
-        MATRIX12_TEXT_SUFFIXES,
+    p.add_argument(
+        "--mode",
+        choices=("all", "short", "full", "final"),
+        default="all",
+        help=(
+            "Which outputs to generate: "
+            "short = analysis_table/eval_comparison (wide CSV/MD/TeX); "
+            "full = analysis_table/eval_comparison_m12 (13-column matrix); "
+            "final = analysis_table/eval_comparison_all (DFGO: one column per hyper subdir under all_frac…); "
+            "all = three tables (default)."
+        ),
     )
-    write_matrix12_latex(
-        mbase.with_suffix(".tex"),
-        LATEX_CAPTION_MATRIX12,
-        LATEX_LABEL_MATRIX12,
-        gtg,
-        gtgdfgo,
-        MATRIX12_TEXT_SUFFIXES,
-        uniso_by_task,
-    )
-    print(f"Wrote {mbase.with_suffix('.csv')}")
-    print(f"Wrote {mbase.with_suffix('.md')}")
-    print(f"Wrote {mbase.with_suffix('.tex')}")
-    print(f"Matrix12 rows: {len(mrows)} (tasks with subgroup multitask mapping)")
+    return p.parse_args()
 
 
 if __name__ == "__main__":
-    main()
+    args = _parse_args()
+    main(mode=args.mode)
