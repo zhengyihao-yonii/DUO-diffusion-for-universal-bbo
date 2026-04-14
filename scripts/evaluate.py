@@ -53,6 +53,33 @@ def _resolve_proxy_checkpoint_path(proxy_ckpt_dir, Config):
     return None
 
 
+def _resolve_diffusion_checkpoint_path(ckpt_dir, Config):
+    """
+    与训练时实际落盘步数一致：优先 state.pt，再 state_{Config.n_train_steps}.pt；
+    若不存在（例如训练用了 --train_epochs 覆盖了 n_train_steps，而 config 仍为默认值），
+    则取 checkpoint 目录下 state_<步数>.pt 中步数最大的文件。
+    """
+    if not os.path.isdir(ckpt_dir):
+        return None
+    st = os.path.join(ckpt_dir, "state.pt")
+    if os.path.isfile(st):
+        return st
+    if getattr(Config, "save_checkpoints", False):
+        n = int(getattr(Config, "n_train_steps", 0))
+        p = os.path.join(ckpt_dir, f"state_{n}.pt")
+        if os.path.isfile(p):
+            return p
+        matches = glob.glob(os.path.join(ckpt_dir, "state_*.pt"))
+        if matches:
+
+            def _step(path):
+                m = re.search(r"state_(\d+)\.pt$", path)
+                return int(m.group(1)) if m else -1
+
+            return max(matches, key=_step)
+    return None
+
+
 def _import_config(task_name):
     if task_name == 'ant':
         from config.ant_config import Config
@@ -92,7 +119,14 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
     # 多任务：从单独路径加载该任务的 proxy
     if is_multitask:
         print(f"加载评估任务 {eval_task} 的 proxy model")
-        proxy_model_prefix = f"trained_models/{eval_task}_frac{Config.frac}_sigma{Config.sigma}/{Config.n_traj}x{Config.horizon}_k{Config.k}_eps{Config.eps}/seed{Config.seed}/"
+        nd = getattr(Config, "traj_n_traj_dict", None)
+        if nd is not None and eval_task in nd:
+            _n = nd[eval_task]
+            _k = getattr(Config, "traj_k_dict", {})[eval_task]
+            _e = getattr(Config, "traj_eps_dict", {})[eval_task]
+        else:
+            _n, _k, _e = Config.n_traj, Config.k, Config.eps
+        proxy_model_prefix = f"trained_models/{eval_task}_frac{Config.frac}_sigma{Config.sigma}/{_n}x{Config.horizon}_k{_k}_eps{_e}/seed{Config.seed}/"
         proxy_ckpt_dir = os.path.join(proxy_model_prefix, "proxy_checkpoint")
         proxy_loadpath = _resolve_proxy_checkpoint_path(proxy_ckpt_dir, Config)
         if proxy_loadpath is not None:
@@ -123,11 +157,15 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
     # 轨迹数据路径：多任务使用混合 pkl（与 train 一致）
     if is_multitask:
         data_dir = os.path.dirname(Config.data_path)
-        mixed_data_path = os.path.join(data_dir, "mixed_trajectories_train.p")
-        if not os.path.isfile(mixed_data_path):
+        from diffuser.utils.traj_params import resolve_multitask_mixed_path
+
+        _sig = getattr(Config, "multitask_traj_signature", None)
+        try:
+            mixed_data_path = resolve_multitask_mixed_path(data_dir, _sig)
+        except FileNotFoundError as e:
             raise FileNotFoundError(
-                f"多任务评估需要混合轨迹文件: {mixed_data_path}\n请先运行 construct_trajectories.py 生成。"
-            )
+                f"{e}\n请先运行 construct_trajectories.py 生成混合轨迹。"
+            ) from e
         dataset = PointRegretDataset(
             horizon=Config.horizon,
             data_path=mixed_data_path,
@@ -500,6 +538,14 @@ def evaluate(**deps):
     ck_task = train_tasks_list[0]
     Config = _import_config(ck_task)
     Config._update(deps)
+    for _tk in (
+        "multitask_traj_signature",
+        "traj_n_traj_dict",
+        "traj_k_dict",
+        "traj_eps_dict",
+    ):
+        if _tk in deps and deps[_tk] is not None:
+            setattr(Config, _tk, deps[_tk])
     Config.eval_task = ck_task
     Config.train_tasks_list = train_tasks_list
     Config.is_multitask = is_multitask
@@ -535,11 +581,13 @@ def evaluate(**deps):
     if wandb is not None:
         wandb.init(project='decdiff-opt', config=Config, name=run_name, group="evaluation")
 
-    loadpath = os.path.join(logger.prefix, 'checkpoint')
-    if Config.save_checkpoints:
-        loadpath = os.path.join(loadpath, f'state_{Config.n_train_steps}.pt')
-    else:
-        loadpath = os.path.join(loadpath, 'state.pt')
+    ckpt_dir = os.path.join(logger.prefix, "checkpoint")
+    loadpath = _resolve_diffusion_checkpoint_path(ckpt_dir, Config)
+    if loadpath is None:
+        raise FileNotFoundError(
+            f"未找到扩散 checkpoint：目录 {ckpt_dir} 下需要 state.pt 或 state_<steps>.pt"
+        )
+    print(f"[evaluate] 加载扩散权重: {loadpath}")
     state_dict = torch.load(loadpath, map_location=Config.device)
 
     results = []

@@ -8,6 +8,7 @@ if __name__ == "__main__":
 
 import numpy as np
 import torch
+import diffuser.numpy_design_bench_compat  # noqa: F401
 
 if __name__ == "__main__":
     from diffuser.cpu_threads import apply_torch_cpu_threads_from_env
@@ -16,6 +17,7 @@ if __name__ == "__main__":
 from diffuser.models.vae import VAE, train_vae, create_vae_dataloaders
 from sklearn.preprocessing import StandardScaler
 import argparse
+
 import design_bench
 from tqdm import tqdm
 import pickle as pkl

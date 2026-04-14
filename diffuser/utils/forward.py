@@ -2,6 +2,8 @@ import sys
 import os
 import argparse
 
+import diffuser.numpy_design_bench_compat  # noqa: F401
+
 from tqdm import tqdm
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 

@@ -88,6 +88,12 @@ if __name__ == '__main__':
         default=None,
         help="限制 CPU 线程数（OpenMP/BLAS/PyTorch）；等价于环境变量 CPU_THREADS",
     )
+    parser.add_argument(
+        "--traj_params_json",
+        type=str,
+        default=None,
+        help="多任务：JSON 按任务覆盖 n_traj/k/eps（须与 construct / train 一致）",
+    )
 
     args = parser.parse_args(_cli_args)
 
@@ -131,8 +137,22 @@ if __name__ == '__main__':
     _mto = multitask_text_only_path_infix(args)
     # 多任务模式下的数据路径和运行前缀（与 train.py 一致；与评 ant/dkitty 无关）
     if len(train_tasks_list) > 1:
-        args.data_path = f'generated_datasets/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}_vae_latent32_train.p'
-        RUN.prefix = f"trained_models/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}{_ret}{_txt}{_mto}/seed{args.seed}/"
+        from diffuser.utils.traj_params import prepare_multitask_traj
+
+        n_d, k_d, e_d, sig = prepare_multitask_traj(
+            train_tasks_list,
+            args.n_traj,
+            args.k,
+            args.eps,
+            args.horizon,
+            args.traj_params_json,
+        )
+        args.data_path = f"generated_datasets/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{sig}_vae_latent32_train.p"
+        args.multitask_traj_signature = sig
+        args.traj_n_traj_dict = n_d
+        args.traj_k_dict = k_d
+        args.traj_eps_dict = e_d
+        RUN.prefix = f"trained_models/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{sig}{_ret}{_txt}{_mto}/seed{args.seed}/"
     else:
         # 单任务模式，保持原有逻辑
         task_name = train_tasks_list[0]

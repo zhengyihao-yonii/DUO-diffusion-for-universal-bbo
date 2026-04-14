@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import torch
 import numpy as np
+import diffuser.numpy_design_bench_compat  # noqa: F401
 import pickle as pkl
 import os
 from design_bench.datasets.discrete.tf_bind_8_dataset import TFBind8Dataset

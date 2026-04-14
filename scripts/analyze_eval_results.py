@@ -1176,7 +1176,7 @@ def _tex_col_short_name(exp_key: str) -> str:
 
 
 def _tex_col_all_hyper_param_name(exp_key: str) -> str:
-    """eval_comparison_all 列名：仅超参目录名（w1.2_*、n*k*eps、_ret 等）。"""
+    """eval_comparison_all 列名：仅超参目录名（w1.2_*、NxH_k_eps、_ret 等）。"""
     pfx = f"{EVAL_ALL_EXPERIMENT_PREFIX}/"
     if exp_key.startswith(pfx):
         return exp_key[len(pfx) :]

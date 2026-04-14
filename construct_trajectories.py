@@ -12,6 +12,9 @@ from tqdm import tqdm
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import pickle as pkl
 
+import diffuser.numpy_design_bench_compat  # noqa: F401
+import numpy as np
+
 # 禁止 `from diffuser.utils import set_seed`：会执行 utils/__init__ → training（曾顶层 import wandb），
 # 旧 typing_extensions 下 wandb 导入失败，construct 在 Step 1 即 exit 1，run_multitask 因 set -e 直接结束。
 def set_seed(seed: int) -> None:
@@ -47,7 +50,6 @@ with suppress_output():
     from design_bench.datasets.continuous.superconductor_dataset import SuperconductorDataset
     
 import torch
-import numpy as np
 
 from diffuser.datasets.sequence import TASKNAME2FULL, TASKNAME2TASK, TASKNAME2MAX_SAMPLES, SUPPORTED_TASKS
 from diffuser.utils.soo_gtopx import TASKNAME_TO_VAR_NUM, load_gtopx_offline_arrays, is_gtopx_task
@@ -142,7 +144,18 @@ def reduce_dimension(vae, data_x, scaler, fixed_dim=None, task_start_indices=Non
     # 合并所有批次的结果
     return torch.cat(latent_representations, dim=0)
 
-def construct_trajectories(tasks_list, frac=1.0, sigma=0.0, seed=0, n_traj=None, k=None, eps=None, fixed_dim=128, horizon=64):
+def construct_trajectories(
+    tasks_list,
+    frac=1.0,
+    sigma=0.0,
+    seed=0,
+    n_traj=None,
+    k=None,
+    eps=None,
+    fixed_dim=128,
+    horizon=64,
+    traj_params_json=None,
+):
     """
     构建轨迹，支持单任务和多任务模式
     
@@ -151,75 +164,35 @@ def construct_trajectories(tasks_list, frac=1.0, sigma=0.0, seed=0, n_traj=None,
     - frac: 每个任务使用的数据比例
     - sigma: 噪声水平
     - seed: 随机种子
-    - n_traj: 每任务生成的轨迹数量（可选）
-    - k: 每步选择的候选点数量（可选）
-    - eps: 允许的目标值下降范围（可选）
+    - n_traj: 每任务生成的轨迹数量（可选 int，或 per-task dict）
+    - k: 每步选择的候选点数量（可选 int 或 dict）
+    - eps: 允许的目标值下降范围（可选 float 或 dict）
     - fixed_dim: 固定的输入维度，用于统一不同数据集
     - horizon: 每条轨迹长度（时间步数），需与后续扩散训练 Config.horizon 一致
+    - traj_params_json: 可选 JSON 路径，在标量/默认字典上按任务覆盖 n_traj/k/eps（见 diffuser.utils.traj_params）
     """
     set_seed(seed)
     traj_len = horizon
-    
-    # Configs for each task (与dfgo-main保持一致)
-    # 默认参数配置
-    default_num_trajectories = {
-        "tfbind8": 1000,
-        "tfbind10": 1000,
-        "superconductor": 4000,
-        "ant": 4000,
-        "dkitty": 4000,
-        "gtopx2": 2000,
-        "gtopx3": 2000,
-        "gtopx4": 2000,
-        "gtopx6": 2000,
-    }
 
-    default_k = {
-        "tfbind8": 50,
-        "tfbind10": 50,
-        "superconductor": 20,
-        "ant": 20,
-        "dkitty": 20,
-        "gtopx2": 20,
-        "gtopx3": 20,
-        "gtopx4": 20,
-        "gtopx6": 20,
-    }
+    from diffuser.utils.traj_params import (
+        coerce_traj_param_dicts,
+        merge_traj_params_json,
+        multitask_trajectory_signature,
+    )
 
-    default_eps = {
-        "tfbind8": 0.05,
-        "tfbind10": 0.05,
-        "superconductor": 0.05,
-        "ant": 0.05,
-        "dkitty": 0.01,
-        "gtopx2": 0.05,
-        "gtopx3": 0.05,
-        "gtopx4": 0.05,
-        "gtopx6": 0.05,
-    }
-    
-    # 统一设置参数，符合用户要求
-    # 处理n_traj参数：如果是整数，转换为字典格式
-    if n_traj is None:
-        n_traj = {task: default_num_trajectories.get(task, 1000) for task in tasks_list}
-    elif isinstance(n_traj, int):
-        # 如果用户传递的是整数，为每个任务设置相同的轨迹数量
-        n_traj = {task: n_traj for task in tasks_list}
-    
-    # 处理k参数：如果是整数，转换为字典格式
-    if k is None:
-        k = {task: default_k.get(task, 20) for task in tasks_list}
-    elif isinstance(k, int):
-        k = {task: k for task in tasks_list}
-    
-    # 处理eps参数：如果是浮点数，转换为字典格式
-    if eps is None:
-        eps = {task: default_eps.get(task, 0.05) for task in tasks_list}
-    elif isinstance(eps, float):
-        eps = {task: eps for task in tasks_list}
-    
+    n_traj, k, eps = coerce_traj_param_dicts(tasks_list, n_traj, k, eps)
+    if traj_params_json:
+        n_traj, k, eps = merge_traj_params_json(
+            traj_params_json, tasks_list, n_traj, k, eps
+        )
+
     # 根据任务数量选择不同的数据加载方式
     is_multitask = len(tasks_list) > 1
+    mt_sig = (
+        multitask_trajectory_signature(tasks_list, n_traj, k, eps, traj_len)
+        if is_multitask
+        else None
+    )
 
     # 与 train/evaluate 中 generated_datasets 路径一致；USE_RETURNS 只改 checkpoint，不改此目录
     if is_multitask:
@@ -232,7 +205,8 @@ def construct_trajectories(tasks_list, frac=1.0, sigma=0.0, seed=0, n_traj=None,
     # 多任务必须与单任务一致：按 n_traj/k/eps/horizon 检查各任务 pkl；不能仅因 mixed 存在就跳过，
     # 否则更换 n_traj 后仍会命中旧的 mixed，且 run_multitask 后续 train 会指向不存在的 data_path。
     if is_multitask:
-        mixed_path = os.path.join(output_dir_early, "mixed_trajectories_train.p")
+        mixed_new = os.path.join(output_dir_early, f"mixed_{mt_sig}.p")
+        mixed_legacy = os.path.join(output_dir_early, "mixed_trajectories_train.p")
         all_task_pkls_exist = True
         for task_name in tasks_list:
             task_n_traj = n_traj[task_name]
@@ -245,9 +219,11 @@ def construct_trajectories(tasks_list, frac=1.0, sigma=0.0, seed=0, n_traj=None,
             if not os.path.isfile(task_pkl):
                 all_task_pkls_exist = False
                 break
-        if os.path.isfile(mixed_path) and all_task_pkls_exist:
+        mixed_ok = os.path.isfile(mixed_new) or os.path.isfile(mixed_legacy)
+        if mixed_ok and all_task_pkls_exist:
+            _mp = mixed_new if os.path.isfile(mixed_new) else mixed_legacy
             print(
-                f"已存在多任务混合轨迹（训练实际加载此文件），跳过数据加载与 VAE：{mixed_path}"
+                f"已存在多任务混合轨迹（训练实际加载此文件），跳过数据加载与 VAE：{_mp}"
             )
             return output_dir_early, None
     else:
@@ -606,7 +582,7 @@ def construct_trajectories(tasks_list, frac=1.0, sigma=0.0, seed=0, n_traj=None,
             tasks_list  # 保存任务列表，用于映射任务索引
         ]
         
-        mixed_output_path = os.path.join(output_dir, "mixed_trajectories_train.p")
+        mixed_output_path = os.path.join(output_dir, f"mixed_{mt_sig}.p")
         pkl.dump(mixed_trajectory_obj, open(mixed_output_path, "wb"))
         print(f"混合轨迹文件已保存至: {mixed_output_path}")
         print(f"混合轨迹数量: {mixed_our_data.shape[0]}")
@@ -722,6 +698,12 @@ if __name__ == "__main__":
     parser.add_argument('--fixed_dim', type=int, default=128, help="固定的输入维度，用于统一不同数据集")
     parser.add_argument('--horizon', type=int, default=64, help="合成轨迹长度，需与训练时 horizon 一致")
     parser.add_argument(
+        "--traj_params_json",
+        type=str,
+        default=None,
+        help="JSON：按任务覆盖 n_traj/k/eps（与 train/evaluate 同路径）",
+    )
+    parser.add_argument(
         '--cpu_threads',
         type=int,
         default=None,
@@ -762,5 +744,6 @@ if __name__ == "__main__":
         eps=args.eps,
         fixed_dim=args.fixed_dim,
         horizon=args.horizon,
+        traj_params_json=args.traj_params_json,
     )
     sys.exit(0)

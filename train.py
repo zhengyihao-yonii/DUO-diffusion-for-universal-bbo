@@ -91,6 +91,18 @@ if __name__ == '__main__':
         default=None,
         help="限制 CPU 线程数（OpenMP/BLAS/PyTorch）；等价于环境变量 CPU_THREADS（需在进程早期传入，已自动应用）",
     )
+    parser.add_argument(
+        "--traj_params_json",
+        type=str,
+        default=None,
+        help="多任务：JSON 按任务覆盖 n_traj/k/eps（须与 construct_trajectories 一致）",
+    )
+    parser.add_argument(
+        "--train_epochs",
+        type=int,
+        default=200,
+        help="扩散训练 epoch 数；n_train_steps = train_epochs * n_steps_per_epoch（默认 200）",
+    )
 
     args = parser.parse_args(_cli_args)
 
@@ -126,11 +138,23 @@ if __name__ == '__main__':
     _mto = multitask_text_only_path_infix(args)
     # 根据任务数量设置数据路径
     if is_multitask:
-        # 多任务模式（路径与任务名字典序一致，与 ant,dkitty 与 dkitty,ant 共用同一实验目录）
+        from diffuser.utils.traj_params import prepare_multitask_traj
+
         train_tasks_str = multitask_path_token(args.train_tasks)
-        args.data_path = f'generated_datasets/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}_vae_latent32_train.p'
-        # 与 eval 目标无关：同一套 multitask 权重只存一份
-        RUN.prefix = f"trained_models/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}{_ret}{_txt}{_mto}/seed{args.seed}/"
+        n_d, k_d, e_d, sig = prepare_multitask_traj(
+            train_tasks_list,
+            args.n_traj,
+            args.k,
+            args.eps,
+            args.horizon,
+            args.traj_params_json,
+        )
+        args.data_path = f"generated_datasets/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{sig}_vae_latent32_train.p"
+        args.multitask_traj_signature = sig
+        args.traj_n_traj_dict = n_d
+        args.traj_k_dict = k_d
+        args.traj_eps_dict = e_d
+        RUN.prefix = f"trained_models/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{sig}{_ret}{_txt}{_mto}/seed{args.seed}/"
     else:
         # 单任务模式，保持原有格式，与dfgo-main一致
         task_name = train_tasks_list[0]

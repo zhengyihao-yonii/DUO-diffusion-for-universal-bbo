@@ -45,9 +45,16 @@ def _maybe_build_task_text_embeddings(Config):
 
 def multitask_proxy_prefix(task_name, Config):
     """与 evaluate 中单任务 proxy 路径一致。"""
+    nd = getattr(Config, "traj_n_traj_dict", None)
+    if nd is not None and task_name in nd:
+        n = nd[task_name]
+        k = getattr(Config, "traj_k_dict", {})[task_name]
+        e = getattr(Config, "traj_eps_dict", {})[task_name]
+    else:
+        n, k, e = Config.n_traj, Config.k, Config.eps
     return (
         f"trained_models/{task_name}_frac{Config.frac}_sigma{Config.sigma}/"
-        f"{Config.n_traj}x{Config.horizon}_k{Config.k}_eps{Config.eps}/seed{Config.seed}/"
+        f"{n}x{Config.horizon}_k{k}_eps{e}/seed{Config.seed}/"
     )
 
 
@@ -213,6 +220,8 @@ def main(**deps):
         print(f"[wandb] import 失败，继续训练（不同步 wandb）: {e}", flush=True)
         wandb = None
 
+    train_epochs = deps.pop("train_epochs", None)
+
     RUN._update(deps)
     print(deps)
 
@@ -243,7 +252,19 @@ def main(**deps):
     
     # 更新配置
     Config._update(deps)
-    
+    if train_epochs is not None:
+        if int(train_epochs) < 1:
+            raise ValueError("train_epochs 须为 >= 1 的整数")
+        Config.n_train_steps = int(train_epochs) * int(Config.n_steps_per_epoch)
+    for _tk in (
+        "multitask_traj_signature",
+        "traj_n_traj_dict",
+        "traj_k_dict",
+        "traj_eps_dict",
+    ):
+        if _tk in deps and deps[_tk] is not None:
+            setattr(Config, _tk, deps[_tk])
+
     # 检查是否为多任务模式
     if 'train_tasks' in deps and ',' in deps['train_tasks']:
         Config.is_multitask = True
@@ -303,7 +324,9 @@ def main(**deps):
     
     # 构建自定义的run名称，包含任务和参数信息
     if Config.is_multitask:
-        run_name = f"multitask_{'_'.join(Config.train_tasks_list)}_{Config.n_traj}x{Config.horizon}_k{Config.k}_eps{Config.eps}_seed{Config.seed}"
+        _sig = getattr(Config, "multitask_traj_signature", None)
+        _s = _sig or f"{Config.n_traj}x{Config.horizon}_k{Config.k}_eps{Config.eps}"
+        run_name = f"multitask_{'_'.join(Config.train_tasks_list)}_{_s}_seed{Config.seed}"
     else:
         run_name = f"{Config.train_tasks_list[0]}_{Config.n_traj}x{Config.horizon}_k{Config.k}_eps{Config.eps}_seed{Config.seed}"
     
@@ -343,9 +366,11 @@ def main(**deps):
         import os
         
         # 构建完整的混合轨迹文件路径
-        # 获取Config.data_path的目录部分
         data_dir = os.path.dirname(Config.data_path)
-        mixed_data_path = os.path.join(data_dir, "mixed_trajectories_train.p")
+        from diffuser.utils.traj_params import resolve_multitask_mixed_path
+
+        _sig = getattr(Config, "multitask_traj_signature", None)
+        mixed_data_path = resolve_multitask_mixed_path(data_dir, _sig)
         
         # 直接加载混合轨迹文件
         dataset = PointRegretDataset(

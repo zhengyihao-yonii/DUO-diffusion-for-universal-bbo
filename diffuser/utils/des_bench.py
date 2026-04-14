@@ -1,5 +1,7 @@
 import sys
 import os
+import diffuser.numpy_design_bench_compat  # noqa: F401
+import numpy as np
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 
 @contextmanager
@@ -26,7 +28,6 @@ with suppress_output():
     from design_bench.datasets.continuous.superconductor_dataset import SuperconductorDataset
     from design_bench.datasets.continuous.hopper_controller_dataset import HopperControllerDataset
 
-import numpy as np
 import torch
 import pickle
 from botorch.test_functions import Branin

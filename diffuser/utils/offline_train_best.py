@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import numpy as np
+import diffuser.numpy_design_bench_compat  # noqa: F401
 
 import design_bench
 

@@ -13,18 +13,22 @@
 #   bash run_multitask.sh "dkitty,ant" 3 1000 50 0.05 64 1.0 0.0
 # 任务名顺序仅影响展示；目录 multi_ant_dkitty_* 与 "ant,dkitty" / "dkitty,ant" 共用。
 #
+# 每任务轨迹参数不同（JSON）仅用于「全 8 任务一起训」的 all 配置；需显式打开开关；位置参数 n_traj/k/eps 仍要给出（作基线再被 JSON 覆盖）:
+#   USE_TRAJ_PARAMS_JSON=1 TRAJ_PARAMS_JSON=examples/traj_params_per_task_example.json \
+#     bash run_multitask.sh "ant,dkitty,gtopx2,gtopx3,gtopx4,gtopx6,tfbind10,tfbind8" 1 1000 50 0.05 64 1.0 0.0
+#
 # 环境变量（可选）:
 #   PYTHON         Python 解释器，默认 /home/xk/anaconda3/envs/gtg/bin/python
 #   PROJECT        项目根目录（GTGdfgo），默认本脚本所在目录
-#   RESULTS        日志与汇总输出目录。**若已在 shell 中 export 过无后缀的 multitask_* 路径，会覆盖自动命名**；
+#   RESULTS        日志与汇总输出目录。**若已在 shell 中 export 过无文本后缀的 multi_task/.../ 基路径，会覆盖自动命名**；
 #                  本脚本在 TRAIN_EXTRA 含 --use_text_condition / --multitask_text_only 时，若检测到 RESULTS 仍为
 #                  「无文本后缀的基路径」，会自动改为带 _textcond / _mttextonly 的目录。完全自定义请 unset RESULTS 后
 #                  再设 RESULTS=...，或直接使用带后缀的路径。
-#   RESULTS_SUFFIX 仅 USE_RETURNS=1 且未显式设置 RESULTS 时追加到默认路径（默认 _retcond）
+#   RESULTS_SUFFIX 仅 USE_RETURNS=1 且未显式设置 RESULTS 时追加在「超参」目录名末（默认 _ret），与 analyze_eval_results 中
+#                  hyper 以 _ret 结尾 → 聚合键带 _retcond 的逻辑一致
 #   TEXTCOND_RESULTS_SUFFIX  仅 textcond、无 mttextonly 时追加（默认 _textcond）。
 #   MTTEXTONLY_RESULTS_SUFFIX  仅 mttextonly、无 textcond 时追加（默认 _mttextonly）。
-#   TEXTCOND_MTTEXTONLY_SUFFIX  同时 textcond + mttextonly 时默认 multitask_* 目录的单段后缀（默认 _textcond_mttextonly）；
-#                            与旧版 ``_textcond``+``_mttextonly`` 拼接结果相同，便于 subgroup 命名统一。
+#   TEXTCOND_MTTEXTONLY_SUFFIX  同时 textcond + mttextonly 且未走 text_conditioned_only 布局时，默认拼在 tasks_frac 段上的单段后缀（默认 _textcond_mttextonly）。
 #   EVAL_ALL       设为 0 时，多任务只评一个任务（见 --eval_only_first）；默认评 train_tasks 全部。
 #   EVAL_SINGLE_TASK  仅当 EVAL_ALL=0 时有效：要评的那一个任务名（默认 train_tasks 字典序第一个）。
 #   START_SEED     本批第一次运行使用的随机种子，默认 0。设为 3 且 NUM_RUNS=2 则使用 seed 3、4。
@@ -37,8 +41,14 @@
 #   CONDITION_GUIDANCE_W_TEXT  可选。全 8 任务文本条件布局下，超参目录名前缀 w<W>_ 中的 W（默认 1.2）；
 #                    若已在 TRAIN_EXTRA 中写了 --condition_guidance_w_text <x>，则以命令行值为准。
 #   结果目录：textcond+mttextonly 时默认写入 results/text_conditioned_only/<tasks>_frac_sigma/w<w_text>_.../；
-#            未用该布局时 multitask_* 默认带 TEXTCOND_MTTEXTONLY_SUFFIX（见上）。
+#            否则默认 results/multi_task/<tasks_frac_sigma>[_textcond|...]/<hyper>/（与 analyze_eval_results 的 multi_task 键一致）。
 #   EVAL_EXTRA_CMD   可选，追加传给 evaluate.py 的额外参数（勿与脚本内数组 EVAL_EXTRA 混淆）。
+#   USE_TRAJ_PARAMS_JSON  默认 0。设为 1 时仅当 train_tasks 为全 8 任务（字典序，见脚本内 _FULL_MT_TASKS_CSV）时生效：
+#                    从 TRAJ_PARAMS_JSON 读每任务轨迹参数并传给 construct/train/evaluate；否则报错退出。
+#                    为 0 时不传 --traj_params_json（与旧版一致；环境里 export 了 TRAJ_PARAMS_JSON 也不生效）。
+#   TRAJ_PARAMS_JSON  仅在 USE_TRAJ_PARAMS_JSON=1 时必填；启用时默认 RESULTS 与 mixed_<sig>.p 的签名对齐。
+#   TRAIN_EPOCHS  扩散训练 epoch 数，传给 train.py --train_epochs（n_train_steps = TRAIN_EPOCHS * config 内 n_steps_per_epoch）。
+#                 默认 200；可 export TRAIN_EPOCHS=N 覆盖。
 #   TEXT_ENCODER_MODEL  可选，离线 sentence-transformers 目录的绝对路径（须含 config.json）。
 #                    未设置时，若存在下面「相对 PROJECT」的默认快照目录，则自动解析并仅在启用
 #                    文本条件时向 train/evaluate 追加 --text_encoder_model。
@@ -112,10 +122,36 @@ HORIZON="${6:-64}"
 FRAC="${7:-1.0}"
 SIGMA="${8:-0.0}"
 
-_rs=""
-if [[ "${USE_RETURNS:-0}" == "1" ]]; then
-  _rs="${RESULTS_SUFFIX:-_retcond}"
+TRAIN_EPOCHS="${TRAIN_EPOCHS:-200}"
+
+USE_TRAJ_PARAMS_JSON="${USE_TRAJ_PARAMS_JSON:-0}"
+_TRAJ_SIG=""
+# 与 _FULL_MT_TOKEN 对应：8 任务字典序逗号串（仅 all 全任务训练允许 USE_TRAJ_PARAMS_JSON）
+_FULL_MT_TASKS_CSV="ant,dkitty,gtopx2,gtopx3,gtopx4,gtopx6,tfbind10,tfbind8"
+if [[ "$USE_TRAJ_PARAMS_JSON" == "1" ]]; then
+  if [[ "$TRAIN_TASKS" != "$_FULL_MT_TASKS_CSV" ]]; then
+    echo "错误: USE_TRAJ_PARAMS_JSON=1 仅用于全 8 任务 all 训练；train_tasks 须为（字典序）: ${_FULL_MT_TASKS_CSV}" >&2
+    exit 1
+  fi
+  if [[ -z "${TRAJ_PARAMS_JSON:-}" ]]; then
+    echo "错误: USE_TRAJ_PARAMS_JSON=1 时必须设置 TRAJ_PARAMS_JSON=</path/to.json>" >&2
+    exit 1
+  fi
+  _tpj_path="$(cd "$PROJECT" && realpath "$TRAJ_PARAMS_JSON" 2>/dev/null || true)"
+  if [[ -z "$_tpj_path" || ! -f "$_tpj_path" ]]; then
+    echo "错误: TRAJ_PARAMS_JSON 不是可读文件: ${TRAJ_PARAMS_JSON}" >&2
+    exit 1
+  fi
+  TRAJ_PARAMS_JSON="$_tpj_path"
+  _TRAJ_SIG="$(
+    cd "$PROJECT" && \
+    GTG_TRAIN_TASKS="$TRAIN_TASKS" GTG_N_TRAJ="$N_TRAJ" GTG_K="$K" GTG_EPS="$EPS" \
+    GTG_HORIZON="$HORIZON" GTG_TPJ_JSON="$TRAJ_PARAMS_JSON" \
+    "$PYTHON" -c 'import importlib.util, os; p=os.path.join(os.getcwd(),"diffuser","utils","traj_params.py"); s=importlib.util.spec_from_file_location("_tp",p); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); e=os.environ; ts=[x.strip() for x in e["GTG_TRAIN_TASKS"].split(",") if x.strip()]; print(m.prepare_multitask_traj(ts, int(e["GTG_N_TRAJ"]), int(e["GTG_K"]), float(e["GTG_EPS"]), int(e["GTG_HORIZON"]), e["GTG_TPJ_JSON"])[3])'
+  )"
+  unset _tpj_path
 fi
+
 _tc=""
 if [[ "${USE_TEXT_CONDITION:-0}" == "1" ]] \
   || [[ "${TRAIN_EXTRA:-}" == *"--use_text_condition"* ]] \
@@ -128,25 +164,38 @@ if [[ "${TRAIN_EXTRA:-}" == *"--multitask_text_only"* ]]; then
 fi
 
 _MULTITASK_TOKEN="$(echo "$TRAIN_TASKS" | tr ',' '_')"
-# 默认 multitask_* 目录后缀：同时启用 textcond + mttextonly 时用单段 ``_textcond_mttextonly``（subgroup / 全任务通用）
 _TEXTCOND_MTTEXTONLY_SUFFIX="${TEXTCOND_MTTEXTONLY_SUFFIX:-_textcond_mttextonly}"
-if [[ -n "${_tc:-}" ]] && [[ -n "${_mto:-}" ]]; then
-  _RESULTS_AUTO="$PROJECT/results/multitask_${_MULTITASK_TOKEN}${_rs}${_TEXTCOND_MTTEXTONLY_SUFFIX}"
-elif [[ -n "${_tc:-}" ]]; then
-  _RESULTS_AUTO="$PROJECT/results/multitask_${_MULTITASK_TOKEN}${_rs}${_tc}"
-elif [[ -n "${_mto:-}" ]]; then
-  _RESULTS_AUTO="$PROJECT/results/multitask_${_MULTITASK_TOKEN}${_rs}${_mto}"
+# 与 results/multi_task/**、analyze_eval_results：全 8 任务用 all_frac<F>_sigma<S>，否则 <token>_frac<F>_sigma<S>
+_FULL_MT_TOKEN="ant_dkitty_gtopx2_gtopx3_gtopx4_gtopx6_tfbind10_tfbind8"
+if [[ "$_MULTITASK_TOKEN" == "$_FULL_MT_TOKEN" ]]; then
+  _MT_TASK_FRAC="all_frac${FRAC}_sigma${SIGMA}"
 else
-  _RESULTS_AUTO="$PROJECT/results/multitask_${_MULTITASK_TOKEN}${_rs}"
+  _MT_TASK_FRAC="${_MULTITASK_TOKEN}_frac${FRAC}_sigma${SIGMA}"
 fi
-# 仅含 ret 等、不含文本后缀的「基路径」（与旧版默认 multitask_* 一致）
-_RESULTS_PLAIN="$PROJECT/results/multitask_${_MULTITASK_TOKEN}${_rs}"
+# 超参目录名：与 trained_models 轨迹一致用 n_traj x horizon（字母 x）；JSON 全 8 任务时用 traj 签名
+_MT_HYPER="${N_TRAJ}x${HORIZON}_k${K}_eps${EPS}"
+if [[ "$USE_TRAJ_PARAMS_JSON" == "1" ]]; then
+  _MT_HYPER="${_TRAJ_SIG}"
+fi
+if [[ "${USE_RETURNS:-0}" == "1" ]]; then
+  _MT_HYPER="${_MT_HYPER}${RESULTS_SUFFIX:-_ret}"
+fi
+_optional_mt_suffix=""
+if [[ -n "${_tc:-}" ]] && [[ -n "${_mto:-}" ]]; then
+  _optional_mt_suffix="${_TEXTCOND_MTTEXTONLY_SUFFIX}"
+elif [[ -n "${_tc:-}" ]]; then
+  _optional_mt_suffix="${_tc}"
+elif [[ -n "${_mto:-}" ]]; then
+  _optional_mt_suffix="${_mto}"
+fi
+_RESULTS_AUTO="$PROJECT/results/multi_task/${_MT_TASK_FRAC}${_optional_mt_suffix}/${_MT_HYPER}"
+# 无文本后缀时的「基路径」（用于检测 export RESULTS 是否需自动加 _textcond 等）
+_RESULTS_PLAIN="$PROJECT/results/multi_task/${_MT_TASK_FRAC}/${_MT_HYPER}"
 
 # 任意多任务（含 subgroup）+ textcond + mttextonly：结果存到 text_conditioned_only/（与 results/multi_task 并列）
 #   全 8 任务：results/text_conditioned_only/all_frac<F>_sigma<S>/w<W>_.../（与 eval_comparison_all 聚合键一致）
 #   subgroup：results/text_conditioned_only/<MULTITASK_TOKEN>_frac<F>_sigma<S>/w<W>_.../
 # w<W_text> 为文本条件 guidance 权重（--condition_guidance_w_text，默认 1.2）。
-_FULL_MT_TOKEN="ant_dkitty_gtopx2_gtopx3_gtopx4_gtopx6_tfbind10_tfbind8"
 _RESULTS_ALL_LAYOUT=""
 _ALL_RUN_LAYOUT=0
 if [[ -n "${_tc:-}" ]] && [[ -n "${_mto:-}" ]]; then
@@ -160,7 +209,11 @@ if [[ -n "${_tc:-}" ]] && [[ -n "${_mto:-}" ]]; then
     _W_TEXT="$(echo "${TRAIN_EXTRA}" | sed -n 's/.*--condition_guidance_w_text[[:space:]]\+\([0-9.]*\).*/\1/p' | head -1)"
   fi
   [[ -z "$_W_TEXT" ]] && _W_TEXT="1.2"
-  _HYPER_CORE="${N_TRAJ}*${HORIZON}_k${K}_eps${EPS}"
+  if [[ "$USE_TRAJ_PARAMS_JSON" == "1" ]]; then
+    _HYPER_CORE="${_TRAJ_SIG}"
+  else
+    _HYPER_CORE="${N_TRAJ}x${HORIZON}_k${K}_eps${EPS}"
+  fi
   if [[ "${USE_RETURNS:-0}" == "1" ]]; then
     _HYPER_CORE="${_HYPER_CORE}_ret"
   fi
@@ -176,7 +229,7 @@ if [[ "$_ALL_RUN_LAYOUT" == "1" ]]; then
 fi
 RESULTS="${RESULTS:-$_DEFAULT_RESULTS}"
 
-# 若曾在 shell 里 export RESULTS=.../multitask_ant_dkitty（无 _textcond/_mttextonly），
+# 若曾在 shell 里 export RESULTS=.../multi_task/<tasks_frac>/<hyper>（无 _textcond/_mttextonly），
 # 这里会一直是基路径，看起来像「加了 TRAIN_EXTRA 也没后缀」。此时若 TRAIN_EXTRA 需要后缀，自动对齐到 _RESULTS_AUTO。
 # text_conditioned_only 布局不参与此纠正。
 if [[ "$_ALL_RUN_LAYOUT" != "1" ]] && [[ -n "${_tc}${_mto}" ]] && [[ "$RESULTS" == "$_RESULTS_PLAIN" ]]; then
@@ -245,19 +298,41 @@ else
   echo "[批次] 本流水线批次号 BATCH_RUN=$BATCH_RUN（目录 run${BATCH_RUN}_seed<seed>）"
 fi
 
+_SEED_END=$((START_SEED + NUM_RUNS - 1))
+
 echo "=== 多任务配置 ==="
 echo "  train_tasks: $TRAIN_TASKS"
 echo "  评估: 默认评全部训练任务；EVAL_ALL=${EVAL_ALL:-1}（0=仅评一个，见 EVAL_SINGLE_TASK）"
-echo "  num_runs: $NUM_RUNS  start_seed: $START_SEED  (本批 seed 范围: $START_SEED .. $((START_SEED + NUM_RUNS - 1)))"
+echo "  num_runs: $NUM_RUNS  start_seed: $START_SEED  (本批 seed 范围: $START_SEED .. ${_SEED_END})"
 echo "  n_traj: $N_TRAJ  k: $K  eps: $EPS  horizon: $HORIZON  frac: $FRAC  sigma: $SIGMA"
+echo "  USE_TRAJ_PARAMS_JSON=$USE_TRAJ_PARAMS_JSON  TRAJ_PARAMS_JSON=${TRAJ_PARAMS_JSON:-<未使用>}"
+if [[ "$USE_TRAJ_PARAMS_JSON" == "1" ]]; then
+  echo "  traj_sig（RESULTS 子路径 / w*_ 段）: ${_TRAJ_SIG}"
+fi
+echo "  TRAIN_EPOCHS: $TRAIN_EPOCHS（默认 200，可用环境变量覆盖）"
 echo "  TRAIN_EXTRA: ${TRAIN_EXTRA:-<未设置>}"
-echo "  目录后缀: ret=${_rs:-无}  textcond=${_tc:-无}  mttextonly=${_mto:-无}"
+if [[ "${_ALL_RUN_LAYOUT:-0}" == "1" ]]; then
+  echo "  结果布局: text_conditioned_only 超参子目录: ${_HYPER}"
+else
+  echo "  结果布局: multi_task 超参目录: ${_MT_HYPER}  USE_RETURNS=${USE_RETURNS:-0} RESULTS_SUFFIX=${RESULTS_SUFFIX:-_ret}  textcond=${_tc:-无}  mttextonly=${_mto:-无}"
+fi
 echo "  EVAL_ONLY=${EVAL_ONLY:-0}  BATCH_RUN=${BATCH_RUN}"
 echo "  PROJECT: $PROJECT"
 echo "  RESULTS: $RESULTS"
 echo
 
 cd "$PROJECT"
+
+_TPJ=()
+if [[ "$USE_TRAJ_PARAMS_JSON" == "1" ]]; then
+  _TPJ=(--traj_params_json "$TRAJ_PARAMS_JSON")
+fi
+
+if ! [[ "$TRAIN_EPOCHS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "错误: TRAIN_EPOCHS 须为正整数，当前: ${TRAIN_EPOCHS}" >&2
+  exit 1
+fi
+_TE_EXTRA=(--train_epochs "$TRAIN_EPOCHS")
 
 if [[ "${EVAL_ONLY:-0}" == "1" ]]; then
   echo "=== EVAL_ONLY=1：跳过轨迹构建与训练，仅重写各 run 目录下的 evaluate.log ==="
@@ -272,6 +347,7 @@ else
     --k "$K" \
     --eps "$EPS" \
     --horizon "$HORIZON" \
+    "${_TPJ[@]}" \
     >"$CONSTRUCT_LOG" 2>&1
 
   echo "日志: $CONSTRUCT_LOG"
@@ -299,14 +375,29 @@ if [[ -n "${TEXT_ENCODER_MODEL:-}" ]] \
   if [[ "${USE_TEXT_CONDITION:-0}" == "1" ]] \
     || [[ "${TRAIN_EXTRA:-}" == *"--use_text_condition"* ]] \
     || [[ "${TRAIN_EXTRA:-}" == *"--multitask_text_only"* ]]; then
-    TRAIN_EXTRA="${TRAIN_EXTRA:-} --text_encoder_model ${TEXT_ENCODER_MODEL}"
-    EVAL_EXTRA_CMD="${EVAL_EXTRA_CMD:-} --text_encoder_model ${TEXT_ENCODER_MODEL}"
+    # 使用 = 连接路径，避免路径中含 ( ) 时未加引号展开被 bash 当成语法
+    TRAIN_EXTRA="${TRAIN_EXTRA:-} --text_encoder_model=${TEXT_ENCODER_MODEL}"
+    EVAL_EXTRA_CMD="${EVAL_EXTRA_CMD:-} --text_encoder_model=${TEXT_ENCODER_MODEL}"
     echo "[TEXT_ENCODER] 已追加 --text_encoder_model -> ${TEXT_ENCODER_MODEL}"
   fi
 fi
 
 echo
-echo "=== Step 2: 多次$([ "${EVAL_ONLY:-0}" == "1" ] && echo '仅评估' || echo '训练 + 评估')（本批 $NUM_RUNS 次，seed=$START_SEED..$((START_SEED + NUM_RUNS - 1))）==="
+_step2_label="训练 + 评估"
+if [[ "${EVAL_ONLY:-0}" == "1" ]]; then
+  _step2_label="仅评估"
+fi
+echo "=== Step 2: 多次${_step2_label}（本批 $NUM_RUNS 次，seed=$START_SEED..${_SEED_END}）==="
+
+_train_extra_arr=()
+if [[ -n "${TRAIN_EXTRA:-}" ]]; then
+  read -r -a _train_extra_arr <<< "$TRAIN_EXTRA"
+fi
+_eval_cmd_extra_arr=()
+if [[ -n "${EVAL_EXTRA_CMD:-}" ]]; then
+  read -r -a _eval_cmd_extra_arr <<< "$EVAL_EXTRA_CMD"
+fi
+
 for ((run = 0; run < NUM_RUNS; run++)); do
   SEED=$((START_SEED + run))
   RUN_DIR="$RESULTS/run${BATCH_RUN}_seed${SEED}"
@@ -326,7 +417,9 @@ for ((run = 0; run < NUM_RUNS; run++)); do
       --horizon "$HORIZON" \
       --frac "$FRAC" \
       --sigma "$SIGMA" \
-      ${TRAIN_EXTRA:-} \
+      "${_TPJ[@]}" \
+      "${_TE_EXTRA[@]}" \
+      "${_train_extra_arr[@]}" \
       >"$RUN_DIR/train.log" 2>&1
   else
     echo "  跳过训练（EVAL_ONLY=1），覆盖 evaluate.log"
@@ -348,8 +441,9 @@ for ((run = 0; run < NUM_RUNS; run++)); do
     --horizon "$HORIZON" \
     --frac "$FRAC" \
     --sigma "$SIGMA" \
+    "${_TPJ[@]}" \
     "${EVAL_EXTRA[@]}" \
-    ${EVAL_EXTRA_CMD:-} \
+    "${_eval_cmd_extra_arr[@]}" \
     >"$RUN_DIR/evaluate.log" 2>&1
 
   echo "  完成: $RUN_DIR"
@@ -357,7 +451,8 @@ done
 
 if [[ "${EVAL_ONLY:-0}" != "1" ]]; then
   echo "$BATCH_RUN" >"$BATCH_STATE_FILE"
-  echo "[批次] 已写入 $BATCH_STATE_FILE -> $BATCH_RUN（下次完整流水线将使用 run$((BATCH_RUN + 1))_*）"
+  _NEXT_BATCH=$((BATCH_RUN + 1))
+  echo "[批次] 已写入 $BATCH_STATE_FILE -> $BATCH_RUN（下次完整流水线将使用 run${_NEXT_BATCH}_*）"
 fi
 
 echo

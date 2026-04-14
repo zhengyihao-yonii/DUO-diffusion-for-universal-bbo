@@ -15,9 +15,10 @@
 # 环境变量（可选）:
 #   PYTHON         Python，默认 /home/xk/anaconda3/envs/gtg/bin/python
 #   PROJECT        GTGdfgo 根目录，默认本脚本所在目录
-#   RESULTS        结果目录，默认 PROJECT/results/${task}_multiple_runs
-#                  USE_RETURNS=1 时默认在目录名后追加 RESULTS_SUFFIX（默认 _retcond），与无 returns 结果分开
-#   RESULTS_SUFFIX 仅 USE_RETURNS=1 且未显式设置 RESULTS 时生效；设为空可取消默认后缀
+#   RESULTS        结果目录，默认 PROJECT/results/single_task/<task>_frac<F>_sigma<S>/<n_traj>x<h>_k<k>_eps<eps>[_<RESULTS_SUFFIX>]
+#                  与 scripts/analyze_eval_results.py 的 single_task 聚合布局一致。
+#                  USE_RETURNS=1 时在「超参」目录名末追加 RESULTS_SUFFIX（默认 _ret），与无 returns 分开
+#   RESULTS_SUFFIX 仅 USE_RETURNS=1 且未显式设置 RESULTS 时作用于超参目录名；设为空则不加后缀
 #   START_SEED     本批第一次使用的随机种子，默认 0
 #   AUTO_CONTINUE  默认 0。设为 1 时在 RESULTS 下扫描 run*_seed*，从 max_seed+1 起跑本批
 #   EVAL_ONLY        默认 0。设为 1 时跳过轨迹构建与 train，只对已有 run*_seed* 目录重写 evaluate.log
@@ -25,7 +26,9 @@
 #   BATCH_RUN        可选，仅 EVAL_ONLY=1 时生效：指定要重评的批次号 N（runN_seed*）。不设则使用
 #                    $RESULTS/.gtg_pipeline_batch 中记录的「上一轮完整流水线」批次号。
 #   USE_RETURNS  设为 1 时，train/evaluate 追加 --returns_condition --include_returns（显式标量 return 条件）
-#   单任务仅基础 VAE + 轨迹 + 扩散，无文本条件；结果目录默认 results/<task>_multiple_runs[_retcond]。
+#   TRAIN_EPOCHS  扩散训练 epoch 数，传给 train.py --train_epochs（n_train_steps = TRAIN_EPOCHS * config 内 n_steps_per_epoch）。
+#                 默认 200；可 export TRAIN_EPOCHS=N 覆盖。
+#   单任务仅基础 VAE + 轨迹 + 扩散，无文本条件；结果目录默认 results/single_task/<task>_frac*_sigma*/<hyper>/。
 #   CUDA_VISIBLE_DEVICES / GPU_ID  见脚本中部「GPU」注释与 scripts/gpu_env.sh。
 #   CPU_THREADS      可选，限制 OpenMP/BLAS/PyTorch CPU 线程数；等价于 train/evaluate/construct 的 --cpu_threads N。
 #
@@ -84,11 +87,13 @@ SIGMA="${8:-0.0}"
 
 PYTHON="${PYTHON:-/home/xk/anaconda3/envs/gtg/bin/python}"
 PROJECT="${PROJECT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
-_rs=""
+# 与 results/single_task/** 及 analyze_eval_results 约定一致：tasks_frac → hyper（含 n_traj x horizon）
+_ST_FRAC_SIG="${task_name}_frac${FRAC}_sigma${SIGMA}"
+_ST_HYPER="${n_traj}x${HORIZON}_k${k}_eps${eps}"
 if [[ "${USE_RETURNS:-0}" == "1" ]]; then
-  _rs="${RESULTS_SUFFIX:-_retcond}"
+  _ST_HYPER="${_ST_HYPER}${RESULTS_SUFFIX:-_ret}"
 fi
-base_dir="${RESULTS:-$PROJECT/results/${task_name}_multiple_runs${_rs}}"
+base_dir="${RESULTS:-$PROJECT/results/single_task/${_ST_FRAC_SIG}/${_ST_HYPER}}"
 mkdir -p "$base_dir"
 BATCH_STATE_FILE="$base_dir/.gtg_pipeline_batch"
 
@@ -182,6 +187,14 @@ if [[ "${USE_RETURNS:-0}" == "1" ]]; then
   echo "[USE_RETURNS] 启用 returns_condition + include_returns"
 fi
 
+TRAIN_EPOCHS="${TRAIN_EPOCHS:-200}"
+if ! [[ "$TRAIN_EPOCHS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "错误: TRAIN_EPOCHS 须为正整数，当前: ${TRAIN_EPOCHS}" >&2
+  exit 1
+fi
+_TE_EXTRA=(--train_epochs "$TRAIN_EPOCHS")
+echo "[TRAIN_EPOCHS] 扩散训练 ${_TE_EXTRA[*]}"
+
 for ((run = 0; run < num_runs; run++)); do
   seed=$((START_SEED + run))
   run_dir="$base_dir/run${BATCH_RUN}_seed${seed}"
@@ -201,6 +214,7 @@ for ((run = 0; run < num_runs; run++)); do
       --frac "$FRAC" \
       --sigma "$SIGMA" \
       "${RETURNS_EXTRA[@]}" \
+      "${_TE_EXTRA[@]}" \
       >"$run_dir/train.log" 2>&1 || { echo "训练失败: $run_dir/train.log"; continue; }
   else
     echo "  跳过训练（EVAL_ONLY=1），覆盖 evaluate.log"

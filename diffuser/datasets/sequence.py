@@ -1,4 +1,5 @@
 from collections import namedtuple, defaultdict
+import diffuser.numpy_design_bench_compat  # noqa: F401 - design_bench needs np.loads (NumPy 2)
 import numpy as np
 import random
 import torch
