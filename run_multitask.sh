@@ -13,9 +13,12 @@
 #   bash run_multitask.sh "dkitty,ant" 3 1000 50 0.05 64 1.0 0.0
 # 任务名顺序仅影响展示；目录 multi_ant_dkitty_* 与 "ant,dkitty" / "dkitty,ant" 共用。
 #
-# 每任务轨迹参数不同（JSON）仅用于「全 8 任务一起训」的 all 配置；需显式打开开关；位置参数 n_traj/k/eps 仍要给出（作基线再被 JSON 覆盖）:
+# 全 9 任务 + 每任务 JSON 轨迹 + 文本条件（all_improved_frac* 目录）一条命令（无 export）:
+#   USE_TRAJ_PARAMS_JSON=1 TRAJ_PARAMS_JSON="$PWD/examples/traj_params_per_task_example.json" TRAIN_EXTRA="--use_text_condition --multitask_text_only" bash run_multitask.sh "ant,dkitty,gtopx2,gtopx3,gtopx4,gtopx6,superconductor,tfbind10,tfbind8" 1 1000 50 0.05 64 1.0 0.0
+#
+# 每任务轨迹参数不同（JSON）仅用于「全 9 任务一起训」的 all 配置（含 superconductor）；需显式打开开关；位置参数 n_traj/k/eps 仍要给出（作基线再被 JSON 覆盖）:
 #   USE_TRAJ_PARAMS_JSON=1 TRAJ_PARAMS_JSON=examples/traj_params_per_task_example.json \
-#     bash run_multitask.sh "ant,dkitty,gtopx2,gtopx3,gtopx4,gtopx6,tfbind10,tfbind8" 1 1000 50 0.05 64 1.0 0.0
+#     bash run_multitask.sh "ant,dkitty,gtopx2,gtopx3,gtopx4,gtopx6,superconductor,tfbind10,tfbind8" 1 1000 50 0.05 64 1.0 0.0
 #
 # 环境变量（可选）:
 #   PYTHON         Python 解释器，默认 /home/xk/anaconda3/envs/gtg/bin/python
@@ -38,15 +41,15 @@
 #   BATCH_RUN        可选，仅 EVAL_ONLY=1：指定批次号 N；否则读 $RESULTS/.gtg_pipeline_batch。
 #   TRAIN_EXTRA      可选，追加传给 train.py 的参数（空格分隔，勿加引号包裹整条）。
 #                    例: TRAIN_EXTRA="--condition_guidance_w_task 1.2 --condition_guidance_w_text 0.8"
-#   CONDITION_GUIDANCE_W_TEXT  可选。全 8 任务文本条件布局下，超参目录名前缀 w<W>_ 中的 W（默认 1.2）；
+#   CONDITION_GUIDANCE_W_TEXT  可选。全 9 任务文本条件布局下，超参目录名前缀 w<W>_ 中的 W（默认 1.2）；
 #                    若已在 TRAIN_EXTRA 中写了 --condition_guidance_w_text <x>，则以命令行值为准。
 #   结果目录：textcond+mttextonly 时默认写入 results/text_conditioned_only/<tasks>_frac_sigma/w<w_text>_.../；
 #            否则默认 results/multi_task/<tasks_frac_sigma>[_textcond|...]/<hyper>/（与 analyze_eval_results 的 multi_task 键一致）。
 #   EVAL_EXTRA_CMD   可选，追加传给 evaluate.py 的额外参数（勿与脚本内数组 EVAL_EXTRA 混淆）。
-#   USE_TRAJ_PARAMS_JSON  默认 0。设为 1 时仅当 train_tasks 为全 8 任务（字典序，见脚本内 _FULL_MT_TASKS_CSV）时生效：
+#   USE_TRAJ_PARAMS_JSON  默认 0。设为 1 时仅当 train_tasks 为全 9 任务（字典序，见脚本内 _FULL_MT_TASKS_CSV，含 superconductor）时生效：
 #                    从 TRAJ_PARAMS_JSON 读每任务轨迹参数并传给 construct/train/evaluate；否则报错退出。
 #                    为 0 时不传 --traj_params_json（与旧版一致；环境里 export 了 TRAJ_PARAMS_JSON 也不生效）。
-#   TRAJ_PARAMS_JSON  仅在 USE_TRAJ_PARAMS_JSON=1 时必填；启用时默认 RESULTS 与 mixed_<sig>.p 的签名对齐。
+#   TRAJ_PARAMS_JSON  仅在 USE_TRAJ_PARAMS_JSON=1 时必填；启用时 RESULTS 超参段为短 slug（mt_<hex>），与 mixed_mt_<hex>.p 同源；完整参数见 multitask_slug_manifest.json。
 #   TRAIN_EPOCHS  扩散训练 epoch 数，传给 train.py --train_epochs（n_train_steps = TRAIN_EPOCHS * config 内 n_steps_per_epoch）。
 #                 默认 200；可 export TRAIN_EPOCHS=N 覆盖。
 #   TEXT_ENCODER_MODEL  可选，离线 sentence-transformers 目录的绝对路径（须含 config.json）。
@@ -126,11 +129,11 @@ TRAIN_EPOCHS="${TRAIN_EPOCHS:-200}"
 
 USE_TRAJ_PARAMS_JSON="${USE_TRAJ_PARAMS_JSON:-0}"
 _TRAJ_SIG=""
-# 与 _FULL_MT_TOKEN 对应：8 任务字典序逗号串（仅 all 全任务训练允许 USE_TRAJ_PARAMS_JSON）
-_FULL_MT_TASKS_CSV="ant,dkitty,gtopx2,gtopx3,gtopx4,gtopx6,tfbind10,tfbind8"
+# 与 _FULL_MT_TOKEN 对应：9 任务字典序逗号串（仅 all 全任务训练允许 USE_TRAJ_PARAMS_JSON；含 superconductor）
+_FULL_MT_TASKS_CSV="ant,dkitty,gtopx2,gtopx3,gtopx4,gtopx6,superconductor,tfbind10,tfbind8"
 if [[ "$USE_TRAJ_PARAMS_JSON" == "1" ]]; then
   if [[ "$TRAIN_TASKS" != "$_FULL_MT_TASKS_CSV" ]]; then
-    echo "错误: USE_TRAJ_PARAMS_JSON=1 仅用于全 8 任务 all 训练；train_tasks 须为（字典序）: ${_FULL_MT_TASKS_CSV}" >&2
+    echo "错误: USE_TRAJ_PARAMS_JSON=1 仅用于全 9 任务 all 训练；train_tasks 须为（字典序）: ${_FULL_MT_TASKS_CSV}" >&2
     exit 1
   fi
   if [[ -z "${TRAJ_PARAMS_JSON:-}" ]]; then
@@ -152,6 +155,12 @@ if [[ "$USE_TRAJ_PARAMS_JSON" == "1" ]]; then
   unset _tpj_path
 fi
 
+# 与 traj_params.multitask_slug_id 一致：用于 RESULTS / multi_task 超参目录，避免 ptask__ 过长
+_SLUG_ID=""
+if [[ "${USE_TRAJ_PARAMS_JSON:-0}" == "1" && -n "${_TRAJ_SIG:-}" ]]; then
+  _SLUG_ID="$("$PYTHON" -c 'import hashlib,sys; s=sys.argv[1]; print("mt_"+hashlib.sha256(s.encode("utf-8")).hexdigest()[:16])' "$_TRAJ_SIG")"
+fi
+
 _tc=""
 if [[ "${USE_TEXT_CONDITION:-0}" == "1" ]] \
   || [[ "${TRAIN_EXTRA:-}" == *"--use_text_condition"* ]] \
@@ -165,17 +174,17 @@ fi
 
 _MULTITASK_TOKEN="$(echo "$TRAIN_TASKS" | tr ',' '_')"
 _TEXTCOND_MTTEXTONLY_SUFFIX="${TEXTCOND_MTTEXTONLY_SUFFIX:-_textcond_mttextonly}"
-# 与 results/multi_task/**、analyze_eval_results：全 8 任务用 all_frac<F>_sigma<S>，否则 <token>_frac<F>_sigma<S>
-_FULL_MT_TOKEN="ant_dkitty_gtopx2_gtopx3_gtopx4_gtopx6_tfbind10_tfbind8"
+# 与 results/multi_task/**、analyze_eval_results：全 9 任务用 all_frac<F>_sigma<S>，否则 <token>_frac<F>_sigma<S>
+_FULL_MT_TOKEN="ant_dkitty_gtopx2_gtopx3_gtopx4_gtopx6_superconductor_tfbind10_tfbind8"
 if [[ "$_MULTITASK_TOKEN" == "$_FULL_MT_TOKEN" ]]; then
   _MT_TASK_FRAC="all_frac${FRAC}_sigma${SIGMA}"
 else
   _MT_TASK_FRAC="${_MULTITASK_TOKEN}_frac${FRAC}_sigma${SIGMA}"
 fi
-# 超参目录名：与 trained_models 轨迹一致用 n_traj x horizon（字母 x）；JSON 全 8 任务时用 traj 签名
+# 超参目录名：与 trained_models 轨迹一致用 n_traj x horizon（字母 x）；JSON 全 9 任务时用短 slug（mt_<hex>）
 _MT_HYPER="${N_TRAJ}x${HORIZON}_k${K}_eps${EPS}"
 if [[ "$USE_TRAJ_PARAMS_JSON" == "1" ]]; then
-  _MT_HYPER="${_TRAJ_SIG}"
+  _MT_HYPER="${_SLUG_ID}"
 fi
 if [[ "${USE_RETURNS:-0}" == "1" ]]; then
   _MT_HYPER="${_MT_HYPER}${RESULTS_SUFFIX:-_ret}"
@@ -193,14 +202,19 @@ _RESULTS_AUTO="$PROJECT/results/multi_task/${_MT_TASK_FRAC}${_optional_mt_suffix
 _RESULTS_PLAIN="$PROJECT/results/multi_task/${_MT_TASK_FRAC}/${_MT_HYPER}"
 
 # 任意多任务（含 subgroup）+ textcond + mttextonly：结果存到 text_conditioned_only/（与 results/multi_task 并列）
-#   全 8 任务：results/text_conditioned_only/all_frac<F>_sigma<S>/w<W>_.../（与 eval_comparison_all 聚合键一致）
+#   全 9 任务：results/text_conditioned_only/all_frac<F>_sigma<S>/w<W>_.../（与 text_conditioned_result_analysis 聚合键一致）
 #   subgroup：results/text_conditioned_only/<MULTITASK_TOKEN>_frac<F>_sigma<S>/w<W>_.../
 # w<W_text> 为文本条件 guidance 权重（--condition_guidance_w_text，默认 1.2）。
 _RESULTS_ALL_LAYOUT=""
 _ALL_RUN_LAYOUT=0
 if [[ -n "${_tc:-}" ]] && [[ -n "${_mto:-}" ]]; then
   if [[ "$_MULTITASK_TOKEN" == "$_FULL_MT_TOKEN" ]]; then
-    _TASK_FRAC_SIG="all_frac${FRAC}_sigma${SIGMA}"
+    # 全 9 任务 + 每任务最优轨迹参数 JSON：与统一标量 n_traj/k/eps 的 all_frac 区分
+    if [[ "${USE_TRAJ_PARAMS_JSON:-0}" == "1" ]]; then
+      _TASK_FRAC_SIG="all_improved_frac${FRAC}_sigma${SIGMA}"
+    else
+      _TASK_FRAC_SIG="all_frac${FRAC}_sigma${SIGMA}"
+    fi
   else
     _TASK_FRAC_SIG="${_MULTITASK_TOKEN}_frac${FRAC}_sigma${SIGMA}"
   fi
@@ -210,7 +224,7 @@ if [[ -n "${_tc:-}" ]] && [[ -n "${_mto:-}" ]]; then
   fi
   [[ -z "$_W_TEXT" ]] && _W_TEXT="1.2"
   if [[ "$USE_TRAJ_PARAMS_JSON" == "1" ]]; then
-    _HYPER_CORE="${_TRAJ_SIG}"
+    _HYPER_CORE="${_SLUG_ID}"
   else
     _HYPER_CORE="${N_TRAJ}x${HORIZON}_k${K}_eps${EPS}"
   fi
@@ -307,7 +321,8 @@ echo "  num_runs: $NUM_RUNS  start_seed: $START_SEED  (本批 seed 范围: $STAR
 echo "  n_traj: $N_TRAJ  k: $K  eps: $EPS  horizon: $HORIZON  frac: $FRAC  sigma: $SIGMA"
 echo "  USE_TRAJ_PARAMS_JSON=$USE_TRAJ_PARAMS_JSON  TRAJ_PARAMS_JSON=${TRAJ_PARAMS_JSON:-<未使用>}"
 if [[ "$USE_TRAJ_PARAMS_JSON" == "1" ]]; then
-  echo "  traj_sig（RESULTS 子路径 / w*_ 段）: ${_TRAJ_SIG}"
+  echo "  traj_sig（完整逻辑签名，见 multitask_slug_manifest.json）: ${_TRAJ_SIG}"
+  echo "  slug_id（短目录名 mt_<hex>，与 train checkpoint / RESULTS 超参段一致）: ${_SLUG_ID}"
 fi
 echo "  TRAIN_EPOCHS: $TRAIN_EPOCHS（默认 200，可用环境变量覆盖）"
 echo "  TRAIN_EXTRA: ${TRAIN_EXTRA:-<未设置>}"
@@ -351,6 +366,12 @@ else
     >"$CONSTRUCT_LOG" 2>&1
 
   echo "日志: $CONSTRUCT_LOG"
+  _MULTI_DATA_DIR="$PROJECT/generated_datasets/multi_${_MULTITASK_TOKEN}_frac${FRAC}_sigma${SIGMA}"
+  if [[ -f "$_MULTI_DATA_DIR/multitask_slug_manifest.json" ]]; then
+    cp -f "$_MULTI_DATA_DIR/multitask_slug_manifest.json" "$RESULTS/" || true
+    echo "[slug] 已复制 multitask_slug_manifest.json -> $RESULTS/"
+  fi
+  unset _MULTI_DATA_DIR
 fi
 
 if [[ "${USE_RETURNS:-0}" == "1" ]]; then

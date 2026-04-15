@@ -35,6 +35,11 @@ from botorch.test_functions import Branin
 
 from diffuser.utils.forward import ForwardModel, ProbabilisticForwardModel
 from diffuser.utils.soo_gtopx import GtopxOracleTask, is_gtopx_task
+from diffuser.datasets.real_world_fewshot import (
+    is_real_world_fewshot_task,
+    load_real_world_y_min_max_full,
+)
+from diffuser.utils.real_world_oracle import oracle_predict
 
 TASKNAME2TASK = {
         'dkitty': 'DKittyMorphology-Exact-v0',
@@ -95,11 +100,19 @@ class DesignBenchFunctionWrapper:
             self.task = BraninTask()
         elif is_gtopx_task(self.taskname):
             self.task = GtopxOracleTask(self.taskname, seed=soo_seed)
+        elif is_real_world_fewshot_task(self.taskname):
+            # 真实任务：Oracle 在 mcts-transfer（见 real_world_oracle）；无 design_bench Task
+            self.task = None
+            self._real_world_taskname = self.taskname
         else:
             self.task = design_bench.make(TASKNAME2TASK[self.taskname])
 
         self.oracle = oracle
         if (not self.oracle):
+            if is_real_world_fewshot_task(taskname):
+                raise NotImplementedError(
+                    "真实任务（lunar_lander / robot_push / rover）仅支持 oracle=True"
+                )
             self.forward_net = ForwardModel(hidden_size=128, input_size=self.task.x.shape[-1])
             # self.forward_net = ProbabilisticForwardModel(hidden_size=128, input_size=self.task.x.shape[-1])
             self.forward_net = torch.nn.DataParallel(self.forward_net).to('cuda')
@@ -138,11 +151,15 @@ class DesignBenchFunctionWrapper:
                 fully_observed_task = BraninTask("generated_datasets/branin/branin_unif_5000.p")
             elif is_gtopx_task(self.taskname):
                 fully_observed_task = GtopxOracleTask(self.taskname, seed=soo_seed)
+            elif is_real_world_fewshot_task(self.taskname):
+                self.min, self.max = load_real_world_y_min_max_full(self.taskname)
+                fully_observed_task = None
             else:
                 raise NotImplementedError()
 
-            self.max = fully_observed_task.y.max()
-            self.min = fully_observed_task.y.min()
+            if not is_real_world_fewshot_task(self.taskname):
+                self.max = fully_observed_task.y.max()
+                self.min = fully_observed_task.y.min()
 
             print("=" * 20)
             print("Task name:", self.taskname, "optima:", self.optima,  "Dataset min/max: {}/{}".format(self.min, self.max))
@@ -150,7 +167,13 @@ class DesignBenchFunctionWrapper:
 
     def eval(self, x):
         if self.oracle:
-            if torch.is_tensor(x):
+            if self.task is None and is_real_world_fewshot_task(self.taskname):
+                xnp = x.cpu().numpy() if torch.is_tensor(x) else np.asarray(x, dtype=np.float64)
+                if xnp.ndim == 1:
+                    xnp = xnp.reshape(1, -1)
+                y_arr = oracle_predict(self.taskname, xnp)
+                y = float(np.asarray(y_arr).reshape(-1)[0])
+            elif torch.is_tensor(x):
                 x = x.view(1, -1)
                 y = self.task.predict(x.cpu().numpy())
             else:
@@ -174,6 +197,11 @@ class DesignBenchFunctionWrapper:
         return float(y)
 
     def eval_unnormalise(self, x):
+        if self.task is None and is_real_world_fewshot_task(self.taskname):
+            xnp = x.cpu().numpy() if torch.is_tensor(x) else np.asarray(x, dtype=np.float64)
+            if xnp.ndim == 1:
+                xnp = xnp.reshape(1, -1)
+            return oracle_predict(self.taskname, xnp)
         if torch.is_tensor(x):
             x = x.view(1, -1)
             y = self.task.predict(x.cpu().numpy())

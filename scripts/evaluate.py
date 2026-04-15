@@ -20,6 +20,8 @@ from diffuser.utils.des_bench import DesignBenchFunctionWrapper
 from diffuser.models.vae import VAE
 from sklearn.preprocessing import StandardScaler
 from diffuser.datasets.sequence import PointRegretDataset
+from diffuser.datasets.real_world_fewshot import is_real_world_fewshot_task
+from diffuser.utils.real_world_oracle import oracle_predict
 
 
 def _resolve_proxy_checkpoint_path(proxy_ckpt_dir, Config):
@@ -93,6 +95,8 @@ def _import_config(task_name):
         from config.superconductor_config import Config
     elif task_name in ('gtopx2', 'gtopx3', 'gtopx4', 'gtopx6'):
         from config.gtopx_config import Config
+    elif task_name in ("lunar_lander", "robot_push", "rover"):
+        from config.ant_config import Config
     else:
         print(f"警告: 未知的任务 {task_name}，使用默认 dkitty 配置")
         from config.dkitty_config import Config
@@ -240,7 +244,11 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
             vae.to(Config.device)
             vae.eval()
             model_save_dir = os.path.dirname(vae_path)
-            scaler_path = os.path.join(model_save_dir, f"scaler_{eval_task}.p")
+            aux_scaler = vae_info.get("fewshot_real_world_scaler_path")
+            if aux_scaler and os.path.isfile(aux_scaler):
+                scaler_path = aux_scaler
+            else:
+                scaler_path = os.path.join(model_save_dir, f"scaler_{eval_task}.p")
             if os.path.exists(scaler_path):
                 scaler = StandardScaler()
                 scaler_dict = pkl.load(open(scaler_path, "rb"))
@@ -445,7 +453,10 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
         queries = func.task.to_integers(queries.reshape(num_queries, -1, 3))
     else:
         queries = queries.reshape(num_queries, -1)
-    y = func.task.predict(queries)
+    if is_real_world_fewshot_task(eval_task):
+        y = oracle_predict(eval_task, np.asarray(queries, dtype=np.float64))
+    else:
+        y = func.task.predict(queries)
     y_norm = (y - func.min) / (func.max - func.min)
 
     logger.print(

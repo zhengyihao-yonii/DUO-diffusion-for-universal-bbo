@@ -29,6 +29,10 @@ class Config(ParamsProto):
     condition_dropout = 0.25
     # 多任务仅文本分支（与 multitask_text_only CLI 一致）；默认 False = 多任务仍用 task 分类条件
     multitask_text_only = False
+    # Few-shot：单任务轨迹上仅文本条件微调（与 multitask_text_only 同：无 task 分支）
+    fewshot_text_only_finetune = False
+    load_diffusion_checkpoint = None
+    load_diffusion_checkpoint_epoch = None
     # 任务描述句向量（与 task one-hot 相加）；见 task_metadata/README.md
     use_text_condition = False
     task_metadata_dir = 'task_metadata'

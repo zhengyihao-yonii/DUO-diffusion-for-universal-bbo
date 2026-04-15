@@ -10,6 +10,10 @@ from design_bench.datasets.continuous.ant_morphology_dataset import AntMorpholog
 from design_bench.datasets.continuous.dkitty_morphology_dataset import DKittyMorphologyDataset
 from design_bench.datasets.continuous.superconductor_dataset import SuperconductorDataset
 import design_bench
+from diffuser.datasets.real_world_fewshot import (
+    is_real_world_fewshot_task,
+    load_real_world_for_pipeline,
+)
 from diffuser.utils.soo_gtopx import (
     TASKNAME_TO_VAR_NUM,
     load_gtopx_offline_arrays,
@@ -33,6 +37,9 @@ TASKNAME2DIM = {
     'tfbind8': 8,
     'tfbind10': 10,
     'superconductor': 86,
+    'lunar_lander': 12,
+    'robot_push': 14,
+    'rover': 60,
     'gtopx2': TASKNAME_TO_VAR_NUM['gtopx2'],
     'gtopx3': TASKNAME_TO_VAR_NUM['gtopx3'],
     'gtopx4': TASKNAME_TO_VAR_NUM['gtopx4'],
@@ -43,12 +50,25 @@ class DesignBenchDatasetWrapper:
     """
     设计基准数据集包装器，支持数据填充到固定长度
     """
-    def __init__(self, dataset_name, fixed_length=None, mode="train", frac=1.0, sigma=0.0):
+    def __init__(
+        self,
+        dataset_name,
+        fixed_length=None,
+        mode="train",
+        frac=1.0,
+        sigma=0.0,
+        fewshot_k=None,
+        fewshot_mode="all",
+        fewshot_seed=0,
+    ):
         self.dataset_name = dataset_name
         self.fixed_length = fixed_length
         self.mode = mode
         self.frac = frac
         self.sigma = sigma
+        self.fewshot_k = fewshot_k
+        self.fewshot_mode = fewshot_mode
+        self.fewshot_seed = fewshot_seed
         
         if is_gtopx_task(dataset_name):
             self.dataset = None
@@ -66,6 +86,26 @@ class DesignBenchDatasetWrapper:
             self.y_tensor = torch.tensor(self.y_normalized, dtype=torch.float32)
             # 与 Design-Bench 路径一致：统一为 [N]，避免多任务合并时 1D/2D 混用导致 torch.cat 失败
             self.y_tensor = self.y_tensor.reshape(-1)
+            return
+
+        if is_real_world_fewshot_task(dataset_name):
+            if self.fixed_length is None:
+                self.fixed_length = TASKNAME2DIM[dataset_name]
+            proc, y_norm, odim = load_real_world_for_pipeline(
+                dataset_name,
+                fixed_length=int(self.fixed_length),
+                frac=frac,
+                sigma=sigma,
+                fewshot_k=self.fewshot_k,
+                fewshot_mode=self.fewshot_mode,
+                fewshot_seed=self.fewshot_seed,
+            )
+            self.dataset = None
+            self.original_dim = odim
+            self.processed_x = proc
+            self.y_normalized = y_norm
+            self.x_tensor = torch.tensor(self.processed_x, dtype=torch.float32)
+            self.y_tensor = torch.tensor(self.y_normalized, dtype=torch.float32).reshape(-1)
             return
 
         # TFBind：必须与 train_vae.py / ZipDataset 一致，先 map_to_logits 再标准化，否则 VAE scaler 维数与数据不一致

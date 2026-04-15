@@ -6,8 +6,10 @@ if __name__ == "__main__":
 
     maybe_apply_from_argv_and_env()
 
+import hashlib
 import random
 import argparse
+from typing import Optional, Tuple
 from tqdm import tqdm
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import pickle as pkl
@@ -28,7 +30,7 @@ def set_seed(seed: int) -> None:
 
 
 from sklearn.preprocessing import StandardScaler
-from dataset_utils import MultiDatasetLoader, save_dataset_info, load_dataset_info
+from dataset_utils import TASKNAME2DIM, MultiDatasetLoader, save_dataset_info, load_dataset_info
 
 @contextmanager
 def suppress_output():
@@ -52,8 +54,62 @@ with suppress_output():
 import torch
 
 from diffuser.datasets.sequence import TASKNAME2FULL, TASKNAME2TASK, TASKNAME2MAX_SAMPLES, SUPPORTED_TASKS
+from diffuser.datasets.real_world_fewshot import (
+    is_real_world_fewshot_task,
+    load_real_world_for_pipeline,
+)
 from diffuser.utils.soo_gtopx import TASKNAME_TO_VAR_NUM, load_gtopx_offline_arrays, is_gtopx_task
 from diffuser.utils.construct_runtime import pairwise_l2_distance_matrix
+
+
+def _generated_task_dir(task_name: str, frac: float, sigma: float) -> str:
+    """每任务独立目录：距离矩阵与单任务轨迹 pkl（与单任务命名一致）。"""
+    return f"./generated_datasets/{task_name}_frac{frac}_sigma{sigma}"
+
+
+def _latent_fingerprint(pts: torch.Tensor) -> str:
+    """用于距离矩阵的那块 latent 的字节指纹（联合 VAE 与单任务 VAE 潜空间一般不同）。"""
+    x = pts.detach().cpu().contiguous().float().numpy()
+    return hashlib.sha256(x.tobytes()).hexdigest()
+
+
+def _load_distance_matrix_cache(
+    path: str,
+    pts: torch.Tensor,
+    *,
+    allow_legacy_plain: bool,
+) -> Tuple[Optional[torch.Tensor], bool]:
+    """
+    加载 ``distance_vae.p``。若缓存含 ``latent_fp`` 且与当前 ``pts`` 一致则复用。
+    多任务设 ``allow_legacy_plain=False``：无指纹的旧缓存（多为单任务 VAE 所算）一律不采用，避免误复用。
+    """
+    if not os.path.isfile(path):
+        return None, False
+    with open(path, "rb") as f:
+        obj = pkl.load(f)
+    n = int(pts.shape[0])
+    if isinstance(obj, dict) and "matrix" in obj:
+        mat = obj["matrix"]
+        if getattr(mat, "shape", None) is None or tuple(mat.shape) != (n, n):
+            return None, False
+        if obj.get("latent_fp") != _latent_fingerprint(pts):
+            return None, False
+        return mat, True
+    if isinstance(obj, torch.Tensor):
+        if tuple(obj.shape) != (n, n):
+            return None, False
+        if not allow_legacy_plain:
+            return None, False
+        return obj, True
+    return None, False
+
+
+def _save_distance_matrix_cache(path: str, matrix: torch.Tensor, pts: torch.Tensor) -> None:
+    pkl.dump(
+        {"matrix": matrix, "latent_fp": _latent_fingerprint(pts)},
+        open(path, "wb"),
+    )
+
 
 def preprocess_data_for_vae(data_x, fixed_dim):
     """
@@ -155,6 +211,11 @@ def construct_trajectories(
     fixed_dim=128,
     horizon=64,
     traj_params_json=None,
+    fewshot_k=None,
+    fewshot_mode="all",
+    pretrained_vae_info=None,
+    finetune_epochs=50,
+    finetune_lr=3e-5,
 ):
     """
     构建轨迹，支持单任务和多任务模式
@@ -170,6 +231,11 @@ def construct_trajectories(
     - fixed_dim: 固定的输入维度，用于统一不同数据集
     - horizon: 每条轨迹长度（时间步数），需与后续扩散训练 Config.horizon 一致
     - traj_params_json: 可选 JSON 路径，在标量/默认字典上按任务覆盖 n_traj/k/eps（见 diffuser.utils.traj_params）
+    - fewshot_k: real-world 任务 few-shot 点数（None=全量）；配合 fewshot_mode
+    - fewshot_mode: ``all`` | ``random`` | ``worst``（y 越小越差）
+    - pretrained_vae_info: **单任务 real-world 必填**，指向仅含 Design-Bench 等多任务预训练的 ``vae_info.p``，
+      在 few-shot 数据上 **微调** VAE（小学习率），兼顾预训练表征与真实域分布。
+    - finetune_epochs / finetune_lr: 微调轮数与学习率（仅 real-world）
     """
     set_seed(seed)
     traj_len = horizon
@@ -177,6 +243,7 @@ def construct_trajectories(
     from diffuser.utils.traj_params import (
         coerce_traj_param_dicts,
         merge_traj_params_json,
+        multitask_mixed_basename,
         multitask_trajectory_signature,
     )
 
@@ -188,6 +255,21 @@ def construct_trajectories(
 
     # 根据任务数量选择不同的数据加载方式
     is_multitask = len(tasks_list) > 1
+    rw_tasks = [t for t in tasks_list if is_real_world_fewshot_task(t)]
+    if rw_tasks and len(tasks_list) != 1:
+        raise ValueError(
+            "真实任务 / few-shot 实验仅支持单任务；当前列表: %s" % tasks_list
+        )
+    if rw_tasks and not pretrained_vae_info:
+        raise ValueError(
+            "real-world 单任务需指定 --pretrained_vae_info（多任务预训练得到的 vae_info.p），"
+            "以便在 few-shot 上微调 VAE。"
+        )
+    if (
+        is_multitask
+        and (fewshot_k is not None or (fewshot_mode not in (None, "all")))
+    ):
+        raise ValueError("few-shot 参数（fewshot_k / fewshot_mode）仅用于单任务 real-world。")
     mt_sig = (
         multitask_trajectory_signature(tasks_list, n_traj, k, eps, traj_len)
         if is_multitask
@@ -205,7 +287,8 @@ def construct_trajectories(
     # 多任务必须与单任务一致：按 n_traj/k/eps/horizon 检查各任务 pkl；不能仅因 mixed 存在就跳过，
     # 否则更换 n_traj 后仍会命中旧的 mixed，且 run_multitask 后续 train 会指向不存在的 data_path。
     if is_multitask:
-        mixed_new = os.path.join(output_dir_early, f"mixed_{mt_sig}.p")
+        mixed_short = os.path.join(output_dir_early, multitask_mixed_basename(mt_sig))
+        mixed_long = os.path.join(output_dir_early, f"mixed_{mt_sig}.p")
         mixed_legacy = os.path.join(output_dir_early, "mixed_trajectories_train.p")
         all_task_pkls_exist = True
         for task_name in tasks_list:
@@ -213,15 +296,24 @@ def construct_trajectories(
             task_k = k[task_name]
             task_eps = eps[task_name]
             task_pkl = os.path.join(
-                output_dir_early,
+                _generated_task_dir(task_name, frac, sigma),
                 f"{task_name}_{task_n_traj}x{traj_len}_k{task_k}_eps{task_eps}_vae_latent32_train.p",
             )
             if not os.path.isfile(task_pkl):
                 all_task_pkls_exist = False
                 break
-        mixed_ok = os.path.isfile(mixed_new) or os.path.isfile(mixed_legacy)
+        mixed_ok = (
+            os.path.isfile(mixed_short)
+            or os.path.isfile(mixed_long)
+            or os.path.isfile(mixed_legacy)
+        )
         if mixed_ok and all_task_pkls_exist:
-            _mp = mixed_new if os.path.isfile(mixed_new) else mixed_legacy
+            if os.path.isfile(mixed_short):
+                _mp = mixed_short
+            elif os.path.isfile(mixed_long):
+                _mp = mixed_long
+            else:
+                _mp = mixed_legacy
             print(
                 f"已存在多任务混合轨迹（训练实际加载此文件），跳过数据加载与 VAE：{_mp}"
             )
@@ -306,6 +398,24 @@ def construct_trajectories(
             data_y = torch.tensor(data_y_np, dtype=torch.float32)
             print("GTOPX 参考 y 范围 [全样本分位]", y_full_min, y_full_max)
             print("离线集 y 归一化后 min/max", float(data_y.min()), float(data_y.max()))
+        elif is_real_world_fewshot_task(task_name):
+            proc, y_norm, _odim = load_real_world_for_pipeline(
+                task_name,
+                fixed_length=fixed_dim,
+                frac=frac,
+                sigma=sigma,
+                fewshot_k=fewshot_k,
+                fewshot_mode=fewshot_mode,
+                fewshot_seed=seed,
+            )
+            data_x = torch.tensor(proc, dtype=torch.float32)
+            data_y = torch.tensor(y_norm, dtype=torch.float32)
+            print(
+                f"Real-world 任务 {task_name}: x={tuple(data_x.shape)}, few-shot k={fewshot_k} mode={fewshot_mode}, "
+                f"y 归一化后 min/max",
+                float(data_y.min()),
+                float(data_y.max()),
+            )
         else:
             # 加载单个 Design-Bench 数据集
             task = design_bench.make(TASKNAME2TASK[task_name],
@@ -355,11 +465,22 @@ def construct_trajectories(
                 self.num_epochs = 100
                 self.kl_weight = 0.1
                 self.seed = seed
-        
+                self.pretrained_vae_info = pretrained_vae_info
+                self.finetune_epochs = finetune_epochs
+                self.finetune_lr = finetune_lr
+                self.fewshot_k = fewshot_k
+                self.fewshot_mode = fewshot_mode
+                self.fewshot_seed = seed
+
         vae_args = VAEArgs()
-        
-        # 单任务的任务维度信息
-        odim = TASKNAME_TO_VAR_NUM[task_name] if is_gtopx_task(task_name) else data_x.shape[1]
+
+        # 单任务的任务维度信息（real-world 任务 data_x 已填充到 fixed_dim，不能用 shape[1]）
+        if is_gtopx_task(task_name):
+            odim = TASKNAME_TO_VAR_NUM[task_name]
+        elif is_real_world_fewshot_task(task_name):
+            odim = TASKNAME2DIM[task_name]
+        else:
+            odim = data_x.shape[1]
         task_dims_info = {
             task_name: {
                 'original_dim': odim,
@@ -372,8 +493,8 @@ def construct_trajectories(
         }
     
     print(f"数据加载完成，数据集大小: {len(data_x)} 点")
-    
-    # 训练或加载VAE模型
+
+    # 训练或加载VAE模型（real-world：在多任务预训练权重上 few-shot 微调）
     print(f"训练或加载{'多任务' if is_multitask else '单任务'}VAE模型")
     try:
         vae, scaler, model_save_dir = train_vae_main(vae_args)
@@ -381,15 +502,18 @@ def construct_trajectories(
     except Exception as e:
         print(f"训练VAE模型时出错: {e}")
         raise
-    
+
     # 保存维度信息
     dims_info_path = os.path.join(model_save_dir, "task_dims_info.p")
     save_dataset_info(task_dims_info, dims_info_path)
     print(f"任务维度信息已保存至: {dims_info_path}")
-    
+
     # 使用VAE进行降维...
     print("使用VAE进行降维...")
-    points_latent = reduce_dimension(vae, data_x, scaler, fixed_dim, task_start_indices, task_dims_info)
+    points_latent = reduce_dimension(
+        vae, data_x, scaler, fixed_dim, task_start_indices, task_dims_info
+    )
+
     print(f"降维后特征维度: {points_latent.shape[1]}")
     
     # 使用降维后的数据点和对应的值进行轨迹构建
@@ -397,39 +521,59 @@ def construct_trajectories(
     values = data_y
     N = points.shape[0]
     
-    # 构建输出目录
+    # 多任务：multi_* 仅放 mixed_*.p 与 vae_info.p；各任务距离矩阵与轨迹在 {task}_frac_sigma/ 下。
     if is_multitask:
-        tasks_str = '_'.join(tasks_list)
-        output_dir = f"./generated_datasets/multi_{tasks_str}_frac{frac}_sigma{sigma}"
+        tasks_str = "_".join(tasks_list)
+        multi_dir = f"./generated_datasets/multi_{tasks_str}_frac{frac}_sigma{sigma}"
+        output_dir = multi_dir
+        os.makedirs(multi_dir, exist_ok=True)
     else:
         output_dir = f"./generated_datasets/{tasks_list[0]}_frac{frac}_sigma{sigma}"
-    os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
     
-    # 检查轨迹文件是否已存在
+    # 检查轨迹文件是否已存在（多任务需各任务 pkl + multi 下 mixed）
     all_files_exist = True
-    for task_name in tasks_list:
-        task_n_traj = n_traj[task_name]
-        task_k = k[task_name]
-        task_eps = eps[task_name]
-        task_output_path = os.path.join(output_dir, f"{task_name}_{task_n_traj}x{traj_len}_k{task_k}_eps{task_eps}_vae_latent32_train.p")
-        if not os.path.exists(task_output_path):
+    if is_multitask:
+        mixed_here = os.path.join(output_dir, multitask_mixed_basename(mt_sig))
+        mixed_long = os.path.join(output_dir, f"mixed_{mt_sig}.p")
+        mixed_legacy = os.path.join(output_dir, "mixed_trajectories_train.p")
+        if not (
+            os.path.isfile(mixed_here)
+            or os.path.isfile(mixed_long)
+            or os.path.isfile(mixed_legacy)
+        ):
             all_files_exist = False
-            break
+        if all_files_exist:
+            for task_name in tasks_list:
+                task_n_traj = n_traj[task_name]
+                task_k = k[task_name]
+                task_eps = eps[task_name]
+                task_output_path = os.path.join(
+                    _generated_task_dir(task_name, frac, sigma),
+                    f"{task_name}_{task_n_traj}x{traj_len}_k{task_k}_eps{task_eps}_vae_latent32_train.p",
+                )
+                if not os.path.exists(task_output_path):
+                    all_files_exist = False
+                    break
+    else:
+        for task_name in tasks_list:
+            task_n_traj = n_traj[task_name]
+            task_k = k[task_name]
+            task_eps = eps[task_name]
+            task_output_path = os.path.join(
+                output_dir,
+                f"{task_name}_{task_n_traj}x{traj_len}_k{task_k}_eps{task_eps}_vae_latent32_train.p",
+            )
+            if not os.path.exists(task_output_path):
+                all_files_exist = False
+                break
     
     if all_files_exist:
         print("所有轨迹文件已存在，跳过轨迹构建！")
         return output_dir, None
     
-    # 计算距离矩阵（如果不存在）
-    distance_file = os.path.join(output_dir, "distance_vae.p")
-    if os.path.exists(distance_file):
-        print("加载预计算的距离矩阵...")
-        distances = pkl.load(open(distance_file, "rb"))
-    else:
-        print("计算距离矩阵（优先 GPU 分块 torch.cdist，见 GTG_DISTANCE_ON_GPU / GTG_DEVICE）...")
-        distances = pairwise_l2_distance_matrix(points)
-        pkl.dump(distances, open(distance_file, "wb"))
-        print(f"距离矩阵已保存至: {distance_file}")
+    # 与 GTG-main 一致：预计算 pairwise L2 距离矩阵，轨迹步内原地对已访问列置 1000 再 argsort 选点。
+    # 多任务时每个任务只在 ``points[start:end]`` 上建 task_n×task_n 矩阵（局部下标），不跨任务选点。
     
     # 区分单任务和多任务处理
     if is_multitask:
@@ -442,10 +586,36 @@ def construct_trajectories(
         all_timesteps = {}
         
         for task_name in tasks_list:
-            print(f"为任务 {task_name} 生成轨迹...")
+            print(f"为任务 {task_name} 生成轨迹（仅在同一任务数据块 [start,end) 内选点）...")
+            task_out_dir = _generated_task_dir(task_name, frac, sigma)
+            os.makedirs(task_out_dir, exist_ok=True)
             start_idx, end_idx = task_start_indices[task_name]
-            task_points = points[start_idx:end_idx]
             task_values = values[start_idx:end_idx]
+            task_points = points[start_idx:end_idx]
+            task_n = end_idx - start_idx
+            if task_n <= 0:
+                raise ValueError(f"任务 {task_name} 数据块为空: start={start_idx}, end={end_idx}")
+            
+            dist_task_path = os.path.join(task_out_dir, "distance_vae.p")
+            distances_t, dist_cache_ok = _load_distance_matrix_cache(
+                dist_task_path, task_points, allow_legacy_plain=False
+            )
+            if dist_cache_ok:
+                print(
+                    f"复用任务 {task_name} 距离矩阵（与当前多任务 VAE latent 指纹一致）: {dist_task_path}"
+                )
+            else:
+                if os.path.isfile(dist_task_path):
+                    print(
+                        f"任务 {task_name}: 已有缓存但与当前联合 VAE latent 不一致，或为无指纹旧文件；"
+                        "重新计算距离矩阵（单任务缓存不可直接用于多任务潜空间）。"
+                    )
+                print(
+                    f"计算任务 {task_name} 距离矩阵（L2，GPU 分块见 GTG_DISTANCE_ON_GPU / GTG_DEVICE）..."
+                )
+                distances_t = pairwise_l2_distance_matrix(task_points)
+                _save_distance_matrix_cache(dist_task_path, distances_t, task_points)
+                print(f"已保存（含 latent 指纹）: {dist_task_path}")
             
             # 获取该任务的参数
             task_n_traj = n_traj[task_name]
@@ -455,47 +625,42 @@ def construct_trajectories(
             # 选择起始点（前20%的低价值点）
             start_percentile = np.percentile(task_values.numpy(), 20)
             start_candidates_idx = np.where(task_values.numpy() >= start_percentile)[0]
-            # 调整索引到全局范围
             global_start_candidates = start_candidates_idx + start_idx
             
+            task_vals_np = task_values.squeeze().detach().cpu().numpy()
             trajectories = []
             for i in tqdm(range(task_n_traj), desc=f"生成任务 {task_name} 的轨迹"):
-                idx_list = []
                 trajectory = []
-                
-                # 随机选择起始点
-                starting_idx = global_start_candidates[np.random.randint(0, len(global_start_candidates))]
+                starting_idx = int(
+                    global_start_candidates[np.random.randint(0, len(global_start_candidates))]
+                )
+                idx_list_local = [starting_idx - start_idx]
                 starting_point = points[starting_idx]
                 starting_value = values[[starting_idx]]
-                
-                idx_list.append(starting_idx)
                 trajectory.append(np.concatenate([starting_point, starting_value], axis=0))
                 
-                # 生成轨迹的其余部分
                 for j in range(traj_len-1):
-                    # 排除已访问的点
-                    distances[starting_idx, np.array(idx_list)] = 1000.0
-                    # 选择价值在起始值附近的候选点
-                    candidate_idxs = np.arange(N)[values.squeeze() >= starting_value - task_eps]
+                    sl = starting_idx - start_idx
+                    distances_t[sl, np.array(idx_list_local, dtype=np.int64)] = 1000.0
+                    thresh_np = float((starting_value - task_eps).squeeze().cpu())
+                    candidate_local = np.where(task_vals_np >= thresh_np)[0]
+                    row = distances_t[sl].detach().cpu().numpy()
                     
-                    if len(candidate_idxs) <= 1:
-                        # 如果候选点太少，选择最近的k个点
-                        candidate_idxs = np.argsort(distances[starting_idx])[:task_k]
-                        candidate_idx = candidate_idxs[np.argmax(values[candidate_idxs])].item()
+                    if len(candidate_local) <= 1:
+                        cand_local = np.argsort(row)[:task_k]
+                        cl = int(cand_local[np.argmax(task_vals_np[cand_local])])
                     else:
-                        # 从候选点中选择最近的k个点，然后随机选择一个
-                        candidate_idxs = candidate_idxs[np.argsort(distances[starting_idx, candidate_idxs])[:task_k]]
-                        candidate_idx = np.random.choice(candidate_idxs)
+                        d_sub = row[candidate_local]
+                        cand_local = candidate_local[np.argsort(d_sub)[:task_k]]
+                        cl = int(np.random.choice(cand_local))
                     
-                    # 记录候选点
+                    candidate_idx = cl + start_idx
                     candidate_point = points[candidate_idx]
                     candidate_value = values[[candidate_idx]]
                     trajectory.append(np.concatenate([candidate_point, candidate_value], axis=0))
-                    
-                    # 更新起始点
                     starting_idx = candidate_idx
-                    starting_point = candidate_point
                     starting_value = max(starting_value, candidate_value)
+                    idx_list_local.append(cl)
                 
                 # 完成一个轨迹
                 trajectory = np.stack(trajectory, axis=0)
@@ -524,13 +689,16 @@ def construct_trajectories(
             all_cumulative_regret_to_go[task_name] = cumulative_regret_to_go
             all_timesteps[task_name] = timesteps
             
-            # 保存任务特定的轨迹数据
-            task_output_path = os.path.join(output_dir, f"{task_name}_{task_n_traj}x{traj_len}_k{task_k}_eps{task_eps}_vae_latent32_train.p")
+            # 保存任务特定的轨迹数据（任务名目录下）
+            task_output_path = os.path.join(
+                task_out_dir,
+                f"{task_name}_{task_n_traj}x{traj_len}_k{task_k}_eps{task_eps}_vae_latent32_train.p",
+            )
             task_obj = [our_data, our_data_vals, pr, cumulative_regret_to_go, timesteps]
             pkl.dump(task_obj, open(task_output_path, "wb"))
             print(f"任务 {task_name} 的轨迹数据已保存至: {task_output_path}")
         
-        # 保存VAE信息
+        # 保存VAE信息（仅 multi 目录，供 evaluate 等解析）
         vae_info = {
             'latent_dim': 32,
             'vae_path': os.path.join(model_save_dir, "vae_latent32.pt"),
@@ -538,7 +706,7 @@ def construct_trajectories(
             'tasks': tasks_list,
             'task_dims_info': task_dims_info
         }
-        vae_info_path = os.path.join(output_dir, "vae_info.p")
+        vae_info_path = os.path.join(multi_dir, "vae_info.p")
         pkl.dump(vae_info, open(vae_info_path, "wb"))
         print(f"VAE信息已保存至: {vae_info_path}")
         
@@ -582,64 +750,84 @@ def construct_trajectories(
             tasks_list  # 保存任务列表，用于映射任务索引
         ]
         
-        mixed_output_path = os.path.join(output_dir, f"mixed_{mt_sig}.p")
+        mixed_output_path = os.path.join(multi_dir, multitask_mixed_basename(mt_sig))
         pkl.dump(mixed_trajectory_obj, open(mixed_output_path, "wb"))
         print(f"混合轨迹文件已保存至: {mixed_output_path}")
         print(f"混合轨迹数量: {mixed_our_data.shape[0]}")
+        from diffuser.utils.multitask_slug_registry import write_multitask_manifest
+
+        write_multitask_manifest(
+            multi_dir,
+            traj_signature=mt_sig,
+            tasks_list=tasks_list,
+            n_traj=n_traj,
+            k=k,
+            eps=eps,
+            frac=frac,
+            sigma=sigma,
+            horizon=traj_len,
+            traj_params_json=traj_params_json,
+        )
+        print(
+            f"多任务 slug 清单已写入: {os.path.join(multi_dir, 'multitask_slug_manifest.json')}"
+        )
         
         print("多任务轨迹构建完成！")
-        return output_dir, all_trajectories
+        return multi_dir, all_trajectories
     else:
-        # 单任务模式：参考dfgo-main的实现，直接生成轨迹
+        # 单任务：与 GTG-main 一致，全库 N×N 距离矩阵 + 原地惩罚列
         task_name = tasks_list[0]
         print(f"为任务 {task_name} 生成轨迹...")
         
-        # 获取参数
+        distance_file = os.path.join(output_dir, "distance_vae.p")
+        distances, dist_cache_ok = _load_distance_matrix_cache(
+            distance_file, points, allow_legacy_plain=True
+        )
+        if dist_cache_ok:
+            print("加载预计算的距离矩阵（形状与 latent 指纹一致，或兼容无指纹旧缓存）...")
+        else:
+            if os.path.isfile(distance_file):
+                print("已有 distance_vae.p 但与当前 latent 不一致，重新计算...")
+            print("计算距离矩阵（L2 优先 GPU 分块，见 GTG_DISTANCE_ON_GPU / GTG_DEVICE）...")
+            distances = pairwise_l2_distance_matrix(points)
+            _save_distance_matrix_cache(distance_file, distances, points)
+            print(f"距离矩阵已保存至（含 latent 指纹）: {distance_file}")
+        
         task_n_traj = n_traj[task_name]
         task_k = k[task_name]
         task_eps = eps[task_name]
         
-        # 选择起始点（前20%的低价值点）
-        start_percentile = np.percentile(values.numpy(), 20)
-        start_candidates_idx = np.arange(N)[values.numpy() >= start_percentile]
+        vals_np = values.squeeze().detach().cpu().numpy()
+        start_percentile = np.percentile(vals_np, 20)
+        start_candidates_idx = np.arange(N)[vals_np >= start_percentile]
         
         trajectories = []
         for i in tqdm(range(task_n_traj), desc=f"生成任务 {task_name} 的轨迹"):
-            idx_list = []
             trajectory = []
-            
-            # 随机选择起始点
-            starting_idx = start_candidates_idx[np.random.randint(0, len(start_candidates_idx))]
+            starting_idx = int(start_candidates_idx[np.random.randint(0, len(start_candidates_idx))])
             starting_point = points[starting_idx]
             starting_value = values[[starting_idx]]
-            
-            idx_list.append(starting_idx)
+            idx_list = [starting_idx]
             trajectory.append(np.concatenate([starting_point, starting_value], axis=0))
             
-            # 生成轨迹的其余部分
             for j in range(traj_len-1):
-                # 排除已访问的点
-                distances[starting_idx, np.array(idx_list)] = 1000.0
-                # 选择价值在起始值附近的候选点
-                candidate_idxs = np.arange(N)[values >= starting_value - task_eps]
+                distances[starting_idx, np.array(idx_list, dtype=np.int64)] = 1000.0
+                thresh_np = float((starting_value - task_eps).squeeze().cpu())
+                candidate_idxs = np.arange(N)[vals_np >= thresh_np]
+                row = distances[starting_idx].detach().cpu().numpy()
                 
                 if len(candidate_idxs) <= 1:
-                    # 如果候选点太少，选择最近的k个点
-                    candidate_idxs = np.argsort(distances[starting_idx])[:task_k]
-                    candidate_idx = candidate_idxs[np.argmax(values[candidate_idxs])].item()
+                    candidate_idxs = np.argsort(row)[:task_k]
+                    candidate_idx = int(candidate_idxs[np.argmax(vals_np[candidate_idxs])])
                 else:
-                    # 从候选点中选择最近的k个点，然后随机选择一个
-                    candidate_idxs = candidate_idxs[np.argsort(distances[starting_idx, candidate_idxs])[:task_k]]
-                    candidate_idx = np.random.choice(candidate_idxs)
+                    d_sub = row[candidate_idxs]
+                    candidate_idxs = candidate_idxs[np.argsort(d_sub)[:task_k]]
+                    candidate_idx = int(np.random.choice(candidate_idxs))
                 
-                # 记录候选点
                 candidate_point = points[candidate_idx]
                 candidate_value = values[[candidate_idx]]
                 trajectory.append(np.concatenate([candidate_point, candidate_value], axis=0))
-                
-                # 更新起始点
                 starting_idx = candidate_idx
-                starting_point = candidate_point
                 starting_value = max(starting_value, candidate_value)
                 idx_list.append(starting_idx)
             
@@ -668,14 +856,16 @@ def construct_trajectories(
         pkl.dump(task_obj, open(task_output_path, "wb"))
         print(f"任务 {task_name} 的轨迹数据已保存至: {task_output_path}")
         
-        # 保存VAE信息
+        latent_d = int(getattr(vae_args, "latent_dim", 32))
         vae_info = {
-            'latent_dim': 32,
-            'vae_path': os.path.join(model_save_dir, "vae_latent32.pt"),
-            'fixed_dim': fixed_dim,
-            'task': task_name,
-            'original_dim': task_dims_info[task_name]['original_dim']
+            "latent_dim": latent_d,
+            "vae_path": os.path.join(model_save_dir, f"vae_latent{latent_d}.pt"),
+            "fixed_dim": fixed_dim,
+            "task": task_name,
+            "original_dim": task_dims_info[task_name]["original_dim"],
         }
+        if pretrained_vae_info:
+            vae_info["pretrained_vae_info_source"] = os.path.abspath(pretrained_vae_info)
         vae_info_path = os.path.join(output_dir, "vae_info.p")
         pkl.dump(vae_info, open(vae_info_path, "wb"))
         print(f"VAE信息已保存至: {vae_info_path}")
@@ -708,6 +898,37 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help="限制 CPU 线程数（OpenMP/BLAS）；等价于环境变量 CPU_THREADS",
+    )
+    parser.add_argument(
+        "--fewshot_k",
+        type=int,
+        default=None,
+        help="real-world：取 k 个点（与 --fewshot_mode 搭配；None=全量）",
+    )
+    parser.add_argument(
+        "--fewshot_mode",
+        type=str,
+        default="all",
+        choices=("all", "random", "worst"),
+        help="real-world：random=随机 k 点；worst=y 最小的 k 点（越大越好）",
+    )
+    parser.add_argument(
+        "--pretrained_vae_info",
+        type=str,
+        default=None,
+        help="单任务 real-world 必填：多任务预训练 vae_info.p，用于在 few-shot 上微调 VAE",
+    )
+    parser.add_argument(
+        "--finetune_epochs",
+        type=int,
+        default=50,
+        help="real-world 微调轮数（默认 50）",
+    )
+    parser.add_argument(
+        "--finetune_lr",
+        type=float,
+        default=3e-5,
+        help="real-world 微调学习率（默认 3e-5）",
     )
 
     args = parser.parse_args()
@@ -745,5 +966,10 @@ if __name__ == "__main__":
         fixed_dim=args.fixed_dim,
         horizon=args.horizon,
         traj_params_json=args.traj_params_json,
+        fewshot_k=args.fewshot_k,
+        fewshot_mode=args.fewshot_mode,
+        pretrained_vae_info=args.pretrained_vae_info,
+        finetune_epochs=args.finetune_epochs,
+        finetune_lr=args.finetune_lr,
     )
     sys.exit(0)

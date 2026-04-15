@@ -12,6 +12,11 @@ from .normalization import DatasetNormalizer, LimitsNormalizer, SafeLimitsNormal
 from .buffer import ReplayBuffer
 
 import design_bench
+from diffuser.datasets.real_world_fewshot import (
+    REAL_WORLD_FEWSHOT_TASK_SPECS,
+    is_real_world_fewshot_task,
+    load_real_world_for_pipeline,
+)
 from diffuser.utils.soo_gtopx import GTOPX_TASK_NAMES, load_gtopx_offline_arrays, is_gtopx_task
 
 from design_bench.datasets.discrete.tf_bind_8_dataset import TFBind8Dataset
@@ -46,6 +51,9 @@ TASKNAME2MAX_SAMPLES ={
     'gtopx3': 18000,
     'gtopx4': 26000,
     'gtopx6': 22000,
+    'lunar_lander': 100000,
+    'robot_push': 100000,
+    'rover': 100000,
 }
 
 # construct_trajectories / CLI 校验：Design-Bench 任务名 ∪ SOO GTOPX 短名（须在 TASKNAME2* 定义之后）
@@ -417,6 +425,16 @@ class ZipDataset(torch.utils.data.Dataset):
             self.data_y = torch.from_numpy(np.asarray(y_norm, dtype=np.float32)).float()
             if self.data_y.ndim == 1:
                 self.data_y = self.data_y.unsqueeze(-1)
+        elif is_real_world_fewshot_task(dataset):
+            proc, y_norm, _ = load_real_world_for_pipeline(
+                dataset,
+                fixed_length=128,
+                frac=frac,
+                sigma=sigma,
+                fewshot_seed=soo_seed,
+            )
+            self.data_x = torch.from_numpy(proc).float()
+            self.data_y = torch.from_numpy(y_norm).float()
         else:
             task = design_bench.make(TASKNAME2TASK[dataset],
                                      dataset_kwargs=dict(
@@ -435,7 +453,10 @@ class ZipDataset(torch.utils.data.Dataset):
             self.data_y = np.clip(self.data_y + np.random.randn(*self.data_y.shape) * sigma, 0.0, 1.0).float()
         
         self.normalizer = SafeLimitsNormalizer(self.data_x)
-        self.original_observation_dim = self.data_x.shape[1]
+        if is_real_world_fewshot_task(dataset):
+            self.original_observation_dim = int(REAL_WORLD_FEWSHOT_TASK_SPECS[dataset]["dim"])
+        else:
+            self.original_observation_dim = self.data_x.shape[1]
         
     def unnormalize_values(self, y):
         return y

@@ -11,6 +11,10 @@ import design_bench
 
 from diffuser.datasets.sequence import TASKNAME2MAX_SAMPLES, TASKNAME2TASK
 from diffuser.utils.soo_gtopx import is_gtopx_task, load_gtopx_offline_arrays
+from diffuser.datasets.real_world_fewshot import (
+    is_real_world_fewshot_task,
+    load_real_world_raw,
+)
 
 
 def offline_training_best_y(task_name: str, *, frac: float, sigma: float, seed: int) -> float:
@@ -23,6 +27,16 @@ def offline_training_best_y(task_name: str, *, frac: float, sigma: float, seed: 
             task_name, frac=frac, sigma=sigma, seed=seed
         )
         return float(y_subset_max)
+
+    if is_real_world_fewshot_task(task_name):
+        _x, y = load_real_world_raw(
+            task_name,
+            fewshot_k=None,
+            fewshot_mode="all",
+            fewshot_seed=seed,
+        )
+        y = np.asarray(y, dtype=np.float64).ravel()
+        return float(np.max(y))
 
     task = design_bench.make(
         TASKNAME2TASK[task_name],

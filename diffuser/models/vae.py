@@ -266,17 +266,23 @@ def create_vae_dataloaders(data, batch_size=64, val_split=0.1):
     if isinstance(data, np.ndarray):
         data = torch.tensor(data, dtype=torch.float32)
     
-    # 分割训练集和验证集
-    val_size = int(len(data) * val_split)
-    train_size = len(data) - val_size
+    # 分割训练集和验证集（小样本时保证至少 1 条验证，避免 val_size=0）
+    n = len(data)
+    val_size = int(n * val_split)
+    if val_split > 0 and val_size == 0 and n > 1:
+        val_size = 1
+    train_size = n - val_size
+    if train_size <= 0:
+        train_size, val_size = n, 0
     train_data, val_data = data_utils.random_split(data, [train_size, val_size])
-    
+    drop_last_train = train_size > batch_size
+
     # 创建数据加载器
     train_loader = data_utils.DataLoader(
-        train_data, 
-        batch_size=batch_size, 
-        shuffle=True, 
-        drop_last=True
+        train_data,
+        batch_size=batch_size,
+        shuffle=True,
+        drop_last=drop_last_train,
     )
     
     val_loader = data_utils.DataLoader(

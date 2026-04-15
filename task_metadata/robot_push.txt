@@ -1,0 +1,5 @@
+Task: RobotPush (Box2D)
+Type: continuous
+Description: Control the robot to push items to a designated location, minimizing the distance between a predefined target location and two objects. Motion is governed by 14 continuous parameters (e.g. position, orientation, speed, direction of motion).
+Goal: Optimize the objective encoded in offline labels (typically minimize distance to target or a related score).
+Design space: 14 continuous variables.

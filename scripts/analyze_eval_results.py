@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """
 Aggregate evaluate.log metrics across runs (run*_seed* / run*) per experiment,
-then compare GTGdfgo vs GTG results in one report (CSV + Markdown + LaTeX table).
+then compare GTGdfgo vs GTG results in one report (CSV + LaTeX table).
 
 Metrics: max_ep_reward -> max, nmax_ep_reward -> nmax (mean ± std over runs).
+
+DFGO 列在每种模式（单任务 / 小组 multi / 全任务 multi / text）下，对
+``single_task|multi_task|text_conditioned_only/<…>/<hyper>/run*`` 中**不同超参目录**
+（如 ``NxH_k*_eps*``、``w*_…``）分别聚合后，**按该任务取 max 均值最高**的一组作为该列结果。
 
 Per-task columns ``gtgdfgo_msub_*`` / ``gtgdfgo_mfull_*`` look up multitask runs by task:
 subgroup (ant+dkitty, tfbind8+10, four gtopx) vs full 8-task multitask — see
 ``TASK_TO_SUBGROUP_MULTITASK_EXP`` and ``FULL_MULTITASK_EXP``.
 
-所有汇总表与 UniSO 输入均位于 ``results/analysis_table/``：宽表 ``eval_comparison.*``、矩阵 ``eval_comparison_m12.*``、``eval_comparison_all.*``，以及 ``uniso_result.tex``、``d_best.json``（可选）。
-``eval_comparison_all``（``--mode final``）：``text_conditioned_only/all_frac1.0_sigma0.0/``（可用 ``EVAL_ALL_TASK_FRAC_SIG`` 覆盖）下**每个超参子目录一列** DFGO，列名为子目录名（关键参数）。默认一次生成全部；也可用 ``--mode short|full|final``（见 ``run_analyze_eval.sh``）。
-矩阵列为 UniSO（best，来自 ``results/analysis_table/uniso_result.tex``）+ 12 列方法；文本多任务目录后缀见 ``MATRIX12_TEXT_SUFFIXES``。
+所有汇总表与 UniSO 输入均位于 ``results/analysis_table/``：宽表 ``max_short.*``、矩阵 ``max_extended.*``、``text_conditioned_result_analysis.*``、``nmax.tex``，以及 ``uniso_result.tex``、``uniso_nresult.tex``、``d_best.json``（可选）。
+``text_conditioned_result_analysis``（``--mode final``）：``text_conditioned_only/all_frac1.0_sigma0.0/``（可用 ``EVAL_ALL_TASK_FRAC_SIG`` 覆盖）下**每个超参子目录一列** DFGO。默认一次生成全部；也可用 ``--mode short|full|final``（见 ``run_analyze_eval.sh``）。
+矩阵列为 **UniSO-T**（``uniso_result.tex`` 中 **UniSO-T Improved** 列）+ 12 列方法；文本多任务目录后缀见 ``MATRIX12_TEXT_SUFFIXES``。
 """
 from __future__ import annotations
 
@@ -159,11 +163,12 @@ def mean_std(vals: list[float]) -> tuple[float, float]:
     return m, s
 
 
-# 汇总表行顺序：单任务按 ant → dkitty → tfbind8 → tfbind10 → gtopx2…6；
+# 汇总表行顺序：单任务按 ant → dkitty → superconductor → tfbind8 → tfbind10 → gtopx2…6；
 # 多任务按「联立任务数」从少到多（2 任务：ant+dkitty 先于 tfbind8+10；4：四 gtopx；8：全任务）。
 TASK_ORDER: list[str] = [
     "ant",
     "dkitty",
+    "superconductor",
     "tfbind8",
     "tfbind10",
     "gtopx2",
@@ -172,9 +177,19 @@ TASK_ORDER: list[str] = [
     "gtopx6",
 ]
 
+# Design-Bench 五任务（与 ``nmax.tex`` / 归一化表一致，不含 GTOP-X）
+DESIGN_BENCH_TASK_ORDER: list[str] = [
+    "ant",
+    "dkitty",
+    "superconductor",
+    "tfbind8",
+    "tfbind10",
+]
+
 EXPERIMENT_ORDER: list[str] = [
     "ant_multiple_runs",
     "dkitty_multiple_runs",
+    "superconductor_multiple_runs",
     "tfbind8_multiple_runs",
     "tfbind10_multiple_runs",
     "gtopx2_multiple_runs",
@@ -185,11 +200,12 @@ EXPERIMENT_ORDER: list[str] = [
     "multitask_tfbind10_tfbind8",
     "multitask_gtopx2_gtopx3_gtopx4_gtopx6",
     "multitask_ant_dkitty_gtopx2_gtopx3_gtopx4_gtopx6_tfbind10_tfbind8",
+    "multitask_ant_dkitty_gtopx2_gtopx3_gtopx4_gtopx6_superconductor_tfbind10_tfbind8",
 ]
 
-# 全任务一起训练的 multitask 目录名
+# 全任务一起训练的 multitask 实验名（9 任务，含 superconductor；与 run_multitask.sh _FULL_MT_TASKS_CSV 一致）
 FULL_MULTITASK_EXP: str = (
-    "multitask_ant_dkitty_gtopx2_gtopx3_gtopx4_gtopx6_tfbind10_tfbind8"
+    "multitask_ant_dkitty_gtopx2_gtopx3_gtopx4_gtopx6_superconductor_tfbind10_tfbind8"
 )
 
 # 各 task 对应的「小组」multitask（与 FULL_MULTITASK_EXP 区分）
@@ -249,11 +265,12 @@ AGGREGATE_EXPERIMENT_ROOTS: tuple[str, ...] = (
     MULTI_TASK_ROOT,
     SINGLE_TASK_ROOT,
 )
-# eval_comparison_all：与全 8 任务 textcond 目录 ``text_conditioned_only/all_frac*_sigma*/`` 对齐（默认 all_frac1.0_sigma0.0）
+# text_conditioned_result_analysis：与全 9 任务（含 superconductor）textcond 目录 ``text_conditioned_only/all_frac*_sigma*/`` 或
+# ``all_improved_frac*_sigma*/``（USE_TRAJ_PARAMS_JSON=1 每任务最优轨迹）对齐。
 EVAL_ALL_TASK_FRAC_SIG: str = os.environ.get(
     "EVAL_ALL_TASK_FRAC_SIG", "all_frac1.0_sigma0.0"
 )
-# eval_comparison_all：每列对应 ``text_conditioned_only/<EVAL_ALL_TASK_FRAC_SIG>/<hyper>/``（hyper 为关键参数目录名）
+# text_conditioned_result_analysis：每列对应 ``text_conditioned_only/<EVAL_ALL_TASK_FRAC_SIG>/<hyper>/``（hyper 为关键参数目录名）
 EVAL_ALL_EXPERIMENT_PREFIX: str = (
     f"{TEXT_CONDITIONED_ROOT}/{EVAL_ALL_TASK_FRAC_SIG}"
 )
@@ -269,55 +286,80 @@ MULTITASK_NAME_TO_DIR: dict[str, str] = {
 }
 
 
-def gtgdfgo_single_task_key(task: str, use_returns: bool) -> str:
-    base = f"{SINGLE_TASK_ROOT}/{task}_{GTGDFGO_TASK_FRAC_SIG}"
-    return f"{base}{RETCOND_INFIX}" if use_returns else base
+def gtgdfgo_single_task_prefix(task: str) -> str:
+    return f"{SINGLE_TASK_ROOT}/{task}_{GTGDFGO_TASK_FRAC_SIG}"
 
 
-def gtgdfgo_subgroup_multitask_key(task: str, use_returns: bool) -> str | None:
+def gtgdfgo_subgroup_multitask_prefix(task: str) -> str | None:
     old = TASK_TO_SUBGROUP_MULTITASK_EXP.get(task)
     if not old:
         return None
     token = MULTITASK_NAME_TO_DIR.get(old)
     if not token:
         return None
-    base = f"{MULTI_TASK_ROOT}/{token}_{GTGDFGO_TASK_FRAC_SIG}"
-    return f"{base}{RETCOND_INFIX}" if use_returns else base
+    return f"{MULTI_TASK_ROOT}/{token}_{GTGDFGO_TASK_FRAC_SIG}"
 
 
-def gtgdfgo_full_multitask_key(use_returns: bool) -> str:
-    base = f"{MULTI_TASK_ROOT}/all_{GTGDFGO_TASK_FRAC_SIG}"
-    return f"{base}{RETCOND_INFIX}" if use_returns else base
+def gtgdfgo_full_multitask_prefix() -> str:
+    return f"{MULTI_TASK_ROOT}/all_{GTGDFGO_TASK_FRAC_SIG}"
 
 
-def gtgdfgo_subgroup_text_key(task: str, use_returns: bool) -> str | None:
-    """``text_conditioned_only/<token>_<frac_sigma>[ _retcond]``（无 all_frac 第三段 hyper 名）。"""
+def gtgdfgo_subgroup_text_prefix(task: str) -> str | None:
+    """``text_conditioned_only/<token>_<frac_sigma>/`` 下各 ``<hyper>/``（与 ``_ret`` 后缀区分 returns 列）。"""
     old = TASK_TO_SUBGROUP_MULTITASK_EXP.get(task)
     if not old:
         return None
     token = MULTITASK_NAME_TO_DIR.get(old)
     if not token:
         return None
-    r = RETCOND_INFIX if use_returns else ""
-    return f"{TEXT_CONDITIONED_ROOT}/{token}_{GTGDFGO_TASK_FRAC_SIG}{r}"
+    return f"{TEXT_CONDITIONED_ROOT}/{token}_{GTGDFGO_TASK_FRAC_SIG}"
 
 
-def _pick_gtgdfgo_all_frac_text_key(
+def gtgdfgo_all_text_prefix() -> str:
+    return f"{TEXT_CONDITIONED_ROOT}/all_{GTGDFGO_TASK_FRAC_SIG}"
+
+
+def _hyper_matches_returns(hyper: str, use_returns: bool) -> bool:
+    return hyper.endswith("_ret") == use_returns
+
+
+def best_gtgdfgo_exp_for_task(
     bucket: dict[str, dict[str, dict[str, Any]]],
+    prefix: str,
+    task: str,
     use_returns: bool,
 ) -> str | None:
-    """``text_conditioned_only/all_<frac_sigma>/<hyper>``：仅 hyper 名以 ``_ret`` 结尾与否与列（ST / ST+r）一致；无则 None。"""
-    prefix = f"{TEXT_CONDITIONED_ROOT}/all_{GTGDFGO_TASK_FRAC_SIG}/"
-    hits: list[str] = []
+    """
+    在 ``prefix`` 或 ``prefix/<hyper>/…`` 下，按该任务 ``max_mean``（max_ep_reward）最大选取实验目录。
+    ``hyper`` 名以 ``_ret`` 结尾表示开启 returns，与无 ``_ret`` 的列分开比较。
+    """
+    best_k: str | None = None
+    best_m: float | None = None
+    if prefix in bucket:
+        st = bucket[prefix].get(task)
+        if st:
+            m = st.get("max_mean")
+            if m is not None and np.isfinite(float(m)):
+                best_m = float(m)
+                best_k = prefix
     for k in bucket:
-        if not k.startswith(prefix):
+        if not k.startswith(prefix + "/"):
             continue
-        hyper = k[len(prefix) :]
-        if "/" in hyper:
+        rest = k[len(prefix) + 1 :]
+        hyper = rest.split("/")[0]
+        if not _hyper_matches_returns(hyper, use_returns):
             continue
-        if hyper.endswith("_ret") == use_returns:
-            hits.append(k)
-    return sorted(hits)[0] if hits else None
+        st = bucket[k].get(task)
+        if not st:
+            continue
+        m = st.get("max_mean")
+        if m is None or not np.isfinite(float(m)):
+            continue
+        mf = float(m)
+        if best_m is None or mf > best_m:
+            best_m = mf
+            best_k = k
+    return best_k
 
 
 def _experiment_name_from_eval_log(
@@ -326,9 +368,9 @@ def _experiment_name_from_eval_log(
     """
     - ``<exp>/<run>/evaluate.log`` -> ``<exp>``（普通实验）
     - ``text_conditioned_only/<EVAL_ALL_TASK_FRAC_SIG>/<hyper>/run*/evaluate.log``
-      -> ``text_conditioned_only/<EVAL_ALL_TASK_FRAC_SIG>/<hyper>``（eval_comparison_all 每列一 hyper）
+      -> ``text_conditioned_only/<EVAL_ALL_TASK_FRAC_SIG>/<hyper>``（text_conditioned_result_analysis 每列一 hyper）
     - 其它 ``<agg_root>/<tasks_frac_sigma>/<hyper>/run*/evaluate.log``
-      -> ``<agg_root>/<tasks_frac_sigma>``（同列聚合所有 hyper）
+      -> ``<agg_root>/<tasks_frac_sigma>/<hyper>``（每超参子目录单独键）
     - 旧布局 ``text_conditioned_only/multi_task/<tasks_frac_sigma>/<hyper>/run*``（仍兼容至迁移完成）
       -> ``text_conditioned_only/<tasks_frac_sigma>``
     """
@@ -348,7 +390,7 @@ def _experiment_name_from_eval_log(
         and parts[1] == MULTI_TASK_ROOT
     ):
         return f"{parts[0]}/{parts[2]}"
-    # all_frac*：每个超参子目录单独一列（与 eval_comparison_all 一致）
+    # all_frac*：每个超参子目录单独一列（与 text_conditioned_result_analysis 一致）
     if (
         len(parts) >= 5
         and parts[0] == TEXT_CONDITIONED_ROOT
@@ -356,13 +398,12 @@ def _experiment_name_from_eval_log(
     ):
         return f"{parts[0]}/{parts[1]}/{parts[2]}"
     # 其它：text_conditioned_only|multi_task|single_task/<tasks_frac>/<hyper>/run/...
-    # hyper 目录名以 ``_ret`` 结尾 → 与无 ret 分两键（对齐 ``*_retcond`` 列）
+    # 含 ``<hyper>``（如 ``4000x64_k20_eps0.05``、``w1.2_1000x64_k20_eps0.05``）时键为 ``base/hyper``，
+    # 以便按任务在多种 k/eps/权重 下取最优；无 hyper 层时为 ``base``。
     if len(parts) >= 5 and parts[0] in AGGREGATE_EXPERIMENT_ROOTS:
-        hyper = parts[-3]
         base = f"{parts[0]}/{parts[1]}"
-        if hyper.endswith("_ret"):
-            return f"{base}{RETCOND_INFIX}"
-        return base
+        hyper = parts[-3]
+        return f"{base}/{hyper}"
     return evaluate_log.parent.parent.name
 
 
@@ -497,12 +538,14 @@ def enrich_multitask_columns(
     out: list[dict[str, Any]] = []
     for row in rows:
         task = row["task"]
-        sub_st = _lookup_task_stats(
-            gtgdfgo, gtgdfgo_subgroup_multitask_key(task, False), task
+        sp = gtgdfgo_subgroup_multitask_prefix(task)
+        sub_k = (
+            best_gtgdfgo_exp_for_task(gtgdfgo, sp, task, False) if sp else None
         )
-        full_st = _lookup_task_stats(
-            gtgdfgo, gtgdfgo_full_multitask_key(False), task
-        )
+        sub_st = _lookup_task_stats(gtgdfgo, sub_k, task)
+        fp = gtgdfgo_full_multitask_prefix()
+        full_k = best_gtgdfgo_exp_for_task(gtgdfgo, fp, task, False)
+        full_st = _lookup_task_stats(gtgdfgo, full_k, task)
         new_row = dict(row)
         new_row.update(_prefix_stats_flat("gtgdfgo_msub", sub_st))
         new_row.update(_prefix_stats_flat("gtgdfgo_mfull", full_st))
@@ -516,6 +559,7 @@ DECIMALS = 3
 LATEX_TASK_ROWS: list[tuple[str, str, str]] = [
     ("ant", "Ant", "ant_multiple_runs"),
     ("dkitty", "D'Kitty", "dkitty_multiple_runs"),
+    ("superconductor", "Superconductor", "superconductor_multiple_runs"),
     ("tfbind8", "TF Bind 8", "tfbind8_multiple_runs"),
     ("tfbind10", "TF Bind 10", "tfbind10_multiple_runs"),
     ("gtopx2", "GTOPX 2", "gtopx2_multiple_runs"),
@@ -644,6 +688,7 @@ def parse_mean_from_text_cell(cell: str) -> float | None:
 UNISO_ROW_DISPLAY_TO_KEY: dict[str, str] = {
     "Ant": "ant",
     "D'Kitty": "dkitty",
+    "Superconductor": "superconductor",
     "TF Bind 8": "tfbind8",
     "TF Bind 10": "tfbind10",
     "GTOPX 2": "gtopx2",
@@ -655,8 +700,8 @@ UNISO_ROW_DISPLAY_TO_KEY: dict[str, str] = {
 
 def parse_uniso_best_per_task(tex_path: Path) -> dict[str, str]:
     """
-    从 ``uniso_result.tex`` 中取每个任务在 **UniSO-T / UniSO-N 四列** 中 mean 最高的一格，
-    返回 task_key -> LaTeX 单元格正文（已去掉 \\best/\\second 外壳，± 写成 `` $\\pm$ ``）。
+    从 ``uniso_result.tex`` 中取每个任务在 **UniSO-T → Improved** 列（表头「Vanilla | Improved」下第二列），
+    即 **UniSO-T Improved** 的分数；返回 task_key -> LaTeX 单元格正文（已去掉 \\best/\\second 外壳，± 写成 `` $\\pm$ ``）。
     """
     if not tex_path.is_file():
         return {}
@@ -666,32 +711,94 @@ def parse_uniso_best_per_task(tex_path: Path) -> dict[str, str]:
         line = raw.strip()
         if "&" not in line or "\\\\" not in line:
             continue
-        if "Avg. Rank" in line or "Superconductor" in line:
+        if "Avg. Rank" in line:
             continue
         parts = [p.strip() for p in line.split("&")]
-        if len(parts) < 8:
+        if len(parts) < 6:
             continue
         task_display = parts[0].strip()
         if task_display not in UNISO_ROW_DISPLAY_TO_KEY:
             continue
         tk = UNISO_ROW_DISPLAY_TO_KEY[task_display]
-        uniso_four = parts[4:8]
-        best_j: int | None = None
-        best_val: float | None = None
-        for j, cell in enumerate(uniso_four):
-            v = parse_mean_from_text_cell(cell)
-            if v is None:
-                continue
-            if best_val is None or v > best_val:
-                best_val = v
-                best_j = j
-        if best_j is None:
+        # Task | D(best) | BN+BO | BN+Grad | UniSO-T Vanilla | UniSO-T Improved | ...
+        cell = parts[5]
+        v = parse_mean_from_text_cell(cell)
+        if v is None:
             continue
-        body = _strip_uniso_best_second(uniso_four[best_j])
+        body = _strip_uniso_best_second(cell)
         body = body.replace("±", r" $\pm$ ").strip()
         body = re.sub(r"\s+", " ", body)
         out[tk] = body
     return out
+
+
+def parse_uniso_nresult_rows(
+    tex_path: Path,
+) -> list[tuple[str, str, list[str], str]]:
+    """
+    解析 ``uniso_nresult.tex``（Design-Bench **归一化**分数表）：每行
+    ``(method, venue, [Ant, D'Kitty, Superconductor, TF-Bind-8, TF-Bind-10], Avg.\\ Rank)``。
+    """
+    if not tex_path.is_file():
+        return []
+    out: list[tuple[str, str, list[str], str]] = []
+    for raw in tex_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if "%" in line:
+            line = line.split("%")[0].strip()
+        if not line or "&" not in line:
+            continue
+        if "\\toprule" in line or "\\bottomrule" in line:
+            continue
+        if "\\midrule" in line and line.count("&") < 3:
+            continue
+        if "\\\\" in line:
+            line = line.split("\\\\")[0].strip()
+        if not line:
+            continue
+        parts = [p.strip() for p in line.split("&")]
+        if len(parts) < 8:
+            continue
+        method = parts[0]
+        if method.strip() == "Method":
+            continue
+        venue = parts[1]
+        tasks = [parts[i] for i in range(2, 7)]
+        avg_rank = parts[7]
+        out.append((method, venue, tasks, avg_rank))
+    return out
+
+
+def _nresult_plain_method_name(method: str) -> str:
+    return re.sub(r"\\textbf\{([^}]*)\}", r"\1", method.strip()).strip()
+
+
+def _nmax_baseline_method_cell(method: str) -> str:
+    """``nmax`` 表中 UniSO-T 与其它基线一致，方法名不加 ``\\textbf``。"""
+    if _nresult_plain_method_name(method).startswith("UniSO-T"):
+        return "UniSO-T"
+    return method
+
+
+def _nresult_midrule_before_dfgo(last_baseline_method: str) -> bool:
+    """最后一行基线为 UniSO-T 时，其与 DFGO 之间需 ``\\midrule``（RaM 行后已有 ``\\midrule``，不再重复）。"""
+    return _nresult_plain_method_name(last_baseline_method).startswith("UniSO-T")
+
+
+def _nresult_midrule_after_row(method: str) -> bool:
+    """与 ``uniso_nresult.tex`` 中 ``\\midrule`` 分段一致（在对应方法行之后插入）。"""
+    s = method.strip()
+    plain = re.sub(r"\\textbf\{([^}]*)\}", r"\1", s).strip()
+    if r"$\mathcal{D}$(best)" in s:
+        return True
+    if plain.startswith("Grad. Ascent Min"):
+        return True
+    if plain == "GTG":
+        return True
+    # MATCH-OPT 与 RaM 同属一段，仅 RaM 行末有 ``\\midrule``（见源表）
+    if plain.startswith("RaM-ListNet"):
+        return True
+    return False
 
 
 def column_mean_rank_stats(means: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -746,6 +853,146 @@ def _mean_from_task_stats(st: dict[str, Any] | None) -> float | None:
     if np.isnan(v):
         return None
     return v
+
+
+def _brace_content_after(s: str, open_i: int) -> str | None:
+    """``s[open_i]`` 为 ``{``，返回与之匹配的 ``}`` 内层文本（不含最外层花括号）。"""
+    if open_i >= len(s) or s[open_i] != "{":
+        return None
+    depth = 0
+    start = open_i
+    for j in range(open_i, len(s)):
+        if s[j] == "{":
+            depth += 1
+        elif s[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return s[start + 1 : j]
+    return None
+
+
+def latex_cell_strip_wrappers(cell: str) -> str:
+    """
+    去掉单元格外层 ``\\textbf{}`` / ``\\textcolor{…}{}``，得到用于展示与比较大小的正文
+    （与 ``uniso_nresult`` 源表着色无关；供 ``nmax`` 按列重算蓝/紫）。
+    """
+    s = cell.strip()
+    for _ in range(40):
+        t = _unwrap_one_texbf_or_textcolor(s)
+        if t is None:
+            return s
+        s = t.strip()
+    return s
+
+
+def _unwrap_one_texbf_or_textcolor(s: str) -> str | None:
+    if s.startswith(r"\textbf{"):
+        inner = _brace_content_after(s, len(r"\textbf"))
+        return inner
+    m = re.match(r"^\\textcolor\{[^}]+\}", s)
+    if m:
+        pos = m.end()
+        if pos < len(s) and s[pos] == "{":
+            return _brace_content_after(s, pos)
+    return None
+
+
+def _nmax_parse_task_value(plain: str) -> float | None:
+    """任务列：越大越好；``--`` / 无法解析则不参与该列着色。"""
+    s = plain.strip()
+    if not s or s in ("--", "—", "/", "nan"):
+        return None
+    return parse_mean_from_text_cell(s)
+
+
+def nmax_avg_rank_denominator_total(n_base: int, parsed: list[tuple[str, str, list[str], str]]) -> int:
+    """
+    源表 ``/22`` 表示参与排名的方法数（不含 ``$\\mathcal{D}$(best)`` 行）。
+    ``nmax`` 在相同方法集合上增加 DFGO single、multi 两行，故分母 = ``(n_base - 1) + 2``
+    （首行为 D(best) 时）；否则 ``n_base + 2``。
+    """
+    if parsed and r"$\mathcal{D}$(best)" in parsed[0][0]:
+        return (n_base - 1) + 2
+    return n_base + 2
+
+
+def nmax_fmt_dfgo_avg_rank(mu: float, n_total: int) -> str:
+    """DFGO 两行 Avg.\\ Rank：``mean / N``（与基线 ``a / N`` 同一分母 ``N``）。"""
+    if mu is None or not np.isfinite(float(mu)):
+        return "--"
+    return f"{float(mu):.3f} / {n_total}"
+
+
+def nmax_fix_avg_rank_denominator(cell: str, n_total: int) -> str:
+    """
+    源表 ``uniso_nresult`` 的 Avg.\\ Rank 形如 ``a / 22``；本表分母改为 ``n_total``（见
+    ``nmax_avg_rank_denominator_total``）。``/`` 等不修改。
+    """
+    s = cell.strip()
+    if not s or s in ("/", "--", "—"):
+        return cell
+    m = re.match(r"^(.+?)\s*/\s*(\d+)\s*$", s)
+    if m:
+        return f"{m.group(1).strip()} / {n_total}"
+    return cell
+
+
+def _nmax_parse_avg_rank_value(plain: str) -> float | None:
+    """Avg.\\ Rank：越小越好；``/``、``--`` 跳过；``a / b`` 取第一个数（含 DFGO ``m / N``）。"""
+    s = plain.strip()
+    if not s or s in ("--", "—", "nan"):
+        return None
+    if s == "/":
+        return None
+    return parse_mean_from_text_cell(s)
+
+
+def _nmax_unique_sorted_values(
+    values: list[float], *, reverse: bool
+) -> list[float]:
+    """去重（容差），排序后用于取第一、二档。"""
+    if not values:
+        return []
+    ordered = sorted(values, reverse=reverse)
+    out: list[float] = []
+    for v in ordered:
+        if not out or not np.isclose(v, out[-1], rtol=1e-5, atol=1e-8):
+            out.append(v)
+    return out
+
+
+def nmax_colorize_column_by_value(
+    bodies_plain: list[str], *, higher_is_better: bool
+) -> list[str]:
+    """
+    单列内：可解析数值的单元格中，最优 \\textbf{\\textcolor{blue}{...}}，
+    次优 \\textbf{\\textcolor{violet}{...}}；并列同档同色；不可解析的保持原正文（已去源表着色）。
+    """
+    if not bodies_plain:
+        return bodies_plain
+    parse_fn = _nmax_parse_task_value if higher_is_better else _nmax_parse_avg_rank_value
+    indexed: list[tuple[int, float, str]] = []
+    for i, body in enumerate(bodies_plain):
+        v = parse_fn(body)
+        if v is not None:
+            indexed.append((i, v, body.strip()))
+    if not indexed:
+        return list(bodies_plain)
+    values = [t[1] for t in indexed]
+    uniq = _nmax_unique_sorted_values(values, reverse=higher_is_better)
+    v_best = uniq[0]
+    v_second = uniq[1] if len(uniq) > 1 else None
+    out = list(bodies_plain)
+    for i, v, body in indexed:
+        if np.isclose(v, v_best, rtol=1e-5, atol=1e-8):
+            out[i] = r"\textbf{\textcolor{blue}{" + body + "}}"
+        elif v_second is not None and np.isclose(
+            v, v_second, rtol=1e-5, atol=1e-8
+        ):
+            out[i] = r"\textbf{\textcolor{violet}{" + body + "}}"
+        else:
+            out[i] = body
+    return out
 
 
 def rank_colorize_latex_cells(cells: list[str]) -> list[str]:
@@ -832,6 +1079,67 @@ def stats_cell_latex(
     return fmt_pm_latex(st.get("max_mean"), st.get("max_std"))
 
 
+def stats_cell_latex_nmax(
+    bucket: dict[str, dict[str, dict[str, Any]]], exp: str, task_key: str
+) -> str:
+    if not exp:
+        return "--"
+    exp_tasks = bucket.get(exp)
+    if not exp_tasks:
+        return "--"
+    st = exp_tasks.get(task_key)
+    if not st:
+        return "--"
+    return fmt_pm_latex(st.get("nmax_mean"), st.get("nmax_std"))
+
+
+def _mean_nmax_from_task_stats(st: dict[str, Any] | None) -> float | None:
+    if st is None:
+        return None
+    m = st.get("nmax_mean")
+    if m == "" or m is None:
+        return None
+    try:
+        v = float(m)
+    except (TypeError, ValueError):
+        return None
+    if np.isnan(v):
+        return None
+    return v
+
+
+def column_mean_rank_stats_higher_nan_worst(
+    means: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    与 ``column_mean_rank_stats`` 相同，但每行中 **nan 视为该任务上最差**（用于 nmax 表缺测格）。
+    """
+    n_tasks, n_cols = means.shape
+    ranks = np.full((n_tasks, n_cols), np.nan, dtype=np.float64)
+    for i in range(n_tasks):
+        row = means[i].astype(np.float64)
+        fin = row[np.isfinite(row)]
+        if fin.size == 0:
+            continue
+        lo = float(np.min(fin))
+        row_f = row.copy()
+        row_f[~np.isfinite(row_f)] = lo - 1.0 - max(abs(lo), 1.0) * 1e-6
+        r = rankdata(-row_f, method="average")
+        ranks[i, :] = r
+    mu = np.empty(n_cols, dtype=np.float64)
+    sd = np.empty(n_cols, dtype=np.float64)
+    for j in range(n_cols):
+        col = ranks[:, j]
+        fin = col[np.isfinite(col)]
+        if fin.size == 0:
+            mu[j] = np.nan
+            sd[j] = np.nan
+        else:
+            mu[j] = float(np.mean(fin))
+            sd[j] = float(np.std(fin, ddof=1)) if fin.size > 1 else 0.0
+    return mu, sd
+
+
 # --- 12 列矩阵：单任务 / 局部 multi(label) / 全部 multi(label) / 局部 multi(text) / 全部 multi(text) × returns ---
 
 RETCOND_INFIX = "_retcond"
@@ -897,7 +1205,7 @@ def _matrix12_text_cell(
     full_multitask: bool,
     latex: bool,
 ) -> str:
-    """text：先尝试旧 ``multitask_*_textcond`` 键；再试 ``text_conditioned_only/<token>_frac*/``；全任务用 ``all_*`` 下 hyper。"""
+    """text：先尝试旧 ``multitask_*_textcond`` 键；再在 ``text_conditioned_only/…/<hyper>/`` 下按任务取最优 hyper。"""
     for suf in text_suffixes:
         exp = (
             _mfull_text_exp_name(use_returns, suf)
@@ -911,7 +1219,8 @@ def _matrix12_text_cell(
                     return fmt_pm_latex(st.get("max_mean"), st.get("max_std"))
                 return fmt_pm(st.get("max_mean"), st.get("max_std"))
     if full_multitask:
-        k = _pick_gtgdfgo_all_frac_text_key(bucket, use_returns)
+        ap = gtgdfgo_all_text_prefix()
+        k = best_gtgdfgo_exp_for_task(bucket, ap, task_key, use_returns)
         if k and k in bucket:
             st = bucket[k].get(task_key)
             if st is not None:
@@ -919,13 +1228,15 @@ def _matrix12_text_cell(
                     return fmt_pm_latex(st.get("max_mean"), st.get("max_std"))
                 return fmt_pm(st.get("max_mean"), st.get("max_std"))
     else:
-        base = gtgdfgo_subgroup_text_key(task_key, use_returns)
-        if base and base in bucket:
-            st = bucket[base].get(task_key)
-            if st is not None:
-                if latex:
-                    return fmt_pm_latex(st.get("max_mean"), st.get("max_std"))
-                return fmt_pm(st.get("max_mean"), st.get("max_std"))
+        sp = gtgdfgo_subgroup_text_prefix(task_key)
+        if sp:
+            k = best_gtgdfgo_exp_for_task(bucket, sp, task_key, use_returns)
+            if k and k in bucket:
+                st = bucket[k].get(task_key)
+                if st is not None:
+                    if latex:
+                        return fmt_pm_latex(st.get("max_mean"), st.get("max_std"))
+                    return fmt_pm(st.get("max_mean"), st.get("max_std"))
     if latex:
         return "--"
     return "—"
@@ -940,12 +1251,22 @@ def matrix12_row(
     uniso_cell: str = "—",
     latex: bool = False,
 ) -> dict[str, Any]:
-    """单行：task + UniSO（best）+ 12 列 max 的 mean±std（Markdown/CSV 用 —；LaTeX 用 latex=True）。"""
+    """单行：task + UniSO-T（Improved）+ 12 列 max 的 mean±std（Markdown/CSV 用 —；LaTeX 用 latex=True）。"""
 
     def F(bucket: dict[str, dict[str, dict[str, Any]]], exp: str) -> str:
         if not latex:
             return _stats_cell_pm(bucket, exp, task_key)
         return _stats_cell_pm_latex(bucket, exp, task_key)
+
+    def G(
+        bucket: dict[str, dict[str, dict[str, Any]]],
+        prefix: str | None,
+        use_ret: bool,
+    ) -> str:
+        if not prefix:
+            return "--" if latex else "—"
+        bk = best_gtgdfgo_exp_for_task(bucket, prefix, task_key, use_ret)
+        return F(bucket, bk or "")
 
     out: dict[str, Any] = {"task": task_key}
     if latex:
@@ -962,16 +1283,16 @@ def matrix12_row(
         )
     out["c01_gtg_st"] = F(gtg, _single_exp_name(task_key, False))
     out["c02_gtg_st_ret"] = F(gtg, _single_exp_name(task_key, True))
-    out["c03_gdf_st"] = F(gtgdfgo, gtgdfgo_single_task_key(task_key, False))
-    out["c04_gdf_st_ret"] = F(gtgdfgo, gtgdfgo_single_task_key(task_key, True))
-    out["c05_gdf_msub_l"] = F(
-        gtgdfgo, gtgdfgo_subgroup_multitask_key(task_key, False) or ""
+    out["c03_gdf_st"] = G(gtgdfgo, gtgdfgo_single_task_prefix(task_key), False)
+    out["c04_gdf_st_ret"] = G(gtgdfgo, gtgdfgo_single_task_prefix(task_key), True)
+    out["c05_gdf_msub_l"] = G(
+        gtgdfgo, gtgdfgo_subgroup_multitask_prefix(task_key), False
     )
-    out["c06_gdf_msub_l_ret"] = F(
-        gtgdfgo, gtgdfgo_subgroup_multitask_key(task_key, True) or ""
+    out["c06_gdf_msub_l_ret"] = G(
+        gtgdfgo, gtgdfgo_subgroup_multitask_prefix(task_key), True
     )
-    out["c07_gdf_mfull_l"] = F(gtgdfgo, gtgdfgo_full_multitask_key(False))
-    out["c08_gdf_mfull_l_ret"] = F(gtgdfgo, gtgdfgo_full_multitask_key(True))
+    out["c07_gdf_mfull_l"] = G(gtgdfgo, gtgdfgo_full_multitask_prefix(), False)
+    out["c08_gdf_mfull_l_ret"] = G(gtgdfgo, gtgdfgo_full_multitask_prefix(), True)
     out["c09_gdf_msub_t"] = _matrix12_text_cell(
         gtgdfgo, task_key, False, text_suffixes, full_multitask=False, latex=latex
     )
@@ -988,7 +1309,7 @@ def matrix12_row(
 
 
 MATRIX12_COLUMN_KEYS: list[tuple[str, str]] = [
-    ("c00_uniso", "UniSO (best)"),
+    ("c00_uniso", "UniSO-T"),
     ("c01_gtg_st", "GTG 单任务"),
     ("c02_gtg_st_ret", "GTG 单任务+ret"),
     ("c03_gdf_st", "DFGO 单任务"),
@@ -1032,37 +1353,6 @@ def write_matrix12_csv(path: Path, rows: list[dict[str, Any]]) -> None:
             w.writerow({fn: row.get(fn, "") for fn in fieldnames})
 
 
-def write_matrix12_markdown(
-    path: Path,
-    gtg_root: Path,
-    gtgdfgo_root: Path,
-    rows: list[dict[str, Any]],
-    text_suffixes: Sequence[str],
-) -> None:
-    hdr = "| task | " + " | ".join(h for _, h in MATRIX12_COLUMN_KEYS) + " |"
-    sep = "|------|" + "|".join(["--------"] * len(MATRIX12_COLUMN_KEYS)) + "|"
-    _suf_desc = ", ".join(f"`{s}`" for s in text_suffixes)
-    lines = [
-        "# Evaluate 12 列对比矩阵（max_ep_reward mean ± std）",
-        "",
-        f"- GTG results: `{gtg_root}`",
-        f"- GTGdfgo results: `{gtgdfgo_root}`",
-        f"- 文本多任务目录后缀（按序尝试首个有数据的目录）: {_suf_desc}",
-        "",
-        "列为：GTG 单任务 × (无 ret / +ret)，DFGO 单任务 ×2，局部 multi(label)、全部 multi(label)、"
-        "局部 multi(text)、全部 multi(text) 各 × (无 ret / +ret)。",
-        "无 `_retcond` 后缀即 **未** 开 `USE_RETURNS` / `returns_condition` 的实验目录。",
-        "",
-        hdr,
-        sep,
-    ]
-    for row in rows:
-        cells = [row["task"]] + [row[k] for k, _ in MATRIX12_COLUMN_KEYS]
-        lines.append("| " + " | ".join(str(c) for c in cells) + " |")
-    lines.append("")
-    path.write_text("\n".join(lines), encoding="utf-8")
-
-
 def write_matrix12_latex(
     path: Path,
     caption: str,
@@ -1072,10 +1362,10 @@ def write_matrix12_latex(
     text_suffixes: Sequence[str],
     uniso_by_task: dict[str, str],
 ) -> None:
-    """与 ``write_latex`` 相同版式：含 UniSO（best）列与 Mean rank 行。"""
+    """与 ``write_latex`` 相同版式：含 UniSO-T 列与 Mean rank 行。"""
     lines = [
         r"% Requires: \usepackage{booktabs}, \usepackage{graphicx}, \usepackage{xcolor}.",
-        r"% Per row: best / runner-up across UniSO + 12 method columns.",
+        r"% Per row: best / runner-up across UniSO-T + 12 method columns.",
         r"\begin{table*}[t!]",
         rf"\caption{{{caption}}}",
         r"\vspace{0.3em}",
@@ -1083,7 +1373,7 @@ def write_matrix12_latex(
         r"\resizebox{\linewidth}{!}{",
         r"\begin{tabular}{l|c|c|c|*{12}{c}}",
         r"\toprule",
-        r"Task & \shortstack{UniSO\\best} & \shortstack{GTG\\ST} & \shortstack{GTG\\ST+r} & \shortstack{DFGO\\ST} & \shortstack{DFGO\\ST+r} & "
+        r"Task & \shortstack{UniSO-T} & \shortstack{GTG\\ST} & \shortstack{GTG\\ST+r} & \shortstack{DFGO\\ST} & \shortstack{DFGO\\ST+r} & "
         r"\shortstack{DFGO\\subL} & \shortstack{DFGO\\subL+r} & \shortstack{DFGO\\fullL} & \shortstack{DFGO\\fullL+r} & "
         r"\shortstack{DFGO\\subT} & \shortstack{DFGO\\subT+r} & \shortstack{DFGO\\fullT} & \shortstack{DFGO\\fullT+r} \\",
         r"\midrule",
@@ -1148,7 +1438,7 @@ def collect_all_experiment_keys(
     results_root: Path,
 ) -> list[str]:
     """
-    ``eval_comparison_all``：``text_conditioned_only/<EVAL_ALL_TASK_FRAC_SIG>/`` 下
+    ``text_conditioned_result_analysis``：``text_conditioned_only/<EVAL_ALL_TASK_FRAC_SIG>/`` 下
     每个**直接子目录**（超参文件夹名 = 关键参数）一列 DFGO；列顺序为目录名字典序。
     """
     base = results_root / TEXT_CONDITIONED_ROOT / EVAL_ALL_TASK_FRAC_SIG
@@ -1176,7 +1466,7 @@ def _tex_col_short_name(exp_key: str) -> str:
 
 
 def _tex_col_all_hyper_param_name(exp_key: str) -> str:
-    """eval_comparison_all 列名：仅超参目录名（w1.2_*、NxH_k_eps、_ret 等）。"""
+    """text_conditioned_result_analysis 列名：仅超参目录名（w1.2_*、NxH_k_eps、_ret 等）。"""
     pfx = f"{EVAL_ALL_EXPERIMENT_PREFIX}/"
     if exp_key.startswith(pfx):
         return exp_key[len(pfx) :]
@@ -1205,7 +1495,7 @@ def write_latex_all_fulltext(
     exp_keys = collect_all_experiment_keys(gtgdfgo, gtgdfgo_root)
     if not exp_keys:
         path.write_text(
-            rf"% No data for eval_comparison_all (expected subdirs under {EVAL_ALL_EXPERIMENT_PREFIX}/ with evaluate.log).\n",
+            rf"% No data for text_conditioned_result_analysis (expected subdirs under {EVAL_ALL_EXPERIMENT_PREFIX}/ with evaluate.log).\n",
             encoding="utf-8",
         )
         return
@@ -1215,12 +1505,12 @@ def write_latex_all_fulltext(
         _latex_sig_header(_tex_col_all_hyper_param_name(k)) for k in exp_keys
     )
     hdr_row = (
-        r"Task & $\mathcal{D}$(best) & \shortstack{UniSO\\best} & \shortstack{GTG\\ST} & "
+        r"Task & $\mathcal{D}$(best) & \shortstack{UniSO-T} & \shortstack{GTG\\ST} & "
         r"\shortstack{GTG\\ST+r} & " + hdr_dfgo + r" \\"
     )
     lines = [
         r"% Requires: \usepackage{booktabs}, \usepackage{graphicx}, \usepackage{xcolor}.",
-        r"% Blocks: Task+D(best) | UniSO | GTG ST/ST+r | DFGO (text_conditioned_only/all_frac…).",
+        r"% Blocks: Task+D(best) | UniSO-T | GTG ST/ST+r | DFGO (text_conditioned_only/all_frac…).",
         r"\begin{table*}[t!]",
         rf"\caption{{{caption}}}",
         r"\vspace{0.3em}",
@@ -1287,7 +1577,7 @@ def write_latex(
 ) -> None:
     lines = [
         r"% Requires: \usepackage{booktabs}, \usepackage{graphicx}, \usepackage{xcolor}.",
-        r"% Per row: best / runner-up among UniSO (best) + GTG + three GTGdfgo columns.",
+        r"% Per row: best / runner-up among UniSO-T + GTG + three GTGdfgo columns.",
         r"\begin{table*}[t!]",
         rf"\caption{{{caption}}}",
         r"\vspace{0.3em}",
@@ -1295,7 +1585,7 @@ def write_latex(
         r"\resizebox{\linewidth}{!}{",
         r"\begin{tabular}{l|c|c|c|ccc}",
         r"\toprule",
-        r"Task & $\mathcal{D}$(best) & \shortstack{UniSO\\best} & GTG & GTGdfgo (single) & GTGdfgo (multi, subgroup) & GTGdfgo (multi, all tasks) \\",
+        r"Task & $\mathcal{D}$(best) & \shortstack{UniSO-T} & GTG & GTGdfgo (single) & GTGdfgo (multi, subgroup) & GTGdfgo (multi, all tasks) \\",
         r"\midrule",
     ]
     n_rows = len(LATEX_TASK_ROWS)
@@ -1305,26 +1595,29 @@ def write_latex(
         u_raw = uniso_by_task.get(task_key, "")
         u_cell = u_raw if u_raw else "--"
         gtg_c = stats_cell_latex(gtg, exp_name, task_key)
-        g1 = stats_cell_latex(
-            gtgdfgo, gtgdfgo_single_task_key(task_key, False), task_key
+        k1 = best_gtgdfgo_exp_for_task(
+            gtgdfgo, gtgdfgo_single_task_prefix(task_key), task_key, False
         )
-        g_sub = stats_cell_latex(
-            gtgdfgo, gtgdfgo_subgroup_multitask_key(task_key, False) or "", task_key
+        g1 = stats_cell_latex(gtgdfgo, k1 or "", task_key)
+        sp = gtgdfgo_subgroup_multitask_prefix(task_key)
+        ksub = (
+            best_gtgdfgo_exp_for_task(gtgdfgo, sp, task_key, False) if sp else None
         )
-        g_full = stats_cell_latex(
-            gtgdfgo, gtgdfgo_full_multitask_key(False), task_key
+        g_sub = stats_cell_latex(gtgdfgo, ksub or "", task_key)
+        kfull = best_gtgdfgo_exp_for_task(
+            gtgdfgo, gtgdfgo_full_multitask_prefix(), task_key, False
         )
+        g_full = stats_cell_latex(gtgdfgo, kfull or "", task_key)
         u_m = parse_mean_from_text_cell(u_cell)
         gtg_m = _mean_from_task_stats(gtg.get(exp_name, {}).get(task_key))
         g1_m = _mean_from_task_stats(
-            gtgdfgo.get(gtgdfgo_single_task_key(task_key, False), {}).get(task_key)
+            gtgdfgo.get(k1, {}).get(task_key) if k1 else None
         )
-        gsk = gtgdfgo_subgroup_multitask_key(task_key, False)
         gsub_m = _mean_from_task_stats(
-            gtgdfgo.get(gsk, {}).get(task_key) if gsk else None
+            gtgdfgo.get(ksub, {}).get(task_key) if ksub else None
         )
         gfull_m = _mean_from_task_stats(
-            gtgdfgo.get(gtgdfgo_full_multitask_key(False), {}).get(task_key)
+            gtgdfgo.get(kfull, {}).get(task_key) if kfull else None
         )
         means_w[ri, 0] = np.nan if u_m is None else u_m
         means_w[ri, 1] = np.nan if gtg_m is None else gtg_m
@@ -1344,6 +1637,146 @@ def write_latex(
         [
             r"\midrule",
             "Mean rank & / & " + " & ".join(rank_parts) + r" \\",
+            r"\bottomrule",
+            r"\end{tabular}",
+            r"}",
+            rf"\label{{{label}}}",
+            r"\end{table*}",
+            "",
+        ]
+    )
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def write_latex_nmax_design_bench(
+    path: Path,
+    _gtgdfgo_root: Path,
+    _gtg: dict[str, dict[str, dict[str, Any]]],
+    gtgdfgo: dict[str, dict[str, dict[str, Any]]],
+    _d_best_overrides: dict[str, float],
+    uniso_nresult_path: Path,
+    caption: str,
+    label: str,
+) -> None:
+    """
+    归一化分数：基线行为 ``uniso_nresult.tex`` 全文；DFGO 为日志中
+    ``nmax_ep_reward``（与 evaluate 中 ``(y-f.min)/(f.max-f.min)`` 一致，与表内基线可比）。
+    """
+    parsed = parse_uniso_nresult_rows(uniso_nresult_path)
+    if not parsed:
+        path.write_text(
+            rf"% Missing or empty {uniso_nresult_path.name} (normalized Design-Bench table).\n",
+            encoding="utf-8",
+        )
+        return
+    n_t = len(DESIGN_BENCH_TASK_ORDER)
+    n_base = len(parsed)
+    means_all = np.full((n_t, n_base + 2), np.nan, dtype=np.float64)
+    for ti in range(n_t):
+        for j in range(n_base):
+            v = parse_mean_from_text_cell(parsed[j][2][ti])
+            means_all[ti, j] = np.nan if v is None else v
+        tk = DESIGN_BENCH_TASK_ORDER[ti]
+        k1 = best_gtgdfgo_exp_for_task(
+            gtgdfgo, gtgdfgo_single_task_prefix(tk), tk, False
+        )
+        g1m = _mean_nmax_from_task_stats(
+            gtgdfgo.get(k1, {}).get(tk) if k1 else None
+        )
+        means_all[ti, n_base] = np.nan if g1m is None else g1m
+        kfull = best_gtgdfgo_exp_for_task(
+            gtgdfgo, gtgdfgo_full_multitask_prefix(), tk, False
+        )
+        if tk == "superconductor":
+            means_all[ti, n_base + 1] = np.nan
+        else:
+            gfm = _mean_nmax_from_task_stats(
+                gtgdfgo.get(kfull, {}).get(tk) if kfull else None
+            )
+            means_all[ti, n_base + 1] = np.nan if gfm is None else gfm
+    mu_r, _sd_r = column_mean_rank_stats_higher_nan_worst(means_all)
+    n_rank_total = nmax_avg_rank_denominator_total(n_base, parsed)
+    rank_dfgo_s_plain = nmax_fmt_dfgo_avg_rank(mu_r[n_base], n_rank_total)
+    rank_dfgo_m_plain = nmax_fmt_dfgo_avg_rank(mu_r[n_base + 1], n_rank_total)
+    g1_cells: list[str] = []
+    gm_cells: list[str] = []
+    for ti, task_key in enumerate(DESIGN_BENCH_TASK_ORDER):
+        k1 = best_gtgdfgo_exp_for_task(
+            gtgdfgo, gtgdfgo_single_task_prefix(task_key), task_key, False
+        )
+        g1_cells.append(stats_cell_latex_nmax(gtgdfgo, k1 or "", task_key))
+        kfull = best_gtgdfgo_exp_for_task(
+            gtgdfgo, gtgdfgo_full_multitask_prefix(), task_key, False
+        )
+        if task_key == "superconductor":
+            gm_cells.append("--")
+        else:
+            gm_cells.append(stats_cell_latex_nmax(gtgdfgo, kfull or "", task_key))
+    n_row = n_base + 2
+    # 列方向：先剥掉源表行内着色，再与 DFGO 一起按数值重算蓝/紫（任务列越大越好，Avg.\ Rank 越小越好）
+    task_cols_plain: list[list[str]] = [[] for _ in range(5)]
+    for ti in range(5):
+        col: list[str] = []
+        for j in range(n_base):
+            col.append(latex_cell_strip_wrappers(parsed[j][2][ti]))
+        col.append(g1_cells[ti])
+        col.append(gm_cells[ti])
+        task_cols_plain[ti] = col
+    for ti in range(5):
+        task_cols_plain[ti] = nmax_colorize_column_by_value(
+            task_cols_plain[ti], higher_is_better=True
+        )
+    avg_plain: list[str] = [
+        nmax_fix_avg_rank_denominator(
+            latex_cell_strip_wrappers(parsed[j][3]), n_rank_total
+        )
+        for j in range(n_base)
+    ]
+    avg_plain.append(rank_dfgo_s_plain)
+    avg_plain.append(rank_dfgo_m_plain)
+    avg_plain = nmax_colorize_column_by_value(avg_plain, higher_is_better=False)
+    hdr = (
+        r"Method & Venue & Ant & D'Kitty & Superconductor & TF-Bind-8 & TF-Bind-10 & Avg.\ Rank \\"
+    )
+    lines = [
+        r"% Requires: \usepackage{booktabs}, \usepackage{graphicx}, \usepackage{xcolor}.",
+        r"% Baselines: uniso_nresult.tex; per-column blue/violet = best/2nd in this table (tasks: higher better; Avg.\ Rank: lower better).",
+        r"\begin{table*}[t!]",
+        rf"\caption{{{caption}}}",
+        r"\vspace{0.3em}",
+        r"\centering",
+        r"\resizebox{\linewidth}{!}{",
+        r"\begin{tabular}{c|c|ccccc|c}",
+        r"\toprule",
+        hdr,
+        r"\midrule",
+    ]
+    for j, (method, venue, _tasks, _avg) in enumerate(parsed):
+        mcell = _nmax_baseline_method_cell(method)
+        row_tasks = [task_cols_plain[ti][j] for ti in range(5)]
+        lines.append(
+            " & ".join([mcell, venue] + row_tasks + [avg_plain[j]]) + r" \\"
+        )
+        if _nresult_midrule_after_row(method):
+            lines.append(r"\midrule")
+    if parsed and _nresult_midrule_before_dfgo(parsed[-1][0]):
+        lines.append(r"\midrule")
+    lines.append(
+        r"\textbf{DFGO} (single) & / & "
+        + " & ".join(task_cols_plain[ti][n_base] for ti in range(5))
+        + r" & "
+        + avg_plain[n_base]
+        + r" \\"
+    )
+    lines.append(
+        r"\textbf{DFGO} (multi, all tasks) & / & "
+        + " & ".join(task_cols_plain[ti][n_base + 1] for ti in range(5))
+        + r" & "
+        + avg_plain[n_base + 1]
+        + r" \\"
+    )
+    lines.extend(
+        [
             r"\bottomrule",
             r"\end{tabular}",
             r"}",
@@ -1389,90 +1822,60 @@ def fmt_pm(m: Any, s: Any) -> str:
     return f"{mf:.{DECIMALS}f} ± {0:.{DECIMALS}f}"
 
 
-def write_markdown(
-    path: Path,
-    gtgdfgo_root: Path,
-    gtg_root: Path,
-    rows: list[dict[str, Any]],
-) -> None:
-    lines = [
-        "# Evaluate 结果汇总（GTGdfgo vs GTG）",
-        "",
-        f"- GTGdfgo results: `{gtgdfgo_root}`",
-        f"- GTG results: `{gtg_root}`",
-        "",
-        "各实验在多次 run（如 `run*_seed*`）上聚合：**max** / **nmax** 为 `mean ± std`（std 为样本标准差，单次 run 时 std 记为 0）。",
-        "仅统计日志中能解析出 `[task] max_ep_reward` / `nmax_ep_reward` 的 run；评估中断或报错（无上述行）的目录不计入 `n`。",
-        "表格行顺序：单任务按 ant → dkitty → tfbind8 → tfbind10 → gtopx；多任务按联立规模从小到大。",
-        "列 **GTGdfgo 小组 multi** / **全任务 multi**：按当前行的 `task`，分别从对应小组 multitask 实验与 `"
-        + FULL_MULTITASK_EXP
-        + "` 中读取该任务的聚合指标（与左侧 `experiment` 列无关）。",
-        "",
-        "| experiment | task | GTGdfgo n | max | nmax | GTG n | max | nmax | 小组 multi n | 小组 max | 小组 nmax | 全任务 multi n | 全 max | 全 nmax |",
-        "|------------|------|-----------|------|------|-------|------|------|--------------|----------|-----------|----------------|--------|---------|",
-    ]
-    for r in rows:
-        lines.append(
-            "| {exp} | {task} | {gn} | {gmax} | {gnmax} | {cn} | {cmax} | {cnmax} | {msn} | {msmax} | {msnmax} | {mfn} | {mfmax} | {mfnmax} |".format(
-                exp=r["experiment"],
-                task=r["task"],
-                gn=r.get("gtgdfgo_n_runs", "") or "—",
-                gmax=fmt_pm(r.get("gtgdfgo_max_mean"), r.get("gtgdfgo_max_std")),
-                gnmax=fmt_pm(r.get("gtgdfgo_nmax_mean"), r.get("gtgdfgo_nmax_std")),
-                cn=r.get("gtg_n_runs", "") or "—",
-                cmax=fmt_pm(r.get("gtg_max_mean"), r.get("gtg_max_std")),
-                cnmax=fmt_pm(r.get("gtg_nmax_mean"), r.get("gtg_nmax_std")),
-                msn=r.get("gtgdfgo_msub_n_runs", "") or "—",
-                msmax=fmt_pm(r.get("gtgdfgo_msub_max_mean"), r.get("gtgdfgo_msub_max_std")),
-                msnmax=fmt_pm(
-                    r.get("gtgdfgo_msub_nmax_mean"), r.get("gtgdfgo_msub_nmax_std")
-                ),
-                mfn=r.get("gtgdfgo_mfull_n_runs", "") or "—",
-                mfmax=fmt_pm(r.get("gtgdfgo_mfull_max_mean"), r.get("gtgdfgo_mfull_max_std")),
-                mfnmax=fmt_pm(
-                    r.get("gtgdfgo_mfull_nmax_mean"), r.get("gtgdfgo_mfull_nmax_std")
-                ),
-            )
-        )
-    lines.append("")
-    path.write_text("\n".join(lines), encoding="utf-8")
-
-
 # 相对本脚本：GTGdfgo 仓库根；实验日志在 results/；汇总表与 UniSO 输入在 results/analysis_table/。
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 GTGDFGO_RESULTS = _PROJECT_ROOT / "results"
 GTG_RESULTS = _PROJECT_ROOT.parent / "GTG" / "results"
 ANALYSIS_TABLE_DIR = _PROJECT_ROOT / "results" / "analysis_table"
-OUTPUT_BASE = ANALYSIS_TABLE_DIR / "eval_comparison"
-MATRIX12_BASE = ANALYSIS_TABLE_DIR / "eval_comparison_m12"
+OUTPUT_BASE = ANALYSIS_TABLE_DIR / "max_short"
+MATRIX12_BASE = ANALYSIS_TABLE_DIR / "max_extended"
+NMAX_TEX = ANALYSIS_TABLE_DIR / "nmax.tex"
 UNISO_RESULT_TEX = ANALYSIS_TABLE_DIR / "uniso_result.tex"
+UNISO_NRESULT_TEX = ANALYSIS_TABLE_DIR / "uniso_nresult.tex"
 # run_multitask：仅 --use_text_condition → …_textcond；再加 --multitask_text_only → …_textcond_mttextonly。优先匹配后者。
 MATRIX12_TEXT_SUFFIXES: tuple[str, ...] = ("_textcond_mttextonly", "_textcond")
 D_BEST_JSON = ANALYSIS_TABLE_DIR / "d_best.json"
 
 LATEX_CAPTION = (
-    "Un-normalized max scores (mean $\\pm$ std over runs); "
-    "\\shortstack{UniSO\\,best} is the best mean among UniSO-T / UniSO-N columns in "
-    "\\texttt{results/analysis\\_table/uniso\\_result.tex}. "
+    "Un-normalized \\texttt{max\\_ep\\_reward} (mean $\\pm$ std over runs). "
+    "\\textbf{UniSO-T}: the \\textbf{Improved} column under UniSO-T in \\texttt{uniso\\_result.tex} (not the max over UniSO-T/N). "
     "Mean rank: per task, rank methods by mean (higher better); report mean $\\pm$ std across tasks. "
     "$\\mathcal{D}$(best): offline training subset (\\texttt{offline\\_train\\_best\\_y}); "
-    "optional \\texttt{results/analysis\\_table/d\\_best.json} overrides."
+    "optional \\texttt{results/analysis\\_table/d\\_best.json} overrides. "
+    "\\textbf{Hyperparameters (DFGO):} each result subfolder name encodes trajectory settings "
+    "(e.g.\\ \\texttt{4000x64\\_k20\\_eps0.05}), optional \\texttt{\\_ret} for return-conditioning, "
+    "and in text-conditioned multitask a \\texttt{w*} prefix for the text loss weight. "
+    "Per task and training mode, we report the subfolder with the largest mean \\texttt{max\\_ep\\_reward}."
 )
 LATEX_LABEL = "tab:gtg-gtgdfgo-eval"
 LATEX_CAPTION_MATRIX12 = (
-    "Un-normalized max scores (mean $\\pm$ std): UniSO (best) + GTG / DFGO single-task, "
+    "Un-normalized \\texttt{max\\_ep\\_reward} (mean $\\pm$ std): UniSO-T (Improved) + GTG / DFGO single-task, "
     "subgroup vs full multitask (label / text $\\times$ returns). "
-    "Mean rank: per task among UniSO + 12 columns; mean $\\pm$ std across tasks."
+    "Hyperparameter selection matches the wide max-score table. "
+    "Mean rank: per task among UniSO-T + 12 columns; mean $\\pm$ std across tasks."
 )
 LATEX_LABEL_MATRIX12 = "tab:gtg-gtgdfgo-eval-m12"
-OUTPUT_ALL_BASE = ANALYSIS_TABLE_DIR / "eval_comparison_all"
+LATEX_CAPTION_NMAX = (
+    "Normalized scores on the five Design-Bench tasks (same setting as \\texttt{uniso\\_nresult.tex}). "
+    "Baseline rows are copied from that table; \\textbf{DFGO} rows report \\texttt{nmax\\_ep\\_reward} "
+    "(mean $\\pm$ std over runs), i.e.\\ $(y-y_{\\min})/(y_{\\max}-y_{\\min})$ in \\texttt{evaluate.py}, "
+    "comparable to the normalized baselines. "
+    "Hyper selection for DFGO matches the wide max table (best subfolder per task by mean \\texttt{max\\_ep\\_reward}). "
+    "\\textbf{DFGO (multi, all tasks):} Superconductor is blank (not in the original full multitask run); "
+    "missing cells are worst when ranking. "
+    "Avg.\\ Rank for DFGO: mean per-task rank / $N$ ($N$ = pool size, same as baselines)."
+)
+LATEX_LABEL_NMAX = "tab:dfgo-nmax-designbench"
+TEXT_CONDITIONED_RESULT_ANALYSIS_BASE = (
+    ANALYSIS_TABLE_DIR / "text_conditioned_result_analysis"
+)
 _LATEX_ESC_ALL_SIG = EVAL_ALL_TASK_FRAC_SIG.replace("_", r"\_")
 LATEX_CAPTION_ALL = (
     "DFGO (full multitask, text-conditioned): one column per immediate subfolder of "
     f"\\texttt{{results/text\\_conditioned\\_only/{_LATEX_ESC_ALL_SIG}/}} "
     "(folder names encode key hyperparameters, e.g.\\ \\texttt{w1.2\\_}$\\cdots$); "
     "each column pools runs inside that folder only. "
-    "UniSO (best), GTG ST / ST+r, and DFGO. Mean rank: higher mean reward is better; "
+    "UniSO-T (Improved from \\texttt{uniso\\_result.tex}), GTG ST / ST+r, and DFGO. Mean rank: higher mean reward is better; "
     "report mean $\\pm$ std of per-task ranks."
 )
 LATEX_LABEL_ALL = "tab:gtg-gtgdfgo-eval-all-text"
@@ -1498,12 +1901,10 @@ def main(mode: str = "all") -> None:
         rows = enrich_multitask_columns(
             sort_comparison_rows(build_comparison_rows(gtgdfgo, gtg)), gtgdfgo
         )
-        md_path = out_base.with_suffix(".md")
         tex_path = out_base.with_suffix(".tex")
-        md_path.parent.mkdir(parents=True, exist_ok=True)
+        out_base.parent.mkdir(parents=True, exist_ok=True)
 
         write_csv(out_base.with_suffix(".csv"), rows)
-        write_markdown(md_path, GTGDFGO_RESULTS, GTG_RESULTS, rows)
         write_latex(
             tex_path,
             GTGDFGO_RESULTS,
@@ -1514,15 +1915,25 @@ def main(mode: str = "all") -> None:
             label=LATEX_LABEL,
             uniso_by_task=uniso_by_task,
         )
+        write_latex_nmax_design_bench(
+            NMAX_TEX,
+            GTGDFGO_RESULTS,
+            gtg,
+            gtgdfgo,
+            d_best_overrides,
+            UNISO_NRESULT_TEX,
+            caption=LATEX_CAPTION_NMAX,
+            label=LATEX_LABEL_NMAX,
+        )
         print(f"Wrote {out_base.with_suffix('.csv')}")
-        print(f"Wrote {md_path}")
         print(f"Wrote {tex_path}")
+        print(f"Wrote {NMAX_TEX}")
         print(
             f"GTGdfgo experiments: {len(gtgdfgo)}, GTG experiments: {len(gtg)}, comparison rows: {len(rows)}"
         )
 
     if do_final:
-        all_base = OUTPUT_ALL_BASE
+        all_base = TEXT_CONDITIONED_RESULT_ANALYSIS_BASE
         all_base.parent.mkdir(parents=True, exist_ok=True)
         write_latex_all_fulltext(
             all_base.with_suffix(".tex"),
@@ -1543,13 +1954,6 @@ def main(mode: str = "all") -> None:
         )
         mbase.parent.mkdir(parents=True, exist_ok=True)
         write_matrix12_csv(mbase.with_suffix(".csv"), mrows)
-        write_matrix12_markdown(
-            mbase.with_suffix(".md"),
-            GTG_RESULTS,
-            GTGDFGO_RESULTS,
-            mrows,
-            MATRIX12_TEXT_SUFFIXES,
-        )
         write_matrix12_latex(
             mbase.with_suffix(".tex"),
             LATEX_CAPTION_MATRIX12,
@@ -1560,7 +1964,6 @@ def main(mode: str = "all") -> None:
             uniso_by_task,
         )
         print(f"Wrote {mbase.with_suffix('.csv')}")
-        print(f"Wrote {mbase.with_suffix('.md')}")
         print(f"Wrote {mbase.with_suffix('.tex')}")
         print(
             f"Matrix12 rows: {len(mrows)} (tasks with subgroup multitask mapping)"
@@ -1577,9 +1980,9 @@ def _parse_args() -> argparse.Namespace:
         default="all",
         help=(
             "Which outputs to generate: "
-            "short = analysis_table/eval_comparison (wide CSV/MD/TeX); "
-            "full = analysis_table/eval_comparison_m12 (13-column matrix); "
-            "final = analysis_table/eval_comparison_all (DFGO: one column per hyper subdir under all_frac…); "
+            "short = analysis_table/max_short (wide CSV+TeX) and nmax.tex; "
+            "full = analysis_table/max_extended (13-column matrix CSV+TeX); "
+            "final = analysis_table/text_conditioned_result_analysis (DFGO: one column per hyper subdir under all_frac…); "
             "all = three tables (default)."
         ),
     )

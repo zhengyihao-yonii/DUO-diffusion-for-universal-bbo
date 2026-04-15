@@ -63,6 +63,7 @@ class Trainer(object):
         train_device='cuda',
         save_checkpoints=False,
         load_checkpoint=None,
+        load_checkpoint_path=None,
         load_proxy_checkpoint=None,
         proxy_save_prefix=None,
     ):
@@ -132,7 +133,9 @@ class Trainer(object):
 
         self.device = train_device
         
-        if load_checkpoint is not None:
+        if load_checkpoint_path is not None:
+            self.load_from_path(load_checkpoint_path)
+        elif load_checkpoint is not None:
             self.load(epoch=load_checkpoint)
             self.step = load_checkpoint
             
@@ -376,6 +379,13 @@ class Trainer(object):
         # data = logger.load_torch(loadpath)
         data = torch.load(loadpath)
         self.proxy_model.load_state_dict(data['model'])
+
+    def load_from_path(self, loadpath: str):
+        """从任意路径加载扩散与 EMA（用于 few-shot 微调，基座 checkpoint 不在当前 RUN.prefix 下）。"""
+        data = torch.load(loadpath, map_location=self.device)
+        self.step = int(data.get('step', 0))
+        self.model.load_state_dict(data['model'])
+        self.ema_model.load_state_dict(data['ema'])
 
     def load(self, epoch):
         '''

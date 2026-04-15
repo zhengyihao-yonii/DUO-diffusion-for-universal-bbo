@@ -1,4 +1,4 @@
-"""轨迹构建 / VAE 阶段的设备与距离矩阵辅助（减轻 CPU 占用、优先用 GPU）。"""
+"""轨迹构建阶段的设备与 pairwise 距离矩阵（与 GTG-main 一致，供 construct_trajectories 预计算 L2 矩阵）。"""
 from __future__ import annotations
 
 import os
@@ -7,11 +7,6 @@ import torch
 
 
 def resolve_torch_device(explicit: str | None = None) -> torch.device:
-    """
-    - explicit: 非空时直接使用，如 ``cuda:0``、``cpu``。
-    - 否则读环境变量 ``GTG_DEVICE``（若设置）。
-    - 否则：有 CUDA 则 ``cuda``，否则 ``cpu``。
-    """
     if explicit is not None and str(explicit).strip():
         return torch.device(str(explicit).strip())
     env = os.environ.get("GTG_DEVICE", "").strip()
@@ -22,11 +17,8 @@ def resolve_torch_device(explicit: str | None = None) -> torch.device:
 
 def pairwise_l2_distance_matrix(points: torch.Tensor, chunk_rows: int = 1024) -> torch.Tensor:
     """
-    计算 ``points`` (N, D) 的全 pairwise L2 距离矩阵 (N, N)，结果在 **CPU** float32，
-    供后续轨迹算法原地改写 ``distances[...]`` 使用。
-
-    - 默认在 CUDA 可用且未设置 ``GTG_DISTANCE_ON_GPU=0`` 时用 GPU 分块计算，减轻 CPU 压力。
-    - 否则在 CPU 上用 ``torch.cdist`` 一次性计算（仍远快于逐行 Python 循环）。
+    计算 ``points`` (N, D) 的全 pairwise L2 距离矩阵 (N, N)，结果在 **CPU** float32。
+    与 GTG-main 一致：CUDA 可用且未设置 ``GTG_DISTANCE_ON_GPU=0`` 时用 GPU 分块写回 CPU。
     """
     points = points.detach().float().contiguous()
     n = points.shape[0]

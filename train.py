@@ -103,6 +103,24 @@ if __name__ == '__main__':
         default=200,
         help="扩散训练 epoch 数；n_train_steps = train_epochs * n_steps_per_epoch（默认 200）",
     )
+    parser.add_argument(
+        "--fewshot_text_only_finetune",
+        action="store_true",
+        default=False,
+        help="Few-shot：单任务 + 仅文本条件，从 --load_diffusion_checkpoint 加载全任务预训练权重后微调",
+    )
+    parser.add_argument(
+        "--load_diffusion_checkpoint",
+        type=str,
+        default=None,
+        help="预训练扩散 checkpoint 的 .pt 路径（含 model/ema），用于 few-shot 微调",
+    )
+    parser.add_argument(
+        "--load_diffusion_checkpoint_epoch",
+        type=int,
+        default=None,
+        help="若未指定 --load_diffusion_checkpoint，可填 epoch 从当前 RUN.prefix 下加载（一般不用）",
+    )
 
     args = parser.parse_args(_cli_args)
 
@@ -128,7 +146,11 @@ if __name__ == '__main__':
         if not args.eval_task:
             args.eval_task = train_tasks_list[0]
 
-    if getattr(args, "multitask_text_only", False) and not is_multitask:
+    if (
+        getattr(args, "multitask_text_only", False)
+        and not is_multitask
+        and not getattr(args, "fewshot_text_only_finetune", False)
+    ):
         raise SystemExit(
             "错误: --multitask_text_only 仅适用于多任务（train_tasks 需为逗号分隔的多个任务）"
         )
@@ -138,7 +160,11 @@ if __name__ == '__main__':
     _mto = multitask_text_only_path_infix(args)
     # 根据任务数量设置数据路径
     if is_multitask:
-        from diffuser.utils.traj_params import prepare_multitask_traj
+        from diffuser.utils.traj_params import (
+            multitask_checkpoint_hyper_dir,
+            multitask_mixed_basename,
+            prepare_multitask_traj,
+        )
 
         train_tasks_str = multitask_path_token(args.train_tasks)
         n_d, k_d, e_d, sig = prepare_multitask_traj(
@@ -149,19 +175,22 @@ if __name__ == '__main__':
             args.horizon,
             args.traj_params_json,
         )
-        args.data_path = f"generated_datasets/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{sig}_vae_latent32_train.p"
+        # dirname 指向 multi_*；短文件名 mixed_mt_<hash>.p（完整 sig 见 multitask_slug_manifest.json）
+        args.data_path = f"generated_datasets/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{multitask_mixed_basename(sig)}"
         args.multitask_traj_signature = sig
         args.traj_n_traj_dict = n_d
         args.traj_k_dict = k_d
         args.traj_eps_dict = e_d
-        RUN.prefix = f"trained_models/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{sig}{_ret}{_txt}{_mto}/seed{args.seed}/"
+        _hyper = multitask_checkpoint_hyper_dir(sig, _ret, _txt, _mto)
+        RUN.prefix = f"trained_models/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{_hyper}/seed{args.seed}/"
     else:
         # 单任务模式，保持原有格式，与dfgo-main一致
         task_name = train_tasks_list[0]
         if not args.eval_task:
             args.eval_task = task_name
         args.data_path = f'generated_datasets/{task_name}_frac{args.frac}_sigma{args.sigma}/{task_name}_{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}_vae_latent32_train.p'
-        RUN.prefix = f"trained_models/{task_name}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}{_ret}{_txt}{_mto}/seed{args.seed}/"
+        _few = "_fewshot_ft" if getattr(args, "fewshot_text_only_finetune", False) else ""
+        RUN.prefix = f"trained_models/{task_name}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}{_few}{_ret}{_txt}{_mto}/seed{args.seed}/"
     
     logger.print(RUN.prefix, color='green')
     jaynes.config("local")

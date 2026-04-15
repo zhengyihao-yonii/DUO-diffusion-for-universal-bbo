@@ -21,6 +21,11 @@ import argparse
 import design_bench
 from tqdm import tqdm
 import pickle as pkl
+from diffuser.datasets.real_world_fewshot import (
+    REAL_WORLD_FEWSHOT_TASK_SPECS,
+    is_real_world_fewshot_task,
+    load_real_world_for_pipeline,
+)
 from diffuser.utils.soo_gtopx import (
     TASKNAME_TO_VAR_NUM,
     load_gtopx_offline_arrays,
@@ -62,6 +67,9 @@ def get_original_observation_dim(task_name):
         'tfbind8': 8,  # TFBind8的原始维度
         'tfbind10': 10,# TFBind10的原始维度
         'superconductor': 86,  # 超导体任务的原始维度
+        'lunar_lander': 12,
+        'robot_push': 14,
+        'rover': 60,
     }
     if is_gtopx_task(task_name):
         return TASKNAME_TO_VAR_NUM[task_name]
@@ -88,7 +96,14 @@ def main(args):
         task_list = sorted(t.strip() for t in args.tasks.split(",") if t.strip())
         args.tasks = ",".join(task_list)
         print(f"多任务模式，加载任务列表: {task_list}")
-        
+        rw_in_mt = [t for t in task_list if is_real_world_fewshot_task(t)]
+        if rw_in_mt:
+            raise ValueError(
+                "few-shot 与 real-world 实验仅支持单任务；多任务列表含 real-world（%s）已禁止。"
+                "请只跑一个 real-world 任务，并用 --pretrained_vae_info 在 few-shot 数据上微调 VAE。"
+                % ", ".join(rw_in_mt)
+            )
+
         all_data = []
         for task_name in tqdm(task_list, desc="加载任务数据"):
             print(f"加载任务: {task_name}")
@@ -97,6 +112,8 @@ def main(args):
                     task_name, frac=args.frac, sigma=0.0, seed=soo_seed
                 )
                 data_x = torch.from_numpy(x_np).float()
+            elif is_real_world_fewshot_task(task_name):
+                raise ValueError("多任务不应包含 real-world（已在前面拒绝）")
             else:
                 task = design_bench.make(TASKNAME2TASK[task_name],
                                        dataset_kwargs=dict(
@@ -125,11 +142,30 @@ def main(args):
             raise ValueError("必须指定 --task 或 --tasks 参数")
         
         print(f"单任务模式，加载任务: {args.task}")
+        if (
+            is_real_world_fewshot_task(args.task)
+            and not getattr(args, "pretrained_vae_info", None)
+        ):
+            raise ValueError(
+                "real-world 任务需在多任务预训练权重上微调：请指定 --pretrained_vae_info 指向 "
+                "仅含 Design-Bench 等任务的 vae_info.p（例如 multi_* 目录下的 vae_info.p）。"
+            )
         if is_gtopx_task(args.task):
             x_np, _, _, _, _ = load_gtopx_offline_arrays(
                 args.task, frac=args.frac, sigma=0.0, seed=soo_seed
             )
             data_x = torch.from_numpy(x_np).float()
+        elif is_real_world_fewshot_task(args.task):
+            proc, _, _ = load_real_world_for_pipeline(
+                args.task,
+                fixed_length=args.fixed_dim,
+                frac=args.frac,
+                sigma=args.sigma,
+                fewshot_k=getattr(args, "fewshot_k", None),
+                fewshot_mode=getattr(args, "fewshot_mode", "all"),
+                fewshot_seed=int(getattr(args, "fewshot_seed", soo_seed)),
+            )
+            data_x = torch.from_numpy(np.asarray(proc, dtype=np.float32)).float()
         else:
             task = design_bench.make(TASKNAME2TASK[args.task],
                                     dataset_kwargs=dict(
@@ -151,7 +187,26 @@ def main(args):
         
         # 生成单任务模型保存路径
         task_str = args.task
-    
+
+    finetune_rw = False
+    pretrained_vae_info_dict = None
+    if (
+        not is_multitask
+        and getattr(args, "task", None)
+        and is_real_world_fewshot_task(args.task)
+        and getattr(args, "pretrained_vae_info", None)
+    ):
+        finetune_rw = True
+        with open(args.pretrained_vae_info, "rb") as f:
+            pretrained_vae_info_dict = pkl.load(f)
+        args.latent_dim = int(pretrained_vae_info_dict.get("latent_dim", args.latent_dim))
+        _pfd = int(pretrained_vae_info_dict.get("fixed_dim", input_dim))
+        if _pfd != input_dim:
+            print(
+                f"注意: 预训练 vae_info 中 fixed_dim={_pfd}，当前 input_dim={input_dim}；"
+                "请与预训练时 --fixed_dim 一致。"
+            )
+
     # 设置VAE模型参数
     vae_config = {
         'input_dim': input_dim,
@@ -161,9 +216,10 @@ def main(args):
         'num_layers': args.num_layers,
         'dropout': args.dropout
     }
-    
+
+    _rw_suffix = "_rwft" if finetune_rw else ""
     # 生成模型保存路径
-    model_save_dir = f"trained_models/vae/{task_str}_frac{args.frac}_sigma{args.sigma}_dim{input_dim}"
+    model_save_dir = f"trained_models/vae/{task_str}_frac{args.frac}_sigma{args.sigma}_dim{input_dim}{_rw_suffix}"
     os.makedirs(model_save_dir, exist_ok=True)
     model_path = os.path.join(model_save_dir, f"vae_latent{args.latent_dim}.pt")
     
@@ -266,34 +322,55 @@ def main(args):
         pkl.dump(scaler_dict, open(scaler_path, "wb"))
         print(f"scaler参数已保存到: {scaler_path}")
     
-    # 创建数据加载器
+    # 创建数据加载器（few-shot 微调时用较小 batch，避免 train_loader 为空）
+    n_s = int(x_processed.shape[0])
+    vs = float(args.val_split)
+    if finetune_rw and n_s < 32:
+        vs = max(vs, min(0.25, 2.0 / max(n_s, 1)))
+    eff_batch = min(int(args.batch_size), max(2, n_s - max(1, int(n_s * vs))))
     train_loader, val_loader = create_vae_dataloaders(
-        x_processed, 
-        batch_size=args.batch_size, 
-        val_split=args.val_split
+        x_processed,
+        batch_size=eff_batch,
+        val_split=vs,
     )
-    
+
     # 创建VAE模型
     vae = VAE(**vae_config)
     vae.to(device)
-    
+    if finetune_rw and pretrained_vae_info_dict:
+        pt_path = pretrained_vae_info_dict.get("vae_path")
+        if not pt_path or not os.path.isfile(pt_path):
+            raise FileNotFoundError(f"预训练 VAE 权重不存在: {pt_path}")
+        vae.load_state_dict(torch.load(pt_path, map_location=device))
+        print(f"已从 {pt_path} 加载权重，在 few-shot 数据上微调（lr={getattr(args, 'finetune_lr', 3e-5)}）")
+
+    opt_lr = float(getattr(args, "finetune_lr", args.lr)) if finetune_rw else args.lr
+    n_ep = int(getattr(args, "finetune_epochs", args.num_epochs)) if finetune_rw else args.num_epochs
+    _fkl = getattr(args, "finetune_kl_weight", None)
+    kl_w = (
+        float(_fkl if _fkl is not None else args.kl_weight)
+        if finetune_rw
+        else float(args.kl_weight)
+    )
+
     # 优化器
     optimizer = torch.optim.AdamW(
-        vae.parameters(), 
-        lr=args.lr, 
-        weight_decay=args.weight_decay
+        vae.parameters(),
+        lr=opt_lr,
+        weight_decay=args.weight_decay,
     )
-    
+
     # 训练VAE
-    print(f"开始训练VAE模型，共{args.num_epochs}轮")
+    phase = "微调" if finetune_rw else "训练"
+    print(f"开始{phase}VAE模型，共{n_ep}轮（lr={opt_lr}, kl_weight={kl_w}）")
     train_losses, val_losses = train_vae(
-        vae, 
-        train_loader, 
-        val_loader, 
-        optimizer, 
-        device, 
-        num_epochs=args.num_epochs,
-        kl_weight=args.kl_weight
+        vae,
+        train_loader,
+        val_loader,
+        optimizer,
+        device,
+        num_epochs=n_ep,
+        kl_weight=kl_w,
     )
     
     # 保存模型
@@ -316,8 +393,11 @@ def main(args):
         'config': vae_config,
         'input_dim': input_dim,
         'model_path': model_path,
-        'dataset_info': dataset_info
+        'vae_path': model_path,
+        'dataset_info': dataset_info,
     }
+    if finetune_rw:
+        vae_info['pretrained_vae_info_source'] = os.path.abspath(args.pretrained_vae_info)
     pkl.dump(vae_info, open(os.path.join(model_save_dir, "vae_info.p"), "wb"))
     
     print("VAE训练完成！")
@@ -331,7 +411,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="训练VAE模型用于降维")
     
     # 任务参数
-    _all_tasks = sorted(set(TASKNAME2TASK.keys()) | set(TASKNAME_TO_VAR_NUM.keys()))
+    _all_tasks = sorted(
+        set(TASKNAME2TASK.keys())
+        | set(TASKNAME_TO_VAR_NUM.keys())
+        | set(REAL_WORLD_FEWSHOT_TASK_SPECS.keys())
+    )
     parser.add_argument('--task', type=str, choices=_all_tasks, help='单任务名称')
     parser.add_argument('--seed', type=int, default=0, help='SOO GTOPX 离线采样随机种子（与 construct_trajectories --seed 对齐）')
     parser.add_argument('--tasks', type=str, help='多任务列表，用逗号分隔，例如: dkitty,ant,tfbind8')
@@ -339,7 +423,20 @@ if __name__ == "__main__":
     parser.add_argument('--sigma', type=float, default=0.0, help='噪声标准差')
     parser.add_argument('--force_retrain', action='store_true', help='强制重新训练')
     parser.add_argument('--fixed_dim', type=int, default=128, help='固定的输入维度，用于统一不同数据集的长度')
-    
+    parser.add_argument(
+        '--fewshot_k',
+        type=int,
+        default=None,
+        help='real-world：few-shot 点数（与 construct 一致；None=全量）',
+    )
+    parser.add_argument(
+        '--fewshot_mode',
+        type=str,
+        default='all',
+        choices=('all', 'random', 'worst'),
+        help='real-world：few-shot 采样方式',
+    )
+
     # VAE模型参数
     parser.add_argument('--latent_dim', type=int, default=32, help='隐空间维度')
     parser.add_argument('--d_model', type=int, default=256, help='Transformer模型维度')
@@ -354,6 +451,20 @@ if __name__ == "__main__":
     parser.add_argument('--weight_decay', type=float, default=1e-5, help='权重衰减')
     parser.add_argument('--num_epochs', type=int, default=50, help='训练轮数')
     parser.add_argument('--kl_weight', type=float, default=0.1, help='KL散度权重')
+    parser.add_argument(
+        '--pretrained_vae_info',
+        type=str,
+        default=None,
+        help='real-world：多任务预训练 vae_info.p，用于 few-shot 微调',
+    )
+    parser.add_argument('--finetune_epochs', type=int, default=50, help='real-world 微调轮数')
+    parser.add_argument('--finetune_lr', type=float, default=3e-5, help='real-world 微调学习率')
+    parser.add_argument(
+        '--finetune_kl_weight',
+        type=float,
+        default=None,
+        help='real-world 微调时的 KL 权重；默认与 --kl_weight 相同',
+    )
     parser.add_argument(
         '--device',
         type=str,

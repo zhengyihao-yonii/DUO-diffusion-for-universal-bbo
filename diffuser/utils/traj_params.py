@@ -3,6 +3,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -90,8 +91,9 @@ def multitask_trajectory_signature(
     horizon: int,
 ) -> str:
     """
-    与 ``{sig}_vae_latent32_train.p``、``mixed_{sig}.p`` 共用同一段 ``sig``。
-    全任务标量相同时退化为 ``{n}x{h}_k{k}_eps{eps}``（与历史 multitask 路径一致）。
+    逻辑签名字符串；与 :func:`multitask_mixed_basename`、:func:`multitask_slug_id` 对应；
+    各任务轨迹 pkl 在 ``generated_datasets/<task>_frac_sigma/``。
+    全任务标量相同时退化为 ``{n}x{h}_k{k}_eps{eps}``。
     """
     ts = sorted(tasks)
     n0, k0, e0 = n_traj[ts[0]], k[ts[0]], eps[ts[0]]
@@ -171,21 +173,53 @@ def prepare_multitask_traj(
     return n_d, k_d, e_d, sig
 
 
+def multitask_slug_id(traj_signature: str) -> str:
+    """
+    短标识符，形式 ``mt_<16位hex>``，与完整 ``traj_signature``（如 ``ptask__...``）一一对应。
+    用于 mixed 文件名、checkpoint 目录、RESULTS 超参段，避免路径过长（errno 36）。
+    """
+    h = hashlib.sha256(traj_signature.encode("utf-8")).hexdigest()[:16]
+    return f"mt_{h}"
+
+
+def multitask_mixed_basename(traj_signature: str) -> str:
+    """混合轨迹文件名，例如 ``mixed_mt_a1b2c3d4e5f67890.p``。"""
+    return f"mixed_{multitask_slug_id(traj_signature)}.p"
+
+
+def multitask_checkpoint_hyper_dir(
+    sig: str,
+    ret_infix: str,
+    text_infix: str,
+    mttextonly_infix: str,
+) -> str:
+    """
+    ``trained_models/multi_<tasks>_frac_sigma/<本函数返回值>/seed*/`` 的中间目录名。
+
+    使用 :func:`multitask_slug_id` + 条件后缀（与 train.py 中 returns/text/mttextonly 片段一致）。
+    """
+    return f"{multitask_slug_id(sig)}{ret_infix}{text_infix}{mttextonly_infix}"
+
+
 def resolve_multitask_mixed_path(data_dir: str, sig: str | None) -> str:
     """
-    优先 ``mixed_<sig>.p``；否则回退 ``mixed_trajectories_train.p``（旧实验）。
+    优先短文件名 ``mixed_<slug_id>.p``；其次旧版 ``mixed_<完整sig>.p``；再 ``mixed_trajectories_train.p``。
     """
     import os
 
     if sig:
-        p = os.path.join(data_dir, f"mixed_{sig}.p")
-        if os.path.isfile(p):
-            return p
+        p_short = os.path.join(data_dir, multitask_mixed_basename(sig))
+        if os.path.isfile(p_short):
+            return p_short
+        p_long = os.path.join(data_dir, f"mixed_{sig}.p")
+        if os.path.isfile(p_long):
+            return p_long
     leg = os.path.join(data_dir, "mixed_trajectories_train.p")
     if os.path.isfile(leg):
         return leg
     if sig:
         raise FileNotFoundError(
-            f"未找到多任务混合轨迹：{os.path.join(data_dir, f'mixed_{sig}.p')} 或 {leg}"
+            f"未找到多任务混合轨迹：{os.path.join(data_dir, multitask_mixed_basename(sig))}、"
+            f"{os.path.join(data_dir, f'mixed_{sig}.p')} 或 {leg}"
         )
     raise FileNotFoundError(f"未找到多任务混合轨迹：{leg}")

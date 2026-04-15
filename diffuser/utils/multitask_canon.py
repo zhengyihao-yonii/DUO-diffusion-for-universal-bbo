@@ -18,7 +18,7 @@ def text_cond_path_infix(args) -> str:
     """
     ``--use_text_condition`` 或 ``--multitask_text_only`` 时插入 ``_textcond``（第三种模式脚本内会强制开文本，CLI 可只写后者）。
     与「仅 task 分类、无 text_mlp」区分。环境变量 ``GTG_TEXTCOND_PATH_INFIX`` 可覆盖。
-    混合轨迹 ``generated_datasets/multi_*/*.p`` 仍共用。
+    混合轨迹为短名 ``mixed_mt_<hex>.p``（见 multitask_slug_manifest.json）；各任务轨迹在 ``{task}_frac_sigma/``。
     """
     if getattr(args, "use_text_condition", False) or getattr(
         args, "multitask_text_only", False

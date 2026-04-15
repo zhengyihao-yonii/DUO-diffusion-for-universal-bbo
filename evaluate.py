@@ -137,7 +137,11 @@ if __name__ == '__main__':
     _mto = multitask_text_only_path_infix(args)
     # 多任务模式下的数据路径和运行前缀（与 train.py 一致；与评 ant/dkitty 无关）
     if len(train_tasks_list) > 1:
-        from diffuser.utils.traj_params import prepare_multitask_traj
+        from diffuser.utils.traj_params import (
+            multitask_checkpoint_hyper_dir,
+            multitask_mixed_basename,
+            prepare_multitask_traj,
+        )
 
         n_d, k_d, e_d, sig = prepare_multitask_traj(
             train_tasks_list,
@@ -147,12 +151,13 @@ if __name__ == '__main__':
             args.horizon,
             args.traj_params_json,
         )
-        args.data_path = f"generated_datasets/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{sig}_vae_latent32_train.p"
+        args.data_path = f"generated_datasets/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{multitask_mixed_basename(sig)}"
         args.multitask_traj_signature = sig
         args.traj_n_traj_dict = n_d
         args.traj_k_dict = k_d
         args.traj_eps_dict = e_d
-        RUN.prefix = f"trained_models/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{sig}{_ret}{_txt}{_mto}/seed{args.seed}/"
+        _hyper = multitask_checkpoint_hyper_dir(sig, _ret, _txt, _mto)
+        RUN.prefix = f"trained_models/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{_hyper}/seed{args.seed}/"
     else:
         # 单任务模式，保持原有逻辑
         task_name = train_tasks_list[0]

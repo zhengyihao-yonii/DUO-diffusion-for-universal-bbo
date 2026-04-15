@@ -286,7 +286,14 @@ def main(**deps):
         print(f"📊 单任务训练模式启用 📊")
         print(f"📋 训练任务: {Config.train_tasks_list[0]}")
 
-    if getattr(Config, "multitask_text_only", False):
+    if getattr(Config, "fewshot_text_only_finetune", False):
+        if not getattr(Config, "use_text_condition", False):
+            Config.use_text_condition = True
+            print("⚠️ fewshot_text_only_finetune：已自动设置 use_text_condition=True")
+        print(
+            "📌 few-shot：单任务轨迹 + 仅文本条件（与 multitask_text_only 同架构，task_condition=False）"
+        )
+    elif getattr(Config, "multitask_text_only", False):
         if not Config.is_multitask:
             raise ValueError("multitask_text_only 仅适用于多任务（train_tasks 含多个任务）")
         if not getattr(Config, "use_text_condition", False):
@@ -298,7 +305,7 @@ def main(**deps):
 
     use_task_branch = Config.is_multitask and not getattr(
         Config, "multitask_text_only", False
-    )
+    ) and not getattr(Config, "fewshot_text_only_finetune", False)
 
     # gtopx 等共用 gtopx_config 时类默认 dataset 仍为 gtopx2；必须与真实任务名一致，
     # 否则 ZipDataset / load_gtopx_offline_arrays 维数错误，evaluate 会与 checkpoint 不一致。
@@ -564,6 +571,10 @@ def main(**deps):
             device=Config.device,
         )
 
+    _ld_path = getattr(Config, "load_diffusion_checkpoint", None)
+    if _ld_path in ("", None):
+        _ld_path = None
+    _ld_epoch = getattr(Config, "load_diffusion_checkpoint_epoch", None)
     trainer_config = utils.Config(
         utils.Trainer,
         savepath='trainer_config.pkl',
@@ -581,6 +592,8 @@ def main(**deps):
         n_reference=Config.n_reference,
         train_device=Config.device,
         save_checkpoints=Config.save_checkpoints,
+        load_checkpoint_path=_ld_path,
+        load_checkpoint=_ld_epoch,
     )
 
     # -----------------------------------------------------------------------------#
