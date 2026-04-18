@@ -13,6 +13,18 @@ from .timer import Timer
 from .cloud import sync_logs
 from ml_logger import logger
 
+
+def _safe_wandb_log(metrics):
+    """避免未 init 或离线失败时 wandb.log 触发底层 abort。"""
+    try:
+        import wandb as _wandb
+
+        if getattr(_wandb, "run", None) is not None:
+            _wandb.log(metrics)
+    except Exception:
+        pass
+
+
 def cycle(dl):
     while True:
         for data in dl:
@@ -188,9 +200,7 @@ class Trainer(object):
                 metrics['proxy_steps'] = self.proxy_step
                 metrics['proxy_loss'] = loss.detach().item()
                 logger.log_metrics_summary(metrics, default_stats='mean')
-                import wandb
-
-                wandb.log(metrics)
+                _safe_wandb_log(metrics)
 
             self.proxy_step += 1
 
@@ -219,9 +229,7 @@ class Trainer(object):
                 metrics['steps'] = self.step
                 metrics['loss'] = loss.detach().item()
                 logger.log_metrics_summary(metrics, default_stats='mean')
-                import wandb
-
-                wandb.log(metrics)
+                _safe_wandb_log(metrics)
 
             # if self.step == 0 and self.sample_freq:
             #     self.render_reference(self.n_reference)

@@ -1,0 +1,42 @@
+eval_sweep_w_text 目录说明（与 train_eval_sweep_w_text.sh 一致）
+================================================================
+
+【十六进制 / mt_* 是什么】
+  与 ``trained_models/multi_<tasks>_frac_sigma/<中间目录>/seed*/`` 中 **中间目录名** 相同，
+  由轨迹签名经 SHA256 取前 16 位十六进制得到短名，例如：
+    mt_911054c35daad7e0_textcond_mttextonly
+  其中 ``911054c35daad7e0`` 即为 16 位 hex；后缀 ``_textcond_mttextonly`` 表示
+  文本条件 + multitask_text_only（与 train 时 RUN.prefix 一致）。
+
+  可用下面命令在本地打印当前参数下的目录名（需与训练时 TRAIN_TASKS / traj_params 等一致）：
+    python scripts/print_multitask_ckpt_hyper_dir.py \\
+      --train_tasks "ant,dkitty,..." --frac 1.0 --sigma 0.0 \\
+      --n_traj 1000 --k 50 --eps 0.05 --horizon 64 \\
+      --traj_params_json examples/traj_params_per_task_example.json
+
+【当前推荐布局】
+  eval_sweep_w_text/
+    <mt_*_textcond_mttextonly>/
+      run_meta_<时间戳>.env          # 每次执行脚本追加一条元信息（可多份）
+      seed0/
+        sweep.log  train.log  eval_w*.log
+        npz_w*/   # 仅当 SWEEP_COPY_NPZ=1 时从 checkpoint 复制 performance/samples npz
+      seed1/
+        ...
+
+  同一套轨迹参数（同一 mt_*）下再次执行脚本时，仍写入上述目录：已有 ``seed<N>/`` 则**复用**，
+  ``eval_w*.log`` 以追加方式写入，便于只补跑部分 w（例如 ``W_VALUES_OVERRIDE="16.0 32.0"``）。
+
+【曾用布局（分析脚本仍兼容）】
+  - ``<mt_*>/run<N>_seed<SEED>/``：若目录下**没有**平铺的 ``seed*``，仍会扫描此类子目录。
+  - ``run_YYYYMMDD_HHMMSS/seed*/``：顶层时间戳 run（旧），仍支持。
+
+  若已从 ``runN_seed*`` 迁到平铺 ``seed*``，请删除旧的 ``run*_seed*``，否则分析脚本会优先只认平铺 ``seed*``，
+  但若迁移未完成且仅存在 ``run*_seed*``（无 seed0），仍会扫描 ``run*_seed*``。
+
+【手工整理示例】
+  从 ``run_20260416_162705/seed0`` 迁到 mt 目录下：
+    mkdir -p eval_sweep_w_text/mt_XXXX_textcond_mttextonly
+    mv run_20260416_162705/seed0 eval_sweep_w_text/mt_XXXX_textcond_mttextonly/seed0
+  从 ``run0_seed0`` 迁到 ``seed0``：
+    mv mt_XXXX/.../run0_seed0 mt_XXXX/.../seed0

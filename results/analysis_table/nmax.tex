@@ -1,7 +1,7 @@
 % Requires: \usepackage{booktabs}, \usepackage{graphicx}, \usepackage{xcolor}.
 % Baselines: uniso_nresult.tex; per-column blue/violet = best/2nd in this table (tasks: higher better; Avg.\ Rank: lower better).
 \begin{table*}[t!]
-\caption{Normalized scores on the five Design-Bench tasks (same setting as \texttt{uniso\_nresult.tex}). Baseline rows are copied from that table; \textbf{DFGO} rows report \texttt{nmax\_ep\_reward} (mean $\pm$ std over runs), i.e.\ $(y-y_{\min})/(y_{\max}-y_{\min})$ in \texttt{evaluate.py}, comparable to the normalized baselines. Hyper selection for DFGO matches the wide max table (best subfolder per task by mean \texttt{max\_ep\_reward}). \textbf{DFGO (multi, all tasks):} Superconductor is blank (not in the original full multitask run); missing cells are worst when ranking. Avg.\ Rank for DFGO: mean per-task rank / $N$ ($N$ = pool size, same as baselines).}
+\caption{Normalized scores on the five Design-Bench tasks (same setting as \texttt{uniso\_nresult.tex}). Baseline rows are copied from that table; \textbf{DFGO} rows report \texttt{nmax\_ep\_reward} (mean $\pm$ std over runs), i.e.\ $(y-y_{\min})/(y_{\max}-y_{\min})$ in \texttt{evaluate.py}, comparable to the normalized baselines. \textbf{DFGO (single)} uses per-task best under \texttt{single\_task/…}; \textbf{DFGO (multi, all tasks, text\_conditioned)} scans \texttt{text\_conditioned\_only/all\_improved\_<frac>/} (override with \texttt{GTGDFGO\_NMAX\_MULTITASK\_PREFIX}); not \texttt{multi\_task}. Best hyperfolder per task is in the table note. Missing \texttt{nmax} cells are worst when ranking. Avg.\ Rank for DFGO: mean per-task rank / $N$ ($N$ = pool size, same as baselines). \textbf{DFGO full multitask text} (matrix cols.\ fullT / nmax multi text): \texttt{eval\_sweep\_w\_text/mt\_911054c35daad7e0\_textcond\_mttextonly} with unified $\texttt{condition\_guidance\_w\_text}=8$ (best $w$: lowest mean rank among $w$ columns in \texttt{max\_ablation}, joint per-task ranking with UniSO and GTG ST). Trajectory slug \texttt{mt\_911054c35daad7e0} is the 16-hex-digit digest prefix of the multitask trajectory signature (SHA-256). +returns text columns use the same sweep logits (no separate ret eval). }
 \vspace{0.3em}
 \centering
 \resizebox{\linewidth}{!}{
@@ -16,7 +16,7 @@ CMA-ES &  & \textbf{\textcolor{blue}{1.712 ± 0.754}} & 0.725 ± 0.002 & 0.463 �
 REINFORCE &  & 0.248 ± 0.039 & 0.541 ± 0.196 & 0.478 ± 0.017 & 0.935 ± 0.049 & \textbf{\textcolor{blue}{0.673 ± 0.074}} & 13.8 / 24 \\
 Grad. Ascent &  & 0.273 ± 0.023 & 0.853 ± 0.018 & 0.510 ± 0.028 & 0.969 ± 0.021 & 0.646 ± 0.037 & 11.2 / 24 \\
 Grad. Ascent Mean &  & 0.306 ± 0.053 & 0.875 ± 0.024 & 0.508 ± 0.019 & \textbf{\textcolor{blue}{0.985 ± 0.008}} & 0.633 ± 0.030 & 10.6 / 24 \\
-Grad. Ascent Min & \multirow{-6}{*}{Baselines} & 0.282 ± 0.033 & 0.884 ± 0.018 & \textbf{\textcolor{violet}{0.514 ± 0.020}} & 0.979 ± 0.014 & 0.632 ± 0.027 & 11.2 / 24 \\
+Grad. Ascent Min & \multirow{-6}{*}{Baselines} & 0.282 ± 0.033 & 0.884 ± 0.018 & 0.514 ± 0.020 & 0.979 ± 0.014 & 0.632 ± 0.027 & 11.2 / 24 \\
 \midrule
 CbAS & ICML'19 & 0.846 ± 0.032 & 0.896 ± 0.009 & 0.421 ± 0.049 & 0.921 ± 0.046 & 0.630 ± 0.039 & 15.6 / 24 \\
 MINs & ICML'19 & 0.906 ± 0.024 & 0.939 ± 0.007 & 0.464 ± 0.023 & 0.910 ± 0.051 & 0.633 ± 0.034 & 12.6 / 24 \\
@@ -33,14 +33,19 @@ Tri-Mentoring & NeurIPS'23 & 0.891 ± 0.011 & 0.947 ± 0.005 & 0.503 ± 0.013 & 
 PGS & AAAI'24 & 0.715 ± 0.046 & 0.954 ± 0.022 & 0.444 ± 0.020 & 0.889 ± 0.061 & 0.634 ± 0.040 & 13.4 / 24 \\
 FGM & AISTATS'24 & 0.923 ± 0.023 & 0.944 ± 0.014 & 0.481 ± 0.024 & 0.811 ± 0.079 & 0.611 ± 0.008 & 12.8 / 24 \\
 MATCH-OPT & ICML'24 & 0.933 ± 0.016 & 0.952 ± 0.008 & 0.504 ± 0.021 & 0.824 ± 0.067 & 0.655 ± 0.050 & 7.6 / 24 \\
-RaM-ListNet & ICLR'25 & 0.949 ± 0.025 & \textbf{\textcolor{violet}{0.962 ± 0.015}} & \textbf{\textcolor{blue}{0.517 ± 0.029}} & \textbf{\textcolor{violet}{0.981 ± 0.012}} & \textbf{\textcolor{violet}{0.670 ± 0.035}} & \textbf{\textcolor{blue}{2.0 / 24}} \\
+RaM-ListNet & ICLR'25 & 0.949 ± 0.025 & \textbf{\textcolor{violet}{0.962 ± 0.015}} & \textbf{\textcolor{violet}{0.517 ± 0.029}} & \textbf{\textcolor{violet}{0.981 ± 0.012}} & \textbf{\textcolor{violet}{0.670 ± 0.035}} & \textbf{\textcolor{blue}{2.0 / 24}} \\
 \midrule
 UniSO-T & ICML'25 & 0.850 ± 0.062 & 0.915 ± 0.015 & 0.489 ± 0.062 & 0.947 ± 0.036 & \textbf{\textcolor{blue}{0.673 ± 0.136}} & 9.8 / 24 \\
 \midrule
-\textbf{DFGO} (single) & / & 0.932 $\pm$ 0.057 & 0.926 $\pm$ 0.012 & 0.472 $\pm$ 0.033 & 0.954 $\pm$ 0.019 & 0.623 $\pm$ 0.037 & 10.000 / 24 \\
-\textbf{DFGO} (multi, all tasks) & / & \textbf{\textcolor{violet}{0.980 $\pm$ 0.016}} & \textbf{\textcolor{blue}{0.964 $\pm$ 0.010}} & -- & 0.698 $\pm$ 0.101 & 0.520 $\pm$ 0.055 & 13.600 / 24 \\
+\textbf{DFGO} (single) & / & 0.932 $\pm$ 0.057 & 0.926 $\pm$ 0.012 & 0.472 $\pm$ 0.033 & 0.954 $\pm$ 0.019 & 0.623 $\pm$ 0.037 & 10.400 / 24 \\
+\textbf{DFGO} (multi, all tasks, text\_conditioned) & / & \textbf{\textcolor{violet}{0.976 $\pm$ 0.009}} & \textbf{\textcolor{blue}{0.972 $\pm$ 0.010}} & \textbf{\textcolor{blue}{0.567 $\pm$ 0.041}} & 0.800 $\pm$ 0.091 & 0.649 $\pm$ 0.089 & 5.600 / 24 \\
 \bottomrule
 \end{tabular}
 }
+\vspace{0.4em}
+\begin{minipage}{\linewidth}
+\footnotesize
+\textit{Hyper selection (best subfolder per task):} \textbf{DFGO ST (nmax)}: ant$\rightarrow$\texttt{4000x64\_k20\_eps0.05}; dkitty$\rightarrow$\texttt{4000x64\_k20\_eps0.01}; superconductor$\rightarrow$\texttt{4000x64\_k20\_eps0.05}; tfbind8$\rightarrow$\texttt{1000x64\_k50\_eps0.05}; tfbind10$\rightarrow$\texttt{1000x64\_k50\_eps0.05} \par \textbf{DFGO multi (nmax)}: ant$\rightarrow$\texttt{w\_text8}; dkitty$\rightarrow$\texttt{w\_text8}; superconductor$\rightarrow$\texttt{w\_text8}; tfbind8$\rightarrow$\texttt{w\_text8}; tfbind10$\rightarrow$\texttt{w\_text8}
+\end{minipage}
 \label{tab:dfgo-nmax-designbench}
 \end{table*}

@@ -1,5 +1,4 @@
-Task: Rover trajectory
-Type: continuous
-Description: 2D trajectory optimization for a rover: design a reasonable trajectory to minimize the cost. Start and goal positions and a cost over the state space define the problem; trajectory cost c(x) is evaluated for designs x in a 60-dimensional unit hypercube.
-Goal: Minimize trajectory cost (or maximize the score used in the offline dataset, depending on label convention).
-Design space: 60 continuous variables in the unit hypercube parameterization.
+Task: Rover
+Name: Rover
+Description: 2D trajectories optimization for a rover
+Objective: to design a reasonable trajectory to minimize the cost

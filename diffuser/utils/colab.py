@@ -1,4 +1,5 @@
 import os
+import sys
 import numpy as np
 import einops
 import matplotlib.pyplot as plt
@@ -9,8 +10,12 @@ try:
     import base64
     from IPython.display import HTML
     from IPython import display as ipythondisplay
-except:
-    print('[ utils/colab ] Warning: not importing colab dependencies')
+except ImportError:
+    # 必须写到 stderr：stdout 会被 train_eval_sweep_w_text 等 ``$(python ...)`` 当作目录名解析
+    print(
+        "[ utils/colab ] Warning: not importing colab dependencies",
+        file=sys.stderr,
+    )
 
 from .serialization import mkdir
 from .arrays import to_torch, to_np

@@ -1,5 +1,4 @@
-Task: TF-Bind-8
-Type: discrete
-Description: Optimize DNA sequences of length 8 for binding to the SIX6_REF_R1 transcription factor (Design-Bench).
-Goal: Maximize binding affinity in the benchmark’s scoring.
-Design space: combinatorial DNA sequence design (eight categorical positions with four nucleotide choices each, logits or embedding representation in models).
+Task: TF Bind 8
+Name: TF Bind 8
+Description: DNA sequence optimization
+Objective: to find the length-8 DNA sequence with maximum binding affinity with SIX6_REF_R1 transcription factor

@@ -1,5 +1,4 @@
-Task: Ant morphology
-Type: continuous
-Description: Quadruped robot body design in a physics simulator; a fixed policy evaluates each morphology by rollout.
-Goal: Maximize forward locomotion speed (or the benchmark’s locomotion score) over a fixed horizon.
-Design space: 60 bounded continuous variables (limb sizes, orientations, placements).
+Task: Ant
+Name: Ant Morphology
+Description: a quadruped robot morphology optimization
+Objective: to run as fast as possible

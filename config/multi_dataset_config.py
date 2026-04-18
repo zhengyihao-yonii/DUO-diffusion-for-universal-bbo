@@ -21,6 +21,7 @@ class Config(ParamsProto):
     diffusion = 'models.GaussianDiffusion'
     multitask_text_only = False
     fewshot_text_only_finetune = False
+    real_task_text_only_finetune = False
     load_diffusion_checkpoint = None
     load_diffusion_checkpoint_epoch = None
     # Optional: task metadata text → sentence embedding (additive to task one-hot). See task_metadata/README.md

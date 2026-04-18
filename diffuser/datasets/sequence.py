@@ -13,7 +13,6 @@ from .buffer import ReplayBuffer
 
 import design_bench
 from diffuser.datasets.real_world_fewshot import (
-    REAL_WORLD_FEWSHOT_TASK_SPECS,
     is_real_world_fewshot_task,
     load_real_world_for_pipeline,
 )
@@ -453,10 +452,10 @@ class ZipDataset(torch.utils.data.Dataset):
             self.data_y = np.clip(self.data_y + np.random.randn(*self.data_y.shape) * sigma, 0.0, 1.0).float()
         
         self.normalizer = SafeLimitsNormalizer(self.data_x)
-        if is_real_world_fewshot_task(dataset):
-            self.original_observation_dim = int(REAL_WORLD_FEWSHOT_TASK_SPECS[dataset]["dim"])
-        else:
-            self.original_observation_dim = self.data_x.shape[1]
+        # Proxy 的输入维须与 ``__getitem__`` 输出的特征维一致。real-world 在
+        # ``load_real_world_for_pipeline`` 中已填充到 ``fixed_length``（如 128），
+        # 不能用物理维 12/14/60，否则会出现 mat1 为 (B,128) 而 Linear 权重按 12 维定义。
+        self.original_observation_dim = int(self.data_x.shape[1])
         
     def unnormalize_values(self, y):
         return y

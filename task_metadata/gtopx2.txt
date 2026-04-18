@@ -1,5 +1,4 @@
-Task: GTOPX-2 / Cassini2
-Type: continuous
-Description: Interplanetary trajectory to Saturn (Earth–Venus–Venus–Earth–Jupiter–Saturn), with deep-space maneuvers; harder than a minimal Cassini-style instance.
-Goal: Minimize total mission ΔV (velocity change) to the rendezvous condition.
-Design space: 22 bounded continuous variables (epochs, asymptotic speeds, segment times, DSM fractions, fly-by radii, B-plane angles).
+Task: GTOPX 2
+Name: Cassini 2
+Description: Complex interplanetary missions to Saturn
+Objective: to achieve a rendezvous with Saturn, aiming to minimize the total velocity change

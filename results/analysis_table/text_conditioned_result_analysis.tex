@@ -1,7 +1,7 @@
 % Requires: \usepackage{booktabs}, \usepackage{graphicx}, \usepackage{xcolor}.
 % Blocks: Task+D(best) | UniSO-T | GTG ST/ST+r | DFGO (text_conditioned_only/all_frac…).
 \begin{table*}[t!]
-\caption{DFGO (full multitask, text-conditioned): one column per immediate subfolder of \texttt{results/text\_conditioned\_only/all\_frac1.0\_sigma0.0/} (folder names encode key hyperparameters, e.g.\ \texttt{w1.2\_}$\cdots$); each column pools runs inside that folder only. UniSO-T (Improved from \texttt{uniso\_result.tex}), GTG ST / ST+r, and DFGO. Mean rank: higher mean reward is better; report mean $\pm$ std of per-task ranks.}
+\caption{DFGO (full multitask, text-conditioned): one column per immediate subfolder of \texttt{results/text\_conditioned\_only/all\_frac1.0\_sigma0.0/} (folder names encode key hyperparameters, e.g.\ \texttt{w1.2\_}$\cdots$); each column pools runs inside that folder only. UniSO-T (Improved from \texttt{uniso\_result.tex}), GTG ST / ST+r, and DFGO. Mean rank: higher mean reward is better; report mean $\pm$ std of per-task ranks. \textbf{DFGO full multitask text} (matrix cols.\ fullT / nmax multi text): \texttt{eval\_sweep\_w\_text/mt\_911054c35daad7e0\_textcond\_mttextonly} with unified $\texttt{condition\_guidance\_w\_text}=8$ (best $w$: lowest mean rank among $w$ columns in \texttt{max\_ablation}, joint per-task ranking with UniSO and GTG ST). Trajectory slug \texttt{mt\_911054c35daad7e0} is the 16-hex-digit digest prefix of the multitask trajectory signature (SHA-256). +returns text columns use the same sweep logits (no separate ret eval). }
 \vspace{0.3em}
 \centering
 \resizebox{\linewidth}{!}{

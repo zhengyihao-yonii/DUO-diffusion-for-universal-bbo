@@ -6,7 +6,11 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import sys
 from pathlib import Path
+
+from diffuser.utils.multitask_canon import canonical_train_tasks_csv, multitask_path_token
 
 # 与 construct_trajectories 中默认表一致（单任务缺省按任务名）
 DEFAULT_NUM_TRAJECTORIES: dict[str, int] = {
@@ -223,3 +227,94 @@ def resolve_multitask_mixed_path(data_dir: str, sig: str | None) -> str:
             f"{os.path.join(data_dir, f'mixed_{sig}.p')} 或 {leg}"
         )
     raise FileNotFoundError(f"未找到多任务混合轨迹：{leg}")
+
+
+def _gtgdfgo_repo_root() -> Path:
+    """``GTGdfgo/`` 根目录（本文件位于 ``GTGdfgo/diffuser/utils/``）。"""
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def multitask_mixed_paths_exist(data_dir: str, sig: str | None) -> bool:
+    """是否与 :func:`resolve_multitask_mixed_path` 一致的「已存在」判定（不抛错）。"""
+    if not sig:
+        leg = os.path.join(data_dir, "mixed_trajectories_train.p")
+        return os.path.isfile(leg)
+    p_short = os.path.join(data_dir, multitask_mixed_basename(sig))
+    if os.path.isfile(p_short):
+        return True
+    p_long = os.path.join(data_dir, f"mixed_{sig}.p")
+    if os.path.isfile(p_long):
+        return True
+    leg = os.path.join(data_dir, "mixed_trajectories_train.p")
+    return os.path.isfile(leg)
+
+
+def ensure_multitask_mixed_trajectories(
+    *,
+    train_tasks_list: list[str],
+    frac: float,
+    sigma: float,
+    seed: int,
+    n_traj: int,
+    k: int,
+    eps: float,
+    horizon: int,
+    traj_params_json: str | None = None,
+    fixed_dim: int = 128,
+    skip_auto: bool = False,
+) -> None:
+    """
+    若 ``generated_datasets/multi_<tasks>_frac…/mixed_mt_*.p`` 不存在，则调用
+    ``construct_trajectories.construct_trajectories`` 生成（与单独跑 construct 一致）。
+
+    须在 **项目根 GTGdfgo** 为当前工作目录时调用，或在本函数内会临时 ``chdir`` 到该根目录。
+    """
+    csv = canonical_train_tasks_csv(",".join(train_tasks_list))
+    tasks_sorted = [t.strip() for t in csv.split(",") if t.strip()]
+    if len(tasks_sorted) < 2:
+        return
+
+    _, _, _, sig = prepare_multitask_traj(
+        tasks_sorted, n_traj, k, eps, horizon, traj_params_json
+    )
+    train_tasks_str = multitask_path_token(csv)
+    rel_dir = os.path.join(
+        "generated_datasets", f"multi_{train_tasks_str}_frac{frac}_sigma{sigma}"
+    )
+    root = _gtgdfgo_repo_root()
+    data_dir = str(root / rel_dir)
+
+    if multitask_mixed_paths_exist(data_dir, sig):
+        return
+
+    if skip_auto:
+        resolve_multitask_mixed_path(data_dir, sig)
+
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from construct_trajectories import construct_trajectories
+
+    print(
+        f"[ensure_multitask_mixed_trajectories] 未找到混合轨迹，自动运行 construct_trajectories → {rel_dir}/mixed_*.p",
+        flush=True,
+    )
+    _prev = os.getcwd()
+    try:
+        os.chdir(root)
+        construct_trajectories(
+            tasks_list=tasks_sorted,
+            frac=frac,
+            sigma=sigma,
+            seed=seed,
+            n_traj=n_traj,
+            k=k,
+            eps=eps,
+            fixed_dim=fixed_dim,
+            horizon=horizon,
+            traj_params_json=traj_params_json,
+        )
+    finally:
+        os.chdir(_prev)
+
+    if not multitask_mixed_paths_exist(data_dir, sig):
+        resolve_multitask_mixed_path(data_dir, sig)

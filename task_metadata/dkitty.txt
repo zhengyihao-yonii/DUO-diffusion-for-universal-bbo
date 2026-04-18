@@ -1,5 +1,4 @@
-Task: D'Kitty morphology
-Type: continuous
-Description: ROBEL D'Kitty robot morphology in simulation; a controller matched to each body is used for rollouts.
-Goal: Navigate to a fixed target; maximize the benchmark navigation / locomotion objective.
-Design space: 56 bounded continuous parameters (link lengths, link widths, joint and body layout).
+Task: D'Kitty
+Name: D'Kitty Morphology
+Description: D'Kitty robot morphology optimization
+Objective: to navigate the robot to a fixed location

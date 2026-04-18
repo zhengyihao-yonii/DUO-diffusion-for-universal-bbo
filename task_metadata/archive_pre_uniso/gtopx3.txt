@@ -1,0 +1,5 @@
+Task: GTOPX-3 / Messenger reduced
+Type: continuous
+Description: Interplanetary trajectory to Mercury without resonant Mercury fly-bys; sequence Earth–Venus–Venus–Mercury.
+Goal: Minimize total mission ΔV.
+Design space: 18 bounded continuous variables (epochs, asymptotic speeds, segment times, DSM fractions, fly-by radii, B-plane angles).

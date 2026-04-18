@@ -1,0 +1,28 @@
+% Requires: \usepackage{booktabs}, \usepackage{graphicx}, \usepackage{xcolor}.
+% max_ablation: pooled over all seed* (and legacy run*_seed* / run_*/seed*) under model dir; see scripts/make_sweep_w_ablation_table.py
+% Full width via tabular* (not resizebox) so font size matches body text like max_extended.
+\begin{table*}[t!]
+\caption{Text CFG ablation (\texttt{condition\_guidance\_w\_text}): mean $\pm$ std of \texttt{max\_ep\_reward} pooled over all \texttt{seed*} runs under \texttt{results/eval\_sweep\_w\_text/mt\_911054c35daad7e0\_textcond\_mttextonly}. Baselines: $\mathcal{D}$(best), UniSO-T Improved, GTG ST.}}
+\vspace{0.3em}
+\centering
+{\setlength{\tabcolsep}{4pt}%
+\begin{tabular*}{\linewidth}{@{\extracolsep{\fill}}l|c|c|c|cccccccc@{}}
+\toprule
+Task & $\mathcal{D}$(best) & \shortstack{UniSO-T\\Improved} & \shortstack{GTG\\ST} & \shortstack{\texttt{w=0.0}} & \shortstack{\texttt{w=1.0}} & \shortstack{\texttt{w=2.0}} & \shortstack{\texttt{w=4.0}} & \shortstack{\texttt{w=8.0}} & \shortstack{\texttt{w=16.0}} & \shortstack{\texttt{w=32.0}} & \shortstack{\texttt{w=64.0}} \\
+\midrule
+Ant & 165.326 & 455.658 $\pm$ 39.188 & 452.330 $\pm$ 61.502 & \textbf{\textcolor{violet}{568.346 $\pm$ 10.406}} & \textbf{\textcolor{blue}{574.388 $\pm$ 8.549}} & 566.263 $\pm$ 8.668 & 561.212 $\pm$ 5.810 & 566.659 $\pm$ 9.082 & 564.747 $\pm$ 3.107 & 567.857 $\pm$ 8.753 & 565.456 $\pm$ 7.107 \\
+D'Kitty & 199.363 & 222.007 $\pm$ 33.677 & 264.857 $\pm$ 17.571 & \textbf{\textcolor{violet}{311.384 $\pm$ 3.566}} & 310.822 $\pm$ 1.518 & 308.203 $\pm$ 8.994 & 310.155 $\pm$ 11.200 & 307.139 $\pm$ 12.211 & \textbf{\textcolor{blue}{311.659 $\pm$ 9.848}} & 305.326 $\pm$ 13.748 & 304.468 $\pm$ 14.558 \\
+Superconductor & 74.000 & 82.642 $\pm$ 3.467 & 89.802 $\pm$ 6.763 & 90.914 $\pm$ 3.655 & 90.833 $\pm$ 3.615 & 92.202 $\pm$ 3.700 & 98.833 $\pm$ 6.457 & 104.827 $\pm$ 7.582 & \textbf{\textcolor{blue}{108.596 $\pm$ 12.243}} & 104.092 $\pm$ 8.325 & \textbf{\textcolor{violet}{106.923 $\pm$ 7.899}} \\
+TF Bind 8 & 0.439 & \textbf{\textcolor{violet}{0.857 $\pm$ 0.069}} & \textbf{\textcolor{blue}{0.934 $\pm$ 0.030}} & 0.718 $\pm$ 0.095 & 0.718 $\pm$ 0.095 & 0.780 $\pm$ 0.071 & 0.780 $\pm$ 0.061 & 0.800 $\pm$ 0.091 & 0.717 $\pm$ 0.113 & 0.821 $\pm$ 0.034 & 0.816 $\pm$ 0.116 \\
+TF Bind 10 & 0.005 & \textbf{\textcolor{blue}{0.944 $\pm$ 0.794}} & 0.632 $\pm$ 0.106 & 0.627 $\pm$ 0.227 & 0.627 $\pm$ 0.227 & 0.650 $\pm$ 0.249 & 0.652 $\pm$ 0.300 & \textbf{\textcolor{violet}{0.730 $\pm$ 0.356}} & 0.597 $\pm$ 0.108 & 0.649 $\pm$ 0.082 & 0.663 $\pm$ 0.058 \\
+GTOPX 2 & -196.663 & -90.106 $\pm$ 8.223 & -72.163 $\pm$ 8.495 & -94.874 $\pm$ 24.696 & -99.536 $\pm$ 25.617 & -126.143 $\pm$ 27.620 & -82.143 $\pm$ 37.817 & \textbf{\textcolor{blue}{-48.779 $\pm$ 9.781}} & \textbf{\textcolor{violet}{-65.063 $\pm$ 37.999}} & -69.415 $\pm$ 47.726 & -76.584 $\pm$ 38.446 \\
+GTOPX 3 & -152.364 & -44.427 $\pm$ 13.456 & -53.866 $\pm$ 9.877 & -85.963 $\pm$ 32.525 & -86.938 $\pm$ 33.593 & -65.658 $\pm$ 15.598 & -48.934 $\pm$ 26.540 & \textbf{\textcolor{blue}{-29.687 $\pm$ 1.663}} & \textbf{\textcolor{violet}{-34.348 $\pm$ 9.069}} & \textbf{\textcolor{blue}{-29.687 $\pm$ 1.663}} & -47.244 $\pm$ 24.893 \\
+GTOPX 4 & -216.709 & -74.779 $\pm$ 11.032 & -72.749 $\pm$ 6.632 & -136.050 $\pm$ 84.354 & -135.972 $\pm$ 84.455 & -80.577 $\pm$ 12.241 & -81.501 $\pm$ 26.936 & \textbf{\textcolor{blue}{-49.997 $\pm$ 7.345}} & \textbf{\textcolor{blue}{-49.997 $\pm$ 7.345}} & \textbf{\textcolor{blue}{-49.997 $\pm$ 7.345}} & \textbf{\textcolor{violet}{-57.299 $\pm$ 17.860}} \\
+GTOPX 6 & -111.666 & -48.244 $\pm$ 5.766 & -55.834 $\pm$ 9.655 & -67.402 $\pm$ 4.817 & -69.440 $\pm$ 4.137 & -65.996 $\pm$ 9.502 & -48.609 $\pm$ 17.321 & \textbf{\textcolor{blue}{-30.053 $\pm$ 1.303}} & \textbf{\textcolor{blue}{-30.053 $\pm$ 1.303}} & \textbf{\textcolor{violet}{-34.417 $\pm$ 10.093}} & -37.325 $\pm$ 15.452 \\
+\midrule
+Mean rank & / & 6.000 $\pm$ 3.317 & 6.556 $\pm$ 2.833 & 7.111 $\pm$ 3.008 & 7.444 $\pm$ 3.196 & 6.667 $\pm$ 1.732 & 6.000 $\pm$ 1.500 & \textbf{\textcolor{blue}{2.889 $\pm$ 1.746}} & 4.167 $\pm$ 3.775 & \textbf{\textcolor{violet}{3.611 $\pm$ 1.799}} & 4.556 $\pm$ 1.740 \\
+\bottomrule
+\end{tabular*}
+}
+\label{tab:max-ablation-sweep-w}
+\end{table*}

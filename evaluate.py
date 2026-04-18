@@ -1,11 +1,15 @@
 import sys
 
 if __name__ == "__main__":
+    import faulthandler
+
+    faulthandler.enable(all_threads=True)
     from diffuser.cpu_threads import maybe_apply_from_argv_and_env
 
     maybe_apply_from_argv_and_env()
 
 import argparse
+import os
 from ml_logger import logger, instr, needs_relaunch
 from analysis import RUN
 import jaynes
@@ -94,6 +98,54 @@ if __name__ == '__main__':
         default=None,
         help="多任务：JSON 按任务覆盖 n_traj/k/eps（须与 construct / train 一致）",
     )
+    parser.add_argument(
+        "--skip_auto_construct_trajectories",
+        action="store_true",
+        default=False,
+        help="多任务：混合轨迹缺失时不自动运行 construct_trajectories（默认会自动生成）",
+    )
+    parser.add_argument(
+        "--real_task_zero_shot_eval",
+        action="store_true",
+        default=False,
+        help="单任务：不依赖本目录下已训模型，从全任务 multitask text 预训练 checkpoint 直接评估（text-only）",
+    )
+    parser.add_argument(
+        "--real_task_text_only_finetune",
+        action="store_true",
+        default=False,
+        help="与 train 一致：单任务 text-only 微调后的评估，RUN.prefix 含 _fewshot_ft",
+    )
+    parser.add_argument(
+        "--fewshot_text_only_finetune",
+        action="store_true",
+        default=False,
+        help="已弃用：请用 --real_task_text_only_finetune",
+    )
+    parser.add_argument(
+        "--pretrained_mt_hex",
+        type=str,
+        default=None,
+        help="与 train 一致：预训练 mt_<hex>_textcond_mttextonly（默认 911054c35daad7e0）",
+    )
+    parser.add_argument(
+        "--pretrained_multitask_train_tasks",
+        type=str,
+        default=None,
+        help="预训练模型对应的全任务 CSV（默认 9 任务）",
+    )
+    parser.add_argument(
+        "--pretrained_diffusion_seed",
+        type=int,
+        default=0,
+        help="预训练 checkpoint 的 seed 目录（默认 0）",
+    )
+    parser.add_argument(
+        "--load_diffusion_checkpoint",
+        type=str,
+        default=None,
+        help="显式指定扩散 state.pt；不填则与 --real_task_zero_shot_eval 联用自动解析",
+    )
 
     args = parser.parse_args(_cli_args)
 
@@ -115,6 +167,17 @@ if __name__ == '__main__':
         train_tasks_list = [t.strip() for t in args.train_tasks.split(",") if t.strip()]
     if not args.eval_task:
         args.eval_task = train_tasks_list[0]
+
+    zshot = getattr(args, "real_task_zero_shot_eval", False)
+    real_task_ft = getattr(args, "real_task_text_only_finetune", False) or getattr(
+        args, "fewshot_text_only_finetune", False
+    )
+    if zshot:
+        args.multitask_text_only = True
+        args.use_text_condition = True
+    elif real_task_ft:
+        args.multitask_text_only = True
+        args.use_text_condition = True
     train_tasks_str = (
         multitask_path_token(args.train_tasks)
         if len(train_tasks_list) > 1
@@ -127,14 +190,54 @@ if __name__ == '__main__':
         elif not args.eval_all_tasks:
             args.eval_all_tasks = True
 
-    if getattr(args, "multitask_text_only", False) and len(train_tasks_list) <= 1:
+    if (
+        getattr(args, "multitask_text_only", False)
+        and len(train_tasks_list) <= 1
+        and not zshot
+        and not real_task_ft
+    ):
         raise SystemExit(
-            "错误: --multitask_text_only 仅适用于多任务（train_tasks 需为逗号分隔的多个任务）"
+            "错误: --multitask_text_only 仅适用于多任务（train_tasks 需为逗号分隔的多个任务），"
+            "除非使用 --real_task_zero_shot_eval 或 --real_task_text_only_finetune"
         )
 
     _ret = returns_cond_path_infix(args)
     _txt = text_cond_path_infix(args)
     _mto = multitask_text_only_path_infix(args)
+
+    args.diffusion_checkpoint_dir = None
+    if zshot and len(train_tasks_list) == 1:
+        from diffuser.utils.real_task_transfer import (
+            DEFAULT_PRETRAINED_MT_HEX,
+            DEFAULT_PRETRAINED_MULTITASK_CSV,
+            resolve_multitask_pretrained_run_dir,
+            resolve_diffusion_state_pt,
+        )
+
+        _csv = getattr(args, "pretrained_multitask_train_tasks", None) or DEFAULT_PRETRAINED_MULTITASK_CSV
+        _csv = canonical_train_tasks_csv(_csv)
+        if getattr(args, "load_diffusion_checkpoint", None):
+            args.diffusion_checkpoint_dir = os.path.dirname(
+                os.path.abspath(args.load_diffusion_checkpoint)
+            )
+        else:
+            _mh = getattr(args, "pretrained_mt_hex", None) or DEFAULT_PRETRAINED_MT_HEX
+            run_dir = resolve_multitask_pretrained_run_dir(
+                multitask_train_tasks_csv=_csv,
+                frac=float(args.frac),
+                sigma=float(args.sigma),
+                mt_hex=_mh,
+                seed=int(getattr(args, "pretrained_diffusion_seed", 0)),
+            )
+            args.diffusion_checkpoint_dir = os.path.join(run_dir, "checkpoint")
+            _pt = resolve_diffusion_state_pt(args.diffusion_checkpoint_dir, None)
+            if _pt:
+                args.load_diffusion_checkpoint = _pt
+            else:
+                raise SystemExit(
+                    f"未找到预训练 checkpoint：{args.diffusion_checkpoint_dir} 下无 state*.pt"
+                )
+
     # 多任务模式下的数据路径和运行前缀（与 train.py 一致；与评 ant/dkitty 无关）
     if len(train_tasks_list) > 1:
         from diffuser.utils.traj_params import (
@@ -161,8 +264,20 @@ if __name__ == '__main__':
     else:
         # 单任务模式，保持原有逻辑
         task_name = train_tasks_list[0]
+        if zshot and args.n_traj == 1000 and args.k == 50:
+            args.n_traj = 100
+            args.k = 20
+        if zshot:
+            _zsuf = "_realtask_zs"
+        elif real_task_ft:
+            _zsuf = "_fewshot_ft"
+        else:
+            _zsuf = ""
         args.data_path = f'generated_datasets/{args.train_tasks}_frac{args.frac}_sigma{args.sigma}/{task_name}_{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}_vae_latent32_train.p'
-        RUN.prefix = f"trained_models/{args.train_tasks}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}{_ret}{_txt}{_mto}/seed{args.seed}/"
+        RUN.prefix = (
+            f"trained_models/{args.train_tasks}_frac{args.frac}_sigma{args.sigma}/"
+            f"{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}{_zsuf}{_ret}{_txt}{_mto}/seed{args.seed}/"
+        )
     
     logger.print(RUN.prefix, color='green')
     jaynes.config("local")

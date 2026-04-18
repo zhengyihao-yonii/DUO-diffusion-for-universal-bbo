@@ -1,5 +1,4 @@
-Task: Superconductor critical temperature
-Type: continuous
-Description: Design-Bench continuous task over compositional and structural features of cuprate-like superconductors; an oracle regressor scores each design.
-Goal: Maximize the benchmark’s predicted critical temperature (proxy objective).
-Design space: 86 bounded continuous parameters (material descriptor vector used in the Design-Bench dataset).
+Task: Superconductor
+Name: Superconductor
+Description: critical temperature maximization
+Objective: to design the chemical formula for a superconducting material that has a high critical temperature

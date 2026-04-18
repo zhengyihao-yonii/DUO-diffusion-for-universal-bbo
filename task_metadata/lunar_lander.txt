@@ -1,5 +1,4 @@
-Task: LunarLander controller (OpenAI Gym)
-Type: continuous
-Description: Learn the parameters of a controller for a lunar lander to maximize the mean terminal reward across a consistent batch of 50 randomly generated landscapes (varying initial positions and velocities). The design space is 12-dimensional continuous inputs for the lander's actions.
-Goal: Maximize the objective encoded in offline dataset labels (mean terminal reward / return).
-Design space: 12 bounded continuous variables (controller parameters).
+Task: LunarLander
+Name: LunarLander
+Description: Learn the parameters of a controller for a lunar lander
+Objective: to maximize the mean terminal reward across a consistent batch of 50 randomly generated landscape

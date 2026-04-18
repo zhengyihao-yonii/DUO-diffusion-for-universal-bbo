@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import glob
 import re
 
@@ -24,9 +26,30 @@ from diffuser.datasets.real_world_fewshot import is_real_world_fewshot_task
 from diffuser.utils.real_world_oracle import oracle_predict
 
 
+def _real_world_proxy_fallback_dirs(logger_prefix: str) -> list[str]:
+    """
+    Zero-shot 评估的 RUN.prefix 含 ``_realtask_zs``，proxy 实际写在「同轨迹超参、曾跑过 construct/train」
+    的目录下（无 ``_realtask_zs``，或为 ``_fewshot_ft``）。按序尝试这些父目录下的 ``proxy_checkpoint``。
+    """
+    base = logger_prefix.rstrip("/")
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(p: str) -> None:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+
+    _add(os.path.join(base, "proxy_checkpoint"))
+    if "_realtask_zs" in base:
+        _add(os.path.join(base.replace("_realtask_zs", "", 1), "proxy_checkpoint"))
+        _add(os.path.join(base.replace("_realtask_zs", "_fewshot_ft", 1), "proxy_checkpoint"))
+    return out
+
+
 def _resolve_proxy_checkpoint_path(proxy_ckpt_dir, Config):
     """
-    与 scripts/train.multitask_proxy_checkpoint_exists 判定一致：
+    与 diffuser.utils.multitask_proxy_paths.multitask_proxy_checkpoint_exists 判定一致：
     存在任意 state_*.pt 即视为「有 checkpoint」；加载时优先 state.pt、state_{proxy_n_train_steps}.pt，
     否则取 state_*.pt 中训练步数最大的文件（避免仅存在 state_1000.pt 时评估仍找不到）。
     """
@@ -80,6 +103,121 @@ def _resolve_diffusion_checkpoint_path(ckpt_dir, Config):
 
             return max(matches, key=_step)
     return None
+
+
+def _ensure_single_task_real_world_proxy(
+    eval_task,
+    Config,
+    dataset,
+    proxy_dataset,
+    state_dict,
+    renderer,
+):
+    """单任务真实任务：canonical 下无 proxy 时，用已加载的扩散权重训练并保存 proxy（对齐 train.ensure_multitask_proxies）。"""
+    from diffuser.utils.multitask_proxy_paths import multitask_proxy_prefix
+
+    use_task_branch = False
+    observation_dim = dataset.observation_dim
+    original_observation_dim = proxy_dataset.original_observation_dim
+    action_dim = dataset.action_dim
+
+    if Config.diffusion == "models.GaussianInvDynDiffusion":
+        transition_dim = observation_dim
+    else:
+        transition_dim = observation_dim + action_dim
+
+    proxy_prefix = multitask_proxy_prefix(eval_task, Config)
+    os.makedirs(os.path.join(proxy_prefix, "proxy_checkpoint"), exist_ok=True)
+
+    model_config = utils.Config(
+        Config.model,
+        savepath="model_config.pkl",
+        horizon=Config.horizon,
+        transition_dim=transition_dim,
+        cond_dim=observation_dim,
+        dim_mults=Config.dim_mults,
+        dim=Config.dim,
+        returns_condition=Config.returns_condition,
+        device=Config.device,
+        task_condition=use_task_branch,
+        num_tasks=1,
+        condition_dropout=getattr(Config, "condition_dropout", 0.25),
+        calc_energy=getattr(Config, "calc_energy", False),
+        text_condition=getattr(Config, "use_text_condition", False),
+        text_embed_input_dim=int(getattr(Config, "text_embed_dim", 384)),
+        text_condition_dropout=float(
+            getattr(Config, "text_condition_dropout", 0.1)
+        ),
+    )
+    proxy_model_config = utils.Config(
+        Config.proxy_model,
+        savepath="proxy_model_config.pkl",
+        input_dim=original_observation_dim,
+        hidden_dim=Config.proxy_hidden_dim,
+        output_dim=action_dim,
+        n_ensembles=Config.proxy_n_ensembles,
+        device=Config.device,
+    )
+    diffusion_config = utils.Config(
+        Config.diffusion,
+        savepath="diffusion_config.pkl",
+        horizon=Config.horizon,
+        observation_dim=observation_dim,
+        action_dim=action_dim,
+        n_timesteps=Config.n_diffusion_steps,
+        loss_type=Config.loss_type,
+        clip_denoised=Config.clip_denoised,
+        predict_epsilon=Config.predict_epsilon,
+        action_weight=Config.action_weight,
+        loss_weights=Config.loss_weights,
+        loss_discount=Config.loss_discount,
+        returns_condition=Config.returns_condition,
+        device=Config.device,
+        condition_guidance_w=Config.condition_guidance_w,
+        condition_guidance_w_task=float(getattr(Config, "condition_guidance_w_task", 0.0)),
+        condition_guidance_w_text=float(getattr(Config, "condition_guidance_w_text", 0.0)),
+        cfg_apply_task=bool(getattr(Config, "cfg_apply_task", True)),
+        cfg_apply_text=bool(getattr(Config, "cfg_apply_text", True)),
+        sample_with_task_embedding=bool(getattr(Config, "sample_with_task_embedding", True)),
+        sample_with_text_embedding=bool(getattr(Config, "sample_with_text_embedding", True)),
+    )
+    Config.batch_size = 128
+    trainer_config = utils.Config(
+        utils.Trainer,
+        savepath="trainer_config.pkl",
+        train_batch_size=Config.batch_size,
+        train_lr=Config.learning_rate,
+        proxy_train_lr=Config.proxy_learning_rate,
+        gradient_accumulate_every=Config.gradient_accumulate_every,
+        ema_decay=Config.ema_decay,
+        sample_freq=Config.sample_freq,
+        save_freq=Config.save_freq,
+        proxy_save_freq=Config.proxy_save_freq,
+        log_freq=Config.log_freq,
+        proxy_log_freq=Config.proxy_log_freq,
+        label_freq=int(Config.n_train_steps // Config.n_saves),
+        save_parallel=Config.save_parallel,
+        bucket=Config.bucket,
+        n_reference=Config.n_reference,
+        train_device=Config.device,
+        save_checkpoints=Config.save_checkpoints,
+        proxy_save_prefix=proxy_prefix,
+    )
+
+    model = model_config()
+    proxy_model = proxy_model_config()
+    diffusion = diffusion_config(model)
+    trainer = trainer_config(diffusion, proxy_model, dataset, proxy_dataset, renderer)
+
+    trainer.step = state_dict["step"]
+    trainer.model.load_state_dict(state_dict["model"])
+    trainer.ema_model.load_state_dict(state_dict["ema"])
+    print(
+        f"[real_world] 训练 proxy → {proxy_prefix}proxy_checkpoint/ "
+        f"（{Config.proxy_n_train_steps} steps）",
+        flush=True,
+    )
+    trainer.train_proxy(n_train_steps=Config.proxy_n_train_steps)
 
 
 def _import_config(task_name):
@@ -147,13 +285,7 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
                 )
             proxy_state_dict = torch.load(proxy_loadpath, map_location=Config.device)
     else:
-        proxy_ckpt_dir = os.path.join(logger.prefix, "proxy_checkpoint")
-        proxy_loadpath = _resolve_proxy_checkpoint_path(proxy_ckpt_dir, Config)
-        if proxy_loadpath is None:
-            raise FileNotFoundError(
-                f"无法加载 proxy：{proxy_ckpt_dir} 下无 state.pt 或 state_*.pt"
-            )
-        proxy_state_dict = torch.load(proxy_loadpath, map_location=Config.device)
+        proxy_state_dict = None  # 单任务：在构建 dataset 后再解析路径（可自动训练 proxy）
 
     torch.backends.cudnn.benchmark = True
     utils.set_seed(Config.seed)
@@ -161,14 +293,31 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
     # 轨迹数据路径：多任务使用混合 pkl（与 train 一致）
     if is_multitask:
         data_dir = os.path.dirname(Config.data_path)
-        from diffuser.utils.traj_params import resolve_multitask_mixed_path
+        from diffuser.utils.traj_params import (
+            ensure_multitask_mixed_trajectories,
+            resolve_multitask_mixed_path,
+        )
 
         _sig = getattr(Config, "multitask_traj_signature", None)
+        _skip_auto = bool(deps.get("skip_auto_construct_trajectories", False))
         try:
+            ensure_multitask_mixed_trajectories(
+                train_tasks_list=list(train_tasks_list),
+                frac=float(Config.frac),
+                sigma=float(Config.sigma),
+                seed=int(Config.seed),
+                n_traj=int(Config.n_traj),
+                k=int(Config.k),
+                eps=float(Config.eps),
+                horizon=int(Config.horizon),
+                traj_params_json=deps.get("traj_params_json"),
+                fixed_dim=int(getattr(Config, "fixed_dim", 128)),
+                skip_auto=_skip_auto,
+            )
             mixed_data_path = resolve_multitask_mixed_path(data_dir, _sig)
         except FileNotFoundError as e:
             raise FileNotFoundError(
-                f"{e}\n请先运行 construct_trajectories.py 生成混合轨迹。"
+                f"{e}\n请先运行 construct_trajectories.py 生成混合轨迹，或去掉 --skip_auto_construct_trajectories。"
             ) from e
         dataset = PointRegretDataset(
             horizon=Config.horizon,
@@ -207,6 +356,60 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
     original_observation_dim = proxy_dataset.original_observation_dim
     action_dim = dataset.action_dim
     print(f"[{eval_task}] observation_dim={observation_dim}, action_dim={action_dim}")
+
+    if not is_multitask:
+        from diffuser.utils.multitask_proxy_paths import multitask_proxy_prefix
+
+        proxy_loadpath = None
+        proxy_ckpt_dir = None
+        if is_real_world_fewshot_task(eval_task):
+            for d in _real_world_proxy_fallback_dirs(logger.prefix):
+                proxy_loadpath = _resolve_proxy_checkpoint_path(d, Config)
+                if proxy_loadpath is not None:
+                    proxy_ckpt_dir = d
+                    print(
+                        f"[real_world] proxy 从 fallback 加载: {proxy_loadpath}",
+                        flush=True,
+                    )
+                    break
+            if proxy_loadpath is None:
+                canon_dir = os.path.join(
+                    multitask_proxy_prefix(eval_task, Config), "proxy_checkpoint"
+                )
+                proxy_loadpath = _resolve_proxy_checkpoint_path(canon_dir, Config)
+                if proxy_loadpath is not None:
+                    proxy_ckpt_dir = canon_dir
+                    print(
+                        f"[real_world] proxy 从 canonical 路径加载: {proxy_loadpath}",
+                        flush=True,
+                    )
+        if proxy_loadpath is None:
+            proxy_ckpt_dir = os.path.join(logger.prefix, "proxy_checkpoint")
+            proxy_loadpath = _resolve_proxy_checkpoint_path(proxy_ckpt_dir, Config)
+        if proxy_loadpath is None and is_real_world_fewshot_task(eval_task):
+            _ensure_single_task_real_world_proxy(
+                eval_task,
+                Config,
+                dataset,
+                proxy_dataset,
+                state_dict,
+                renderer,
+            )
+            canon_dir = os.path.join(
+                multitask_proxy_prefix(eval_task, Config), "proxy_checkpoint"
+            )
+            proxy_loadpath = _resolve_proxy_checkpoint_path(canon_dir, Config)
+            proxy_ckpt_dir = canon_dir
+        if proxy_loadpath is None:
+            raise FileNotFoundError(
+                f"无法加载 proxy：{proxy_ckpt_dir} 下无 state.pt 或 state_*.pt"
+                + (
+                    "（真实任务可依赖自动训练；若仍失败请检查数据与权限）"
+                    if is_real_world_fewshot_task(eval_task)
+                    else ""
+                )
+            )
+        proxy_state_dict = torch.load(proxy_loadpath, map_location=Config.device)
 
     # 与 ZipDataset 一致的离线训练子集上 y 的最优值（非全局最优；亦非上面 DesignBench 仅用于归一化的全库 min/max）
     from diffuser.utils.offline_train_best import offline_training_best_y
@@ -493,14 +696,23 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
         })
 
     tag = save_suffix or eval_task
-    np.savez_compressed(
-        os.path.join(logger.prefix, f'performance_{tag}_{Config.n_train_steps}_{trainer.batch_size}x{Config.horizon - context_length}_alpha{Config.alpha}'),
-        y=y, y_norm=y_norm, time=time,
+    # 与 train 共用同一 checkpoint；扫 w_text 时若不区分文件名会互相覆盖。
+    _wtag = ""
+    if getattr(Config, "use_text_condition", False) or getattr(
+        Config, "multitask_text_only", False
+    ):
+        _wt = float(getattr(Config, "condition_guidance_w_text", 0.0))
+        _wtag = f"_wtext{_wt:g}"
+    _stem = (
+        f"performance_{tag}_{Config.n_train_steps}_{trainer.batch_size}x"
+        f"{Config.horizon - context_length}_alpha{Config.alpha}{_wtag}"
     )
-    np.savez_compressed(
-        os.path.join(logger.prefix, f'samples_{tag}_{Config.n_train_steps}_{trainer.batch_size}x{Config.horizon - context_length}_alpha{Config.alpha}'),
-        queries=queries,
+    np.savez_compressed(os.path.join(logger.prefix, _stem), y=y, y_norm=y_norm, time=time)
+    _stem_s = (
+        f"samples_{tag}_{Config.n_train_steps}_{trainer.batch_size}x"
+        f"{Config.horizon - context_length}_alpha{Config.alpha}{_wtag}"
     )
+    np.savez_compressed(os.path.join(logger.prefix, _stem_s), queries=queries)
     return {
         'eval_task': eval_task,
         'max': float(np.max(y)),
@@ -590,16 +802,58 @@ def evaluate(**deps):
         else f"{tasks_to_eval[0]}_{Config.n_traj}x{Config.horizon}_k{Config.k}_eps{Config.eps}_seed{Config.seed}"
     )
     if wandb is not None:
-        wandb.init(project='decdiff-opt', config=Config, name=run_name, group="evaluation")
+        if os.environ.get("WANDB_DISABLED", "").strip().lower() in ("1", "true", "yes"):
+            print("[wandb] WANDB_DISABLED=1，跳过 wandb.init", flush=True)
+            wandb = None
+        else:
+            _offline = (
+                os.environ.get("WANDB_MODE", "").strip().lower() == "offline"
+                or os.environ.get("GTG_WANDB_OFFLINE", "").strip().lower()
+                in ("1", "true", "yes")
+            )
+            try:
+                if _offline:
+                    print(
+                        "[wandb] 离线模式（GTG_WANDB_OFFLINE / WANDB_MODE=offline），日志仅本地",
+                        flush=True,
+                    )
+                    _st = wandb.Settings(mode="offline")
+                else:
+                    try:
+                        _to = int(os.environ.get("WANDB_INIT_TIMEOUT", "300"))
+                    except ValueError:
+                        _to = 300
+                    _st = wandb.Settings(init_timeout=_to)
+                wandb.init(
+                    project="decdiff-opt",
+                    config=Config,
+                    name=run_name,
+                    group="evaluation",
+                    settings=_st,
+                )
+            except Exception as e:
+                print(
+                    f"[wandb] init 失败（评估仍继续，仅不同步云端）: {e}",
+                    flush=True,
+                )
+                wandb = None
 
-    ckpt_dir = os.path.join(logger.prefix, "checkpoint")
-    loadpath = _resolve_diffusion_checkpoint_path(ckpt_dir, Config)
+    _ld = deps.get("load_diffusion_checkpoint")
+    if _ld and os.path.isfile(_ld):
+        loadpath = _ld
+    else:
+        ckpt_dir = deps.get("diffusion_checkpoint_dir") or os.path.join(
+            logger.prefix, "checkpoint"
+        )
+        loadpath = _resolve_diffusion_checkpoint_path(ckpt_dir, Config)
     if loadpath is None:
         raise FileNotFoundError(
-            f"未找到扩散 checkpoint：目录 {ckpt_dir} 下需要 state.pt 或 state_<steps>.pt"
+            f"未找到扩散 checkpoint：请设置 --load_diffusion_checkpoint 或检查目录 "
+            f"{deps.get('diffusion_checkpoint_dir') or os.path.join(logger.prefix, 'checkpoint')}"
         )
-    print(f"[evaluate] 加载扩散权重: {loadpath}")
+    print(f"[evaluate] 加载扩散权重: {loadpath}", flush=True)
     state_dict = torch.load(loadpath, map_location=Config.device)
+    deps["_diffusion_checkpoint_loadpath"] = loadpath
 
     results = []
     for i, eval_task in enumerate(tasks_to_eval):

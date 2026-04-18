@@ -8,7 +8,6 @@ import pickle as pkl
 # 由 main() 成功 import wandb 后赋值；失败则为 None（旧 typing_extensions 下 wandb 无法 import，训练仍应能跑）
 wandb = None
 import os
-import glob
 from pathlib import Path
 from diffuser.models.vae import VAE
 from torch.utils.data import DataLoader, ConcatDataset
@@ -16,6 +15,10 @@ from diffuser.utils.training import Trainer
 from diffuser.cpu_threads import (
     apply_torch_cpu_threads_from_env,
     dataloader_num_workers_cap,
+)
+from diffuser.utils.multitask_proxy_paths import (
+    multitask_proxy_checkpoint_exists,
+    multitask_proxy_prefix,
 )
 
 apply_torch_cpu_threads_from_env()
@@ -41,34 +44,6 @@ def _maybe_build_task_text_embeddings(Config):
     print(
         f"[task text] use_text_condition=True, embed_dim={dim}, metadata_dir={meta}"
     )
-
-
-def multitask_proxy_prefix(task_name, Config):
-    """与 evaluate 中单任务 proxy 路径一致。"""
-    nd = getattr(Config, "traj_n_traj_dict", None)
-    if nd is not None and task_name in nd:
-        n = nd[task_name]
-        k = getattr(Config, "traj_k_dict", {})[task_name]
-        e = getattr(Config, "traj_eps_dict", {})[task_name]
-    else:
-        n, k, e = Config.n_traj, Config.k, Config.eps
-    return (
-        f"trained_models/{task_name}_frac{Config.frac}_sigma{Config.sigma}/"
-        f"{n}x{Config.horizon}_k{k}_eps{e}/seed{Config.seed}/"
-    )
-
-
-def multitask_proxy_checkpoint_exists(prefix, Config):
-    base = os.path.join(prefix, "proxy_checkpoint")
-    if os.path.isfile(os.path.join(base, "state.pt")):
-        return True
-    if getattr(Config, "save_checkpoints", False):
-        p = os.path.join(base, f"state_{Config.proxy_n_train_steps}.pt")
-        if os.path.isfile(p):
-            return True
-        if glob.glob(os.path.join(base, "state_*.pt")):
-            return True
-    return False
 
 
 def ensure_multitask_proxies(diffusion, dataset, renderer, Config, action_dim, logger):
@@ -286,12 +261,15 @@ def main(**deps):
         print(f"📊 单任务训练模式启用 📊")
         print(f"📋 训练任务: {Config.train_tasks_list[0]}")
 
-    if getattr(Config, "fewshot_text_only_finetune", False):
+    _real_task_ft = getattr(Config, "real_task_text_only_finetune", False) or getattr(
+        Config, "fewshot_text_only_finetune", False
+    )
+    if _real_task_ft:
         if not getattr(Config, "use_text_condition", False):
             Config.use_text_condition = True
-            print("⚠️ fewshot_text_only_finetune：已自动设置 use_text_condition=True")
+            print("⚠️ real_task_text_only_finetune：已自动设置 use_text_condition=True")
         print(
-            "📌 few-shot：单任务轨迹 + 仅文本条件（与 multitask_text_only 同架构，task_condition=False）"
+            "📌 real-task：单任务轨迹 + 仅文本条件（与 multitask_text_only 同架构，task_condition=False）"
         )
     elif getattr(Config, "multitask_text_only", False):
         if not Config.is_multitask:
@@ -305,7 +283,7 @@ def main(**deps):
 
     use_task_branch = Config.is_multitask and not getattr(
         Config, "multitask_text_only", False
-    ) and not getattr(Config, "fewshot_text_only_finetune", False)
+    ) and not _real_task_ft
 
     # gtopx 等共用 gtopx_config 时类默认 dataset 仍为 gtopx2；必须与真实任务名一致，
     # 否则 ZipDataset / load_gtopx_offline_arrays 维数错误，evaluate 会与 checkpoint 不一致。
@@ -338,8 +316,41 @@ def main(**deps):
         run_name = f"{Config.train_tasks_list[0]}_{Config.n_traj}x{Config.horizon}_k{Config.k}_eps{Config.eps}_seed{Config.seed}"
     
     if wandb is not None:
-        wandb.init(project='decdiff-opt', config=Config, name=run_name)
+        import os as _os
 
+        if _os.environ.get("WANDB_DISABLED", "").strip().lower() in ("1", "true", "yes"):
+            print("[wandb] WANDB_DISABLED=1，跳过 wandb.init", flush=True)
+            wandb = None
+        else:
+            _offline = (
+                _os.environ.get("WANDB_MODE", "").strip().lower() == "offline"
+                or _os.environ.get("GTG_WANDB_OFFLINE", "").strip().lower()
+                in ("1", "true", "yes")
+            )
+            try:
+                if _offline:
+                    print(
+                        "[wandb] 离线模式（GTG_WANDB_OFFLINE=1 或 WANDB_MODE=offline），日志仅本地",
+                        flush=True,
+                    )
+                    _st = wandb.Settings(mode="offline")
+                else:
+                    try:
+                        _to = int(_os.environ.get("WANDB_INIT_TIMEOUT", "300"))
+                    except ValueError:
+                        _to = 300
+                    _st = wandb.Settings(init_timeout=_to)
+                wandb.init(
+                    project="decdiff-opt",
+                    config=Config,
+                    name=run_name,
+                    settings=_st,
+                )
+            except Exception as e:
+                print(f"[wandb] init 失败（训练仍继续）: {e}", flush=True)
+                wandb = None
+
+    if wandb is not None:
         # 更新wandb配置，添加多任务相关信息
         if Config.is_multitask:
             wandb.config.update(
@@ -374,9 +385,26 @@ def main(**deps):
         
         # 构建完整的混合轨迹文件路径
         data_dir = os.path.dirname(Config.data_path)
-        from diffuser.utils.traj_params import resolve_multitask_mixed_path
+        from diffuser.utils.traj_params import (
+            ensure_multitask_mixed_trajectories,
+            resolve_multitask_mixed_path,
+        )
 
         _sig = getattr(Config, "multitask_traj_signature", None)
+        _skip_auto = bool(deps.get("skip_auto_construct_trajectories", False))
+        ensure_multitask_mixed_trajectories(
+            train_tasks_list=list(Config.train_tasks_list),
+            frac=float(Config.frac),
+            sigma=float(Config.sigma),
+            seed=int(Config.seed),
+            n_traj=int(Config.n_traj),
+            k=int(Config.k),
+            eps=float(Config.eps),
+            horizon=int(Config.horizon),
+            traj_params_json=deps.get("traj_params_json"),
+            fixed_dim=int(getattr(Config, "fixed_dim", 128)),
+            skip_auto=_skip_auto,
+        )
         mixed_data_path = resolve_multitask_mixed_path(data_dir, _sig)
         
         # 直接加载混合轨迹文件

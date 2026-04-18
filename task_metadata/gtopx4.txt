@@ -1,5 +1,4 @@
-Task: GTOPX-4 / Messenger full
-Type: continuous
-Description: Mercury mission with resonant Mercury fly-bys; sequence Earth–Venus–Venus–Mercury (multiple Mercury passes).
-Goal: Minimize total mission ΔV.
-Design space: 26 bounded continuous variables (epochs, asymptotic speeds, segment times, DSM fractions, fly-by radii, B-plane angles).
+Task: GTOPX 4
+Name: Messenger (full)
+Description: Interplanetary missions to Mercury, with resonant flybys of the planet
+Objective: to minimize the total velocity change incurred throughout the mission

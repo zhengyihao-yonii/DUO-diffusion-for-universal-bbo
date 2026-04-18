@@ -1,5 +1,4 @@
-Task: GTOPX-6 / Rosetta
-Type: continuous
-Description: Multi-gravity-assist mission to comet 67P; sequence Earth–Earth–Mars–Earth–Earth–67P with deep-space maneuvers.
-Goal: Minimize total mission ΔV to comet arrival.
-Design space: 22 bounded continuous variables (epochs, asymptotic speeds, segment times, DSM fractions, fly-by radii, B-plane angles).
+Task: GTOPX 6
+Name: Rosetta
+Description: Simulation of multi-gravity-assisted space missions to Comet 67P/Churyumov-Gerasimenko
+Objective: to minimize the total velocity change required throughout the mission

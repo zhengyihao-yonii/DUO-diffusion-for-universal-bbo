@@ -98,22 +98,53 @@ if __name__ == '__main__':
         help="多任务：JSON 按任务覆盖 n_traj/k/eps（须与 construct_trajectories 一致）",
     )
     parser.add_argument(
+        "--skip_auto_construct_trajectories",
+        action="store_true",
+        default=False,
+        help="多任务：混合轨迹缺失时不自动运行 construct_trajectories（默认会自动生成）",
+    )
+    parser.add_argument(
         "--train_epochs",
         type=int,
         default=200,
         help="扩散训练 epoch 数；n_train_steps = train_epochs * n_steps_per_epoch（默认 200）",
     )
     parser.add_argument(
+        "--real_task_text_only_finetune",
+        action="store_true",
+        default=False,
+        help="真实任务迁移：单任务轨迹 + 仅文本条件（与 multitask_text_only 同架构），"
+        "从全任务 multitask text 预训练权重微调（默认 mt 见 --pretrained_mt_hex）",
+    )
+    parser.add_argument(
         "--fewshot_text_only_finetune",
         action="store_true",
         default=False,
-        help="Few-shot：单任务 + 仅文本条件，从 --load_diffusion_checkpoint 加载全任务预训练权重后微调",
+        help="已弃用：请用 --real_task_text_only_finetune",
+    )
+    parser.add_argument(
+        "--pretrained_mt_hex",
+        type=str,
+        default=None,
+        help="预训练 multitask text 的 hyper 段 16 位 hex（默认 911054c35daad7e0；或环境 GTG_REAL_TASK_PRETRAINED_MT_HEX）",
+    )
+    parser.add_argument(
+        "--pretrained_multitask_train_tasks",
+        type=str,
+        default=None,
+        help="预训练模型对应的全任务 CSV（默认 9 任务字典序，与 run_multitask.sh 一致）",
+    )
+    parser.add_argument(
+        "--pretrained_diffusion_seed",
+        type=int,
+        default=0,
+        help="预训练 checkpoint 所在 seed 目录（默认 0）",
     )
     parser.add_argument(
         "--load_diffusion_checkpoint",
         type=str,
         default=None,
-        help="预训练扩散 checkpoint 的 .pt 路径（含 model/ema），用于 few-shot 微调",
+        help="预训练扩散 checkpoint 的 .pt 路径（含 model/ema）；不填则按 --pretrained_mt_hex 自动解析",
     )
     parser.add_argument(
         "--load_diffusion_checkpoint_epoch",
@@ -146,18 +177,59 @@ if __name__ == '__main__':
         if not args.eval_task:
             args.eval_task = train_tasks_list[0]
 
+    real_task_ft = getattr(args, "real_task_text_only_finetune", False) or getattr(
+        args, "fewshot_text_only_finetune", False
+    )
+    if real_task_ft:
+        args.multitask_text_only = True
+        args.use_text_condition = True
+
     if (
         getattr(args, "multitask_text_only", False)
         and not is_multitask
-        and not getattr(args, "fewshot_text_only_finetune", False)
+        and not real_task_ft
     ):
         raise SystemExit(
-            "错误: --multitask_text_only 仅适用于多任务（train_tasks 需为逗号分隔的多个任务）"
+            "错误: --multitask_text_only 仅适用于多任务（train_tasks 需为逗号分隔的多个任务），"
+            "除非使用 --real_task_text_only_finetune（单任务 text-only 迁移）"
         )
 
     _ret = returns_cond_path_infix(args)
     _txt = text_cond_path_infix(args)
     _mto = multitask_text_only_path_infix(args)
+
+    if real_task_ft and not is_multitask and not getattr(args, "load_diffusion_checkpoint", None):
+        from diffuser.utils.real_task_transfer import (
+            DEFAULT_PRETRAINED_MULTITASK_CSV,
+            resolve_pretrained_diffusion_pt_for_real_task,
+        )
+
+        _csv = (
+            getattr(args, "pretrained_multitask_train_tasks", None)
+            or DEFAULT_PRETRAINED_MULTITASK_CSV
+        )
+        _csv = canonical_train_tasks_csv(_csv)
+        _pt = resolve_pretrained_diffusion_pt_for_real_task(
+            multitask_train_tasks_csv=_csv,
+            frac=float(args.frac),
+            sigma=float(args.sigma),
+            mt_hex=getattr(args, "pretrained_mt_hex", None),
+            pretrained_seed=int(getattr(args, "pretrained_diffusion_seed", 0)),
+            config=None,
+        )
+        if _pt:
+            args.load_diffusion_checkpoint = _pt
+            print(f"[real_task] 使用预训练扩散权重: {_pt}", flush=True)
+        else:
+            raise SystemExit(
+                "未找到预训练 checkpoint：请设置 --load_diffusion_checkpoint，"
+                "或确认 trained_models/multi_*_frac…/mt_<hex>_textcond_mttextonly/seed*/checkpoint/ 存在"
+            )
+
+    if real_task_ft and not is_multitask and args.n_traj == 1000 and args.k == 50:
+        args.n_traj = 100
+        args.k = 20
+
     # 根据任务数量设置数据路径
     if is_multitask:
         from diffuser.utils.traj_params import (
@@ -189,7 +261,7 @@ if __name__ == '__main__':
         if not args.eval_task:
             args.eval_task = task_name
         args.data_path = f'generated_datasets/{task_name}_frac{args.frac}_sigma{args.sigma}/{task_name}_{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}_vae_latent32_train.p'
-        _few = "_fewshot_ft" if getattr(args, "fewshot_text_only_finetune", False) else ""
+        _few = "_fewshot_ft" if real_task_ft else ""
         RUN.prefix = f"trained_models/{task_name}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}{_few}{_ret}{_txt}{_mto}/seed{args.seed}/"
     
     logger.print(RUN.prefix, color='green')
