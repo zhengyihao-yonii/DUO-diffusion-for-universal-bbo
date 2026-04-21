@@ -4,14 +4,16 @@
 
 实现位于 ``diffuser.real_world_sim``（由 mcts-transfer 迁入）。依赖：
 
-- **LunarLander**：``gym`` + ``Box2D``（``pip install gymnasium[box2d]`` 或 ``gym[box2d]``）
-- **RobotPush**：``pygame`` + ``Box2D``
+- **LunarLander**：``gym``（≥0.21 亦可）+ ``Box2D``；内置 LunarLander 已与旧版 ``gym`` 兼容。
+  Box2D：``pip install pybox2d`` / ``box2d-py`` / ``conda install pybox2d``（``import Box2D``）。
+- **RobotPush**：``pygame`` + 同上 **pybox2d**（仅 ``pip install box2d`` 往往无法 ``import Box2D``）
 - **Rover**：``numpy`` + ``scipy``
 
 输入 ``x`` 为与 JSON 一致的设计向量（[0,1] 归一化，维数见 ``REAL_WORLD_FEWSHOT_TASK_SPECS``）。
 """
 from __future__ import annotations
 
+import os
 from typing import Callable
 
 import numpy as np
@@ -23,11 +25,20 @@ def is_real_world_oracle_task(name: str) -> bool:
     return name in _REAL_WORLD_TASKS
 
 
-def _lunar_predict_batch(x: np.ndarray, n_envs: int = 50) -> np.ndarray:
-    """x: (N, 12) in [0,1]；返回每条轨迹在 n_envs 个随机种子下的平均回报（越大越好）。"""
+def _lunar_predict_batch(x: np.ndarray, n_envs: int | None = None) -> np.ndarray:
+    """x: (N, 12) in [0,1]；返回每条轨迹在 n_envs 个随机种子下的平均回报（越大越好）。
+
+    默认每个设计评估 5 局（原为从 mcts-transfer 迁入时常用的 50，过慢）。
+    可用环境变量 ``GTG_LUNAR_ORACLE_N_ENVS`` 覆盖（正整数）；或传入 ``n_envs`` 显式指定。
+    """
     import torch
 
     from diffuser.real_world_sim.lunar_lander import simulate_lunar_rover
+
+    if n_envs is None:
+        raw = os.environ.get("GTG_LUNAR_ORACLE_N_ENVS", "").strip()
+        n_envs = int(raw) if raw else 5
+    n_envs = max(1, int(n_envs))
 
     x = np.asarray(x, dtype=np.float64)
     if x.ndim == 1:

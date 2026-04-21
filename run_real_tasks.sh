@@ -22,6 +22,13 @@
 #   --horizon 64 --frac 1.0 --sigma 0.0
 #   --num_seeds 5  # 重复次数（默认 1）
 #   --start_seed 0 # 第一个 seed（默认 0）
+#   PROXY_FILTER   可选 0/1（环境变量）：仅 few-shot 的 train/evaluate 会传 --proxy_filter（不设则默认 1）。
+#                  Zero-shot 阶段始终关闭 proxy（--proxy_filter 0），不训 proxy、评估时不筛选。
+#   SKIP_TRAIN_IF_CKPT  默认 1：few-shot 若 trained_models/.../fewshot_ft.../seed*/checkpoint/ 已有
+#                  state.pt 或 state_*.pt，则跳过 train.py 仅跑 evaluate（重跑失败评估时不必重训）。
+#                  FORCE_FEWSHOT_TRAIN=1 强制重新微调。
+#   CONDITION_GUIDANCE_W_TEXT  文本 CFG 权重（--condition_guidance_w_text），默认 8（与 eval_sweep_w_text 中 w=8 对齐）。
+#                  也可 --condition_guidance_w_text <x> 或 --w_text <x>。
 #   --pretrained_vae_info /abs/path/vae_info.p   # few-shot；不设则见下方自动解析
 #   --pretrained_multitask_train_tasks 'ant,dkitty,...'  # 与多任务预训练 CSV 一致，用于默认 VAE 路径
 #
@@ -35,6 +42,9 @@
 #   REAL_TASK_RESULTS_ROOT  默认 PROJECT/results/real_task；可用 --results-root 或环境变量覆盖。
 #   Zero-shot:  $REAL_TASK_RESULTS_ROOT/zero_shot/<task>_frac<F>_sigma<S>/
 #                 <n_traj>x<h>_k<k>_eps<eps>[_ret]_mt<hex>_pds<seed>_zs/run<N>_seed<S>/evaluate.log
+#   真实任务 few-shot：评估前需要 construct 生成的单任务轨迹 pkl（Step 1）。
+#   真实任务 zero-shot：不构造轨迹 pkl；evaluate 固定无上下文采样（README）。
+#   Few-shot 默认 FEWSHOT_K=128、FEWSHOT_MODE=worst（见 README）。
 #   Few-shot:   $REAL_TASK_RESULTS_ROOT/few_shot/<task>_frac.../fs_<tag>/
 #                 <hyper>_mt<hex>_ft/construct_trajectories.log + run<N>_seed*/{train,evaluate}.log
 #   若 export RESULTS=/某次实验的完整目录，则仅 Few-shot 时覆盖该任务的 base_dir（与旧版一致，便于单任务重跑）。
@@ -129,8 +139,12 @@ while [[ $# -gt 0 ]]; do
       GTG_WANDB_OFFLINE_CLI=1
       shift
       ;;
+    --condition_guidance_w_text | --w_text)
+      CONDITION_GUIDANCE_W_TEXT="$2"
+      shift 2
+      ;;
     -h | --help)
-      sed -n '1,120p' "$0"
+      sed -n '1,130p' "$0"
       exit 0
       ;;
     --)
@@ -179,9 +193,18 @@ SIGMA="${SIGMA:-0.0}"
 # ---------- 结果根目录（与 results/single_task、results/multi_task 并列）----------
 REAL_TASK_RESULTS_ROOT="${REAL_TASK_RESULTS_ROOT:-$PROJECT/results/real_task}"
 
+# 文本 classifier-free guidance（与 evaluate.py / train.py --condition_guidance_w_text 一致；默认 8）
+CONDITION_GUIDANCE_W_TEXT="${CONDITION_GUIDANCE_W_TEXT:-8}"
+
 # ---------- Few-shot 可选变量 ----------
+# 默认：在合并后的 JSON 上取 y 最小的 128 个点（worst；越大越好）。
+# 若需全量点（不子采样）：export FEWSHOT_K= 为空字符串，或在本脚本执行环境中显式置空。
+# 仅当 FEWSHOT_K 完全未设置（unset）时使用默认 128。
 PRETRAINED_VAE_INFO="${PRETRAINED_VAE_INFO:-}"
-FEWSHOT_MODE="${FEWSHOT_MODE:-random}"
+if [[ -z "${FEWSHOT_K+x}" ]]; then
+  FEWSHOT_K=128
+fi
+FEWSHOT_MODE="${FEWSHOT_MODE:-worst}"
 CONSTRUCT_SEED="${CONSTRUCT_SEED:-0}"
 FINETUNE_EPOCHS="${FINETUNE_EPOCHS:-50}"
 FINETUNE_LR="${FINETUNE_LR:-3e-5}"
@@ -195,7 +218,8 @@ if ! [[ "$NUM_SEEDS" =~ ^[1-9][0-9]*$ ]]; then
   echo "错误: NUM_SEEDS 须为正整数，当前: ${NUM_SEEDS}" >&2
   exit 1
 fi
-TRAIN_EPOCHS="${TRAIN_EPOCHS:-200}"
+# Few-shot 扩散微调：默认 40 epoch（train.py 对 --real_task_text_only_finetune 未写 --train_epochs 时亦为 40）；预训练级 200 请 export TRAIN_EPOCHS=200
+TRAIN_EPOCHS="${TRAIN_EPOCHS:-40}"
 EVAL_ONLY="${EVAL_ONLY:-0}"
 USE_RETURNS="${USE_RETURNS:-0}"
 AUTO_CONTINUE="${AUTO_CONTINUE:-0}"
@@ -242,6 +266,8 @@ print(os.path.join(project, f'generated_datasets/multi_{tok}_frac{frac}_sigma{si
   exit 1
 }
 
+# 真实任务 zero-shot：evaluate 固定无上下文轨迹，不依赖单任务轨迹 pkl；需要时自行运行 construct_trajectories.py。
+
 _max_batch_from_dirs() {
   local root="$1"
   local m=0
@@ -260,6 +286,18 @@ _max_batch_from_dirs() {
   done
   shopt -u nullglob
   echo "$m"
+}
+
+# 与 train.py 单任务 --real_task_text_only_finetune 的 RUN.prefix 中段一致（_fewshot_ft + 条件后缀）
+_fewshot_trained_ckpt_dir() {
+  local t="$1" seed="$2"
+  local _ret="" _txt _mto
+  if [[ "${USE_RETURNS:-0}" == "1" ]]; then
+    _ret="${GTG_RETCOND_PATH_INFIX:-_retcond}"
+  fi
+  _txt="${GTG_TEXTCOND_PATH_INFIX:-_textcond}"
+  _mto="${GTG_MTTEXTONLY_PATH_INFIX:-_mttextonly}"
+  echo "${PROJECT}/trained_models/${t}_frac${FRAC}_sigma${SIGMA}/${N_TRAJ}x${HORIZON}_k${K}_eps${EPS}_fewshot_ft${_ret}${_txt}${_mto}/seed${seed}/checkpoint"
 }
 
 _tasks_to_run() {
@@ -290,6 +328,13 @@ CPU_EXTRA=()
 if [[ -n "${CPU_THREADS}" ]]; then
   CPU_EXTRA=(--cpu_threads "$CPU_THREADS")
 fi
+
+PROXY_FILTER_FS_EXTRA=()
+if [[ -n "${PROXY_FILTER:-}" ]]; then
+  PROXY_FILTER_FS_EXTRA=(--proxy_filter "${PROXY_FILTER}")
+fi
+
+W_TEXT_EXTRA=(--condition_guidance_w_text "${CONDITION_GUIDANCE_W_TEXT}")
 
 _run_zero_shot_one() {
   local t="$1"
@@ -331,8 +376,11 @@ _run_zero_shot_one() {
 
   echo "=========================================="
   echo "[Zero-shot] TASK=$t  PRETRAINED_MT_HEX=$PRETRAINED_MT_HEX  n_traj=$N_TRAJ k=$K eps=$EPS"
+  echo "  condition_guidance_w_text=${CONDITION_GUIDANCE_W_TEXT}"
   echo "  根目录: $base_dir"
   echo "=========================================="
+
+  echo "[Zero-shot] 真实任务：跳过轨迹 pkl / construct（采样固定无上下文；需本地 generated_datasets/.../vae_info.p 等供解码）"
 
   local zi
   local _ok=0
@@ -356,6 +404,8 @@ _run_zero_shot_one() {
       --seed "$seed" \
       "${RETURNS_EXTRA[@]}" \
       "${CPU_EXTRA[@]}" \
+      "${W_TEXT_EXTRA[@]}" \
+      --proxy_filter 0 \
       >"$run_dir/evaluate.log" 2>&1; then
       _ok=$((_ok + 1))
       echo "  完成: $run_dir/evaluate.log"
@@ -443,8 +493,10 @@ _run_few_shot_one() {
 
   echo "=========================================="
   echo "[Few-shot] TASK=$t  PRETRAINED_MT_HEX=$PRETRAINED_MT_HEX  n_traj=$N_TRAJ k=$K eps=$EPS horizon=$HORIZON"
+  echo "  TRAIN_EPOCHS=$TRAIN_EPOCHS（扩散微调；与预训练 200 epoch 区分，可用 TRAIN_EPOCHS=200 加长）"
   echo "  NUM_SEEDS=$NUM_SEEDS  START_SEED=$start_seed  （seed: $start_seed .. $((start_seed + NUM_SEEDS - 1))）"
   echo "  PRETRAINED_VAE_INFO=$PRETRAINED_VAE_INFO"
+  echo "  condition_guidance_w_text=${CONDITION_GUIDANCE_W_TEXT}"
   echo "  RESULTS=$base_dir"
   echo "=========================================="
 
@@ -494,7 +546,16 @@ _run_few_shot_one() {
 
     echo "--- run${BATCH_RUN}_seed${seed} ($((run + 1))/$NUM_SEEDS) ---"
 
-    if [[ "${EVAL_ONLY}" != "1" ]]; then
+    _fs_ckpt="$(_fewshot_trained_ckpt_dir "$t" "$seed")"
+    _skip_train=0
+    if [[ "${EVAL_ONLY}" != "1" ]] && [[ "${SKIP_TRAIN_IF_CKPT:-1}" == "1" ]] && [[ "${FORCE_FEWSHOT_TRAIN:-0}" != "1" ]]; then
+      if [[ -f "${_fs_ckpt}/state.pt" ]] || compgen -G "${_fs_ckpt}/state_*.pt" > /dev/null 2>&1; then
+        _skip_train=1
+        echo "  [few-shot] 已有扩散 checkpoint，跳过训练: ${_fs_ckpt}"
+      fi
+    fi
+
+    if [[ "${EVAL_ONLY}" != "1" ]] && [[ "$_skip_train" -eq 0 ]]; then
       $PYTHON "$PROJECT/train.py" \
         --train_tasks "$t" \
         --real_task_text_only_finetune \
@@ -511,12 +572,16 @@ _run_few_shot_one() {
         "${RETURNS_EXTRA[@]}" \
         "${_TE_EXTRA[@]}" \
         "${CPU_EXTRA[@]}" \
+        "${W_TEXT_EXTRA[@]}" \
+        "${PROXY_FILTER_FS_EXTRA[@]}" \
         >"$run_dir/train.log" 2>&1 || {
         echo "训练失败: $run_dir/train.log" >&2
         continue
       }
-    else
+    elif [[ "${EVAL_ONLY}" == "1" ]]; then
       echo "  跳过训练（EVAL_ONLY=1）"
+    elif [[ "$_skip_train" -eq 1 ]]; then
+      echo "  跳过训练（SKIP_TRAIN_IF_CKPT，checkpoint 已存在）"
     fi
 
     $PYTHON "$PROJECT/evaluate.py" \
@@ -532,6 +597,8 @@ _run_few_shot_one() {
       --sigma "$SIGMA" \
       "${RETURNS_EXTRA[@]}" \
       "${CPU_EXTRA[@]}" \
+      "${W_TEXT_EXTRA[@]}" \
+      "${PROXY_FILTER_FS_EXTRA[@]}" \
       >"$run_dir/evaluate.log" 2>&1 || {
       echo "评估失败: $run_dir/evaluate.log" >&2
       continue

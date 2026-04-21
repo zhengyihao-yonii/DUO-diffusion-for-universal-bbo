@@ -263,7 +263,7 @@ def build_sweep_injected_task_stats(
     w: float,
     task_keys: Sequence[str],
 ) -> dict[str, dict[str, Any]]:
-    """构造与 :func:`scan_results_root` 单实验键下一致的任务统计（用于注入 ``gtgdfgo``）。"""
+    """构造与 :func:`scan_results_root` 单实验键下一致的任务统计（用于注入 ``duo``）。"""
     out: dict[str, dict[str, Any]] = {}
     for tk in task_keys:
         mxs = max_v.get((tk, w), [])
@@ -380,7 +380,7 @@ def write_max_ablation(
     n_rank_cols = 2 + n_w
 
     for ri, (task_key, latex_name, _exp_name) in enumerate(task_rows):
-        db = ae.d_best_cell(ae.GTGDFGO_RESULTS, task_key, d_best_overrides)
+        db = ae.d_best_cell(ae.DUO_RESULTS, task_key, d_best_overrides)
         u_raw = uniso_by_task.get(task_key, "")
         u_cell = u_raw if u_raw else "--"
         gtg_st = ae.stats_cell_latex(gtg, ae._single_exp_name(task_key, False), task_key)

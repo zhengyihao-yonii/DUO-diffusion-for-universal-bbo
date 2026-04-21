@@ -36,7 +36,7 @@ class Progress:
 
 	def resume(self):
 		self._skip_lines = 1
-		print('\n', end='')
+		print('\n', end='', flush=True)
 		self._time0 = time.time()
 		self._step0 = self._step
 
@@ -79,7 +79,7 @@ class Progress:
 
 
 		description = '{} | {}{}'.format(percent, speed, params_string)
-		print(description)
+		print(description, flush=True)
 		self._skip_lines = nrow + 1
 
 	def append_description(self, descr):
@@ -88,9 +88,9 @@ class Progress:
 	def _clear(self):
 		position = self._prev_line * self._skip_lines
 		empty = '\n'.join([self._clear_line for _ in range(self._skip_lines)])
-		print(position, end='')
-		print(empty)
-		print(position, end='')
+		print(position, end='', flush=True)
+		print(empty, flush=True)
+		print(position, end='', flush=True)
 		
 	def _format_percent(self, n, total):
 		if total:
@@ -139,7 +139,7 @@ class Progress:
 			params = ' | '.join(self.lines)
 			string = '[ {} ] {}{} | {}'.format(self.name, self.fraction, params, self._speed)
 			self._clear()
-			print(string, end='\n')
+			print(string, end='\n', flush=True)
 			self._skip_lines = 1
 		else:
 			self._clear()

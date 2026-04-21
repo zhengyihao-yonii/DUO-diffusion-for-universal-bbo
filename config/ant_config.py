@@ -94,3 +94,5 @@ class Config(ParamsProto):
     proxy_n_train_steps = 5000
     proxy_log_freq = 100
     proxy_save_freq = 1000
+    # 1=训练 proxy 且评估时用其筛选 queries；0=跳过（CLI/环境 PROXY_FILTER 可覆盖）
+    proxy_filter = True

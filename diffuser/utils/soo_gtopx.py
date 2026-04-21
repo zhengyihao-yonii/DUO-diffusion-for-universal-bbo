@@ -40,7 +40,7 @@ def _ensure_soo_importable() -> None:
         return
     except ImportError:
         pass
-    # 本文件位于 <项目根>/diffuser/utils/soo_gtopx.py → 向上两级为项目根（GTGdfgo 或 GTG）
+    # 本文件位于 <项目根>/diffuser/utils/soo_gtopx.py → 向上两级为项目根（DUO 或 GTG）
     here = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(here, "..", ".."))
     workspace = os.path.dirname(project_root)
@@ -48,7 +48,7 @@ def _ensure_soo_importable() -> None:
     candidates = [
         env_root if env_root else None,
         os.path.join(project_root, "thirdparty_benchmark", "SOO-Bench"),
-        os.path.join(workspace, "GTGdfgo", "thirdparty_benchmark", "SOO-Bench"),
+        os.path.join(workspace, "DUO", "thirdparty_benchmark", "SOO-Bench"),
     ]
     for c in candidates:
         if not c or not os.path.isdir(c):

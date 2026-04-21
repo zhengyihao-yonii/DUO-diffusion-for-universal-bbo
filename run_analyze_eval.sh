@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 生成 evaluate 汇总表（scripts/analyze_eval_results.py，仓库根为 GTGdfgo）。
+# 生成 evaluate 汇总表（scripts/analyze_eval_results.py，仓库根为 DUO）。
 #
 # sweep_w 消融（max_ablation.{tex,csv}，每 w 一列、跨 seed/run 聚合）:
 #   bash run_analyze_eval.sh -sweep-w
@@ -38,4 +38,5 @@ case "${1:-}" in
     ;;
 esac
 
+export PYTHONPATH="${_SCRIPT_DIR}:${PYTHONPATH:-}"
 exec "$PYTHON" scripts/analyze_eval_results.py --mode "$_mode"

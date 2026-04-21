@@ -1,7 +1,16 @@
 import numpy as np
 import pygame
-from Box2D import *
-from Box2D.b2 import *
+
+try:
+    from Box2D import *
+    from Box2D.b2 import *
+except ImportError as e:
+    raise ImportError(
+        "RobotPush 需要 pybox2d（Python 里 `import Box2D`）。"
+        "请勿与 PyPI 上的 `box2d` 包混淆；请安装其一："
+        " `pip install pybox2d` 或 `pip install box2d-py` 或 "
+        "`conda install -c conda-forge pybox2d`。"
+    ) from e
 
 
 class guiWorld:

@@ -146,6 +146,51 @@ if __name__ == '__main__':
         default=None,
         help="显式指定扩散 state.pt；不填则与 --real_task_zero_shot_eval 联用自动解析",
     )
+    parser.add_argument(
+        "--proxy_filter",
+        type=int,
+        choices=[0, 1],
+        default=argparse.SUPPRESS,
+        help="1=训练/加载 proxy 并用其筛选 queries；0=仅扩散采样后 eval。"
+        " Zero-shot（--real_task_zero_shot_eval）在代码中恒关闭 proxy；"
+        " few-shot 默认 1，可用 0 或环境变量 PROXY_FILTER=0",
+    )
+    parser.add_argument(
+        "--latent_observation_dim",
+        type=int,
+        default=None,
+        help="真实任务 zero-shot：可选覆盖扩散观测维（通常即 VAE latent；默认读 vae_info 或 32）",
+    )
+    parser.add_argument(
+        "--sample_viz_wandb",
+        action="store_true",
+        default=False,
+        help="在扩散步上按 stride 用 Oracle 评 context 之后轨迹的 y，写入 wandb；可与 --sample_viz_dump_jsonl 联用",
+    )
+    parser.add_argument(
+        "--sample_viz_dump_jsonl",
+        type=str,
+        default=None,
+        help="将每步 Oracle 指标追加写入该目录下 <tag>_seed<seed>.jsonl（可不依赖 wandb；用于 visualize 多 seed 聚合）",
+    )
+    parser.add_argument(
+        "--sample_viz_stride",
+        type=int,
+        default=10,
+        help="每多少步反演（0→T-1 的序号）记一次 Oracle；仍保证 t=0 会记一次",
+    )
+    parser.add_argument(
+        "--sample_viz_tag",
+        type=str,
+        default="viz",
+        help="wandb 键前缀 sample_viz/<tag>/...，用于多实验同图对比（如 mt_text、st_duo）",
+    )
+    parser.add_argument(
+        "--sample_viz_max_queries",
+        type=int,
+        default=512,
+        help="每步 Oracle 最多评多少个点（对尾段展平后子采样，控成本）",
+    )
 
     args = parser.parse_args(_cli_args)
 

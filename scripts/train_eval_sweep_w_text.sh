@@ -18,6 +18,8 @@
 #
 # 默认不把 checkpoint 下的 npz 复制到 results（SWEEP_COPY_NPZ=0）；需要本地留档时: SWEEP_COPY_NPZ=1 ./scripts/train_eval_sweep_w_text.sh
 #
+# PROXY_FILTER  可选 0/1；若 export 则 train/evaluate 追加 --proxy_filter（不设则默认 1）。
+#
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -76,6 +78,11 @@ SKIP_EVAL="${SKIP_EVAL:-0}"
 LOG_TO_TERMINAL="${LOG_TO_TERMINAL:-0}"
 # 是否把 checkpoint 目录下与当前 w 匹配的 performance/samples *.npz 复制到 seed 目录下的 npz_w*/（默认 0 不复制，减小 results 体积）
 SWEEP_COPY_NPZ="${SWEEP_COPY_NPZ:-0}"
+
+PROXY_FILTER_EXTRA=()
+if [[ -n "${PROXY_FILTER:-}" ]]; then
+  PROXY_FILTER_EXTRA=(--proxy_filter "${PROXY_FILTER}")
+fi
 
 # ---------- 解析 SEED 列表 ----------
 SEED_LIST=()
@@ -154,6 +161,7 @@ RUN_ID="$(date +%Y%m%d_%H%M%S)"
   echo "SEED_LIST=${SEED_LIST[*]}"
   echo "START_SEED=${START_SEED} NUM_SEEDS=${NUM_SEEDS} SEEDS=${SEEDS:-}"
   echo "TRAJ_PARAMS_JSON=${TRAJ_PARAMS_JSON:-}"
+  echo "PROXY_FILTER=${PROXY_FILTER:-}"
   echo "W_VALUES=${W_VALUES[*]}"
   echo "SKIP_TRAIN=${SKIP_TRAIN} SKIP_EVAL=${SKIP_EVAL}"
   echo "CKPT_HYPER_DIR=${CKPT_HYPER_DIR}"
@@ -198,6 +206,7 @@ for SEED in "${SEED_LIST[@]}"; do
   if [[ -n "${TRAJ_PARAMS_JSON}" ]]; then
     _TRAIN_EXTRA+=(--traj_params_json "${TRAJ_PARAMS_JSON}")
   fi
+  _TRAIN_EXTRA+=("${PROXY_FILTER_EXTRA[@]}")
 
   _EVAL_BASE=(
     python evaluate.py
@@ -216,6 +225,7 @@ for SEED in "${SEED_LIST[@]}"; do
   if [[ -n "${TRAJ_PARAMS_JSON}" ]]; then
     _EVAL_BASE+=(--traj_params_json "${TRAJ_PARAMS_JSON}")
   fi
+  _EVAL_BASE+=("${PROXY_FILTER_EXTRA[@]}")
 
   if [[ "${SKIP_TRAIN}" != "1" ]]; then
     _log "=== [1/2] Training seed=${SEED}（${LOG_ROOT}/train.log）==="

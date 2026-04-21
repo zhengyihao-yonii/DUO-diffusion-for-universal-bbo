@@ -9,14 +9,16 @@ import numpy as np
 import torch
 from gym import error, spaces
 from gym.error import DependencyNotInstalled
-from gym.utils import EzPickle, colorize
+from gym.utils import EzPickle, colorize, seeding
 
 try:
     import Box2D
     from Box2D.b2 import (circleShape, contactListener, edgeShape, fixtureDef,
                           polygonShape, revoluteJointDef)
 except ImportError:
-    raise DependencyNotInstalled('box2d is not installed, run `pip install gym[box2d]`')
+    raise DependencyNotInstalled(
+        'pybox2d is not installed (`import Box2D`). Try: pip install pybox2d  or  pip install box2d-py'
+    )
 
 
 if TYPE_CHECKING:
@@ -304,7 +306,11 @@ class LunarLander(gym.Env, EzPickle):
         seed: Optional[int] = None,
         options: Optional[dict] = None,
     ):
-        super().reset(seed=seed)
+        try:
+            super().reset(seed=seed)
+        except TypeError:
+            # gym<0.22：无 reset(seed)。且 gym.Env.seed 在 0.13 基类中为空实现，不会设置 np_random。
+            self.np_random, _ = seeding.np_random(seed)
         self._destroy()
         self.world.contactListener_keepref = ContactDetector(self)
         self.world.contactListener = self.world.contactListener_keepref
@@ -835,16 +841,20 @@ class LunarLanderContinuous:
 
 
 def simulate_lunar_rover(p):
-    from gym.utils.step_api_compatibility import step_api_compatibility
     x, seed = p
-    # print(x)
     env = LunarLander()
     total_reward = 0
     steps = 0
     s, info = env.reset(seed=seed)
     while True:
         a = heuristic_Controller(s, x)
-        s, r, terminated, truncated, info = step_api_compatibility(env.step(a), True)
+        step_ret = env.step(a)
+        if len(step_ret) == 5:
+            s, r, terminated, truncated, info = step_ret
+        else:
+            s, r, done, info = step_ret
+            terminated = bool(done)
+            truncated = False
         total_reward += r
 
         # if steps % 20 == 0 or terminated or truncated:

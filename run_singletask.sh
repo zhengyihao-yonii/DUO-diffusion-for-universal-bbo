@@ -1,20 +1,25 @@
 #!/usr/bin/env bash
 #
-# GTGdfgo 单任务：轨迹（含 VAE）只构建一次，再按不同 seed 多次 train.py + evaluate.py。
+# DUO 单任务：轨迹（含 VAE）只构建一次，再按不同 seed 多次 train.py + evaluate.py。
 # 与 run_multitask.sh 的区别：仅单个任务名，参数形式为「单任务专用」。
 #
 # 无需单独先跑 train_vae.py：construct_trajectories.py 会调用 train_vae.main。
 #
 # 用法:
-#   bash run_multiple_times.sh <task_name> <num_runs> <n_traj> <k> <eps> [horizon] [frac] [sigma]
+#   bash run_singletask.sh <task_name> <num_runs> <n_traj> <k> <eps> [horizon] [frac] [sigma]
 #
-# 示例:
-#   bash run_multiple_times.sh dkitty 3 4000 20 0.01
-#   bash run_multiple_times.sh dkitty 3 4000 20 0.01 64 1.0 0.0
+# 示例（无文本，与历史一致）:
+#   bash run_singletask.sh dkitty 3 4000 20 0.01
+#   bash run_singletask.sh dkitty 3 4000 20 0.01 64 1.0 0.0
+#
+# 与多任务 mt_*_textcond_mttextonly 对齐扩散步数：默认 TRAIN_EPOCHS=200 → n_train_steps = 200 × n_steps_per_epoch（各任务 config 内多为 100）= 20000。
+# 与 examples/traj_params_per_task_example2.json 中某任务行对齐时，请把位置参数 n_traj/k/eps 设为该任务在 JSON 里的值（单任务不使用 --traj_params_json）。
+# 示例（单任务 + 文本元信息，checkpoint 目录带 _textcond，与 --multitask_text_only 的多任务区别为仅 _textcond、无 _mttextonly）:
+#   USE_TEXT_CONDITION=1 bash run_singletask.sh ant 1 1000 20 0.05 64 1.0 0.0
 #
 # 环境变量（可选）:
 #   PYTHON         Python，默认 /home/xk/anaconda3/envs/gtg/bin/python
-#   PROJECT        GTGdfgo 根目录，默认本脚本所在目录
+#   PROJECT        DUO 根目录，默认本脚本所在目录
 #   RESULTS        结果目录，默认 PROJECT/results/single_task/<task>_frac<F>_sigma<S>/<n_traj>x<h>_k<k>_eps<eps>[_<RESULTS_SUFFIX>]
 #                  与 scripts/analyze_eval_results.py 的 single_task 聚合布局一致。
 #                  USE_RETURNS=1 时在「超参」目录名末追加 RESULTS_SUFFIX（默认 _ret），与无 returns 分开
@@ -27,10 +32,14 @@
 #                    $RESULTS/.gtg_pipeline_batch 中记录的「上一轮完整流水线」批次号。
 #   USE_RETURNS  设为 1 时，train/evaluate 追加 --returns_condition --include_returns（显式标量 return 条件）
 #   TRAIN_EPOCHS  扩散训练 epoch 数，传给 train.py --train_epochs（n_train_steps = TRAIN_EPOCHS * config 内 n_steps_per_epoch）。
-#                 默认 200；可 export TRAIN_EPOCHS=N 覆盖。
-#   单任务仅基础 VAE + 轨迹 + 扩散，无文本条件；结果目录默认 results/single_task/<task>_frac*_sigma*/<hyper>/。
+#                 默认 200；可 export TRAIN_EPOCHS=N 覆盖。与全任务多任务 text 训练对齐时请保持 TRAIN_EPOCHS 一致（如 200 → 20000 steps）。
+#   USE_TEXT_CONDITION  设为 1 时 train/evaluate 追加 --use_text_condition（单任务 + task_metadata 文本条件；勿加 --multitask_text_only，该开关仅多任务或 real_task 微调）。
+#                 结果超参目录名默认再追加 SINGLE_TASK_TEXTCOND_SUFFIX（默认 _textcond），避免与无文本实验混目录。
+#   TEXT_ENCODER_MODEL  可选，sentence-transformers 模型目录或 Hub 名；未设置时若存在 ../models--sentence-transformers--all-MiniLM-L6-v2/... 快照则自动使用（与 run_multitask.sh 一致）。
+#   TRAIN_EXTRA / EVAL_EXTRA_CMD  可选，额外传给 train.py / evaluate.py 的参数（例如 --condition_guidance_w_text 8.0）；勿与 USE_TEXT_CONDITION 重复传 --use_text_condition。
 #   CUDA_VISIBLE_DEVICES / GPU_ID  见脚本中部「GPU」注释与 scripts/gpu_env.sh。
 #   CPU_THREADS      可选，限制 OpenMP/BLAS/PyTorch CPU 线程数；等价于 train/evaluate/construct 的 --cpu_threads N。
+#   PROXY_FILTER     可选 0/1；若 export 则 train/evaluate 追加 --proxy_filter（不设则默认 1：训练 proxy 并在评估中筛选）。
 #
 # 目录命名：同一次 bash 内为 run{N}_seed{s},{s+1},...（仅 seed 变）；N 仅在「又一次完整 bash（非 EVAL_ONLY）」
 #          结束后 +1，并写入 .gtg_pipeline_batch。无该文件时会根据已有 run*_seed* 推断最大批次。
@@ -69,8 +78,8 @@ _max_batch_from_dirs() {
 }
 
 if [[ $# -lt 5 ]]; then
-  echo "用法: bash run_multiple_times.sh <task_name> <num_runs> <n_traj> <k> <eps> [horizon] [frac] [sigma]"
-  echo "示例: bash run_multiple_times.sh dkitty 3 4000 20 0.01"
+  echo "用法: bash run_singletask.sh <task_name> <num_runs> <n_traj> <k> <eps> [horizon] [frac] [sigma]"
+  echo "示例: bash run_singletask.sh dkitty 3 4000 20 0.01"
   echo ""
   echo "环境变量 START_SEED、AUTO_CONTINUE、EVAL_ONLY 见脚本头部注释。"
   exit 1
@@ -92,6 +101,9 @@ _ST_FRAC_SIG="${task_name}_frac${FRAC}_sigma${SIGMA}"
 _ST_HYPER="${n_traj}x${HORIZON}_k${k}_eps${eps}"
 if [[ "${USE_RETURNS:-0}" == "1" ]]; then
   _ST_HYPER="${_ST_HYPER}${RESULTS_SUFFIX:-_ret}"
+fi
+if [[ "${USE_TEXT_CONDITION:-0}" == "1" ]]; then
+  _ST_HYPER="${_ST_HYPER}${SINGLE_TASK_TEXTCOND_SUFFIX:-_textcond}"
 fi
 base_dir="${RESULTS:-$PROJECT/results/single_task/${_ST_FRAC_SIG}/${_ST_HYPER}}"
 mkdir -p "$base_dir"
@@ -142,8 +154,9 @@ else
   echo "[批次] 本流水线批次号 BATCH_RUN=$BATCH_RUN（目录 run${BATCH_RUN}_seed<seed>）"
 fi
 
-echo "=== GTGdfgo 单任务: $task_name | num_runs=$num_runs | start_seed=$START_SEED (seed: $START_SEED .. $((START_SEED + num_runs - 1))) ==="
+echo "=== DUO 单任务: $task_name | num_runs=$num_runs | start_seed=$START_SEED (seed: $START_SEED .. $((START_SEED + num_runs - 1))) ==="
 echo "  n_traj=$n_traj k=$k eps=$eps horizon=$HORIZON frac=$FRAC sigma=$SIGMA"
+echo "  USE_TEXT_CONDITION=${USE_TEXT_CONDITION:-0}  TRAIN_EPOCHS=${TRAIN_EPOCHS:-200}（对齐多任务时请与 mt 训练一致）"
 echo "  EVAL_ONLY=${EVAL_ONLY:-0}  BATCH_RUN=${BATCH_RUN}"
 echo "  PROJECT=$PROJECT"
 echo "  RESULTS=$base_dir"
@@ -195,6 +208,52 @@ fi
 _TE_EXTRA=(--train_epochs "$TRAIN_EPOCHS")
 echo "[TRAIN_EPOCHS] 扩散训练 ${_TE_EXTRA[*]}"
 
+PROXY_FILTER_EXTRA=()
+if [[ -n "${PROXY_FILTER:-}" ]]; then
+  PROXY_FILTER_EXTRA=(--proxy_filter "${PROXY_FILTER}")
+fi
+
+# 离线 MiniLM：与 run_multitask.sh 相同默认路径
+_TEXT_ENCODER_REL="../models--sentence-transformers--all-MiniLM-L6-v2/snapshots/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+if [[ -z "${TEXT_ENCODER_MODEL:-}" ]]; then
+  _te_resolve="$(cd "$PROJECT" && realpath "$_TEXT_ENCODER_REL" 2>/dev/null || true)"
+  if [[ -n "$_te_resolve" && -d "$_te_resolve" ]]; then
+    TEXT_ENCODER_MODEL="$_te_resolve"
+  fi
+  unset _te_resolve
+fi
+unset _TEXT_ENCODER_REL
+
+TEXT_TRAIN_EXTRA=()
+TEXT_EVAL_EXTRA=()
+if [[ "${USE_TEXT_CONDITION:-0}" == "1" ]]; then
+  if [[ "${TRAIN_EXTRA:-}" != *"--use_text_condition"* ]]; then
+    TEXT_TRAIN_EXTRA=(--use_text_condition)
+  fi
+  if [[ "${EVAL_EXTRA_CMD:-}" != *"--use_text_condition"* ]]; then
+    TEXT_EVAL_EXTRA=(--use_text_condition)
+  fi
+  if [[ -n "${TEXT_ENCODER_MODEL:-}" ]] \
+    && [[ "${TRAIN_EXTRA:-}" != *"--text_encoder_model"* ]] \
+    && [[ "${EVAL_EXTRA_CMD:-}" != *"--text_encoder_model"* ]]; then
+    TEXT_TRAIN_EXTRA+=(--text_encoder_model="${TEXT_ENCODER_MODEL}")
+    TEXT_EVAL_EXTRA+=(--text_encoder_model="${TEXT_ENCODER_MODEL}")
+    echo "[TEXT_ENCODER] --text_encoder_model=${TEXT_ENCODER_MODEL}"
+  elif [[ "${TRAIN_EXTRA:-}" != *"--text_encoder_model"* ]] \
+    && [[ "${EVAL_EXTRA_CMD:-}" != *"--text_encoder_model"* ]]; then
+    echo "[TEXT_ENCODER] 未设置 TEXT_ENCODER_MODEL 且未找到默认快照；请 export TEXT_ENCODER_MODEL=... 或放置 MiniLM 快照" >&2
+  fi
+fi
+
+_train_extra_arr=()
+if [[ -n "${TRAIN_EXTRA:-}" ]]; then
+  read -r -a _train_extra_arr <<< "$TRAIN_EXTRA"
+fi
+_eval_cmd_extra_arr=()
+if [[ -n "${EVAL_EXTRA_CMD:-}" ]]; then
+  read -r -a _eval_cmd_extra_arr <<< "$EVAL_EXTRA_CMD"
+fi
+
 for ((run = 0; run < num_runs; run++)); do
   seed=$((START_SEED + run))
   run_dir="$base_dir/run${BATCH_RUN}_seed${seed}"
@@ -215,6 +274,9 @@ for ((run = 0; run < num_runs; run++)); do
       --sigma "$SIGMA" \
       "${RETURNS_EXTRA[@]}" \
       "${_TE_EXTRA[@]}" \
+      "${TEXT_TRAIN_EXTRA[@]}" \
+      "${_train_extra_arr[@]}" \
+      "${PROXY_FILTER_EXTRA[@]}" \
       >"$run_dir/train.log" 2>&1 || { echo "训练失败: $run_dir/train.log"; continue; }
   else
     echo "  跳过训练（EVAL_ONLY=1），覆盖 evaluate.log"
@@ -231,6 +293,9 @@ for ((run = 0; run < num_runs; run++)); do
     --frac "$FRAC" \
     --sigma "$SIGMA" \
     "${RETURNS_EXTRA[@]}" \
+    "${TEXT_EVAL_EXTRA[@]}" \
+    "${_eval_cmd_extra_arr[@]}" \
+    "${PROXY_FILTER_EXTRA[@]}" \
     >"$run_dir/evaluate.log" 2>&1 || { echo "评估失败: $run_dir/evaluate.log"; continue; }
 
   echo "  完成: $run_dir"

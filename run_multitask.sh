@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# 多任务 GTGdfgo 流水线：一次性构建 VAE+合成轨迹，再按种子多次训练扩散并可选评估。
+# 多任务 DUO 流水线：一次性构建 VAE+合成轨迹，再按种子多次训练扩散并可选评估。
 #
 # 无需单独先跑 train_vae.py：construct_trajectories.py 内部会调用 train_vae.main，
 # 按 multi_{tasks}_..._dim{fixed_dim} 目录训练或加载统一 VAE，再生成混合轨迹。
@@ -22,7 +22,7 @@
 #
 # 环境变量（可选）:
 #   PYTHON         Python 解释器，默认 /home/xk/anaconda3/envs/gtg/bin/python
-#   PROJECT        项目根目录（GTGdfgo），默认本脚本所在目录
+#   PROJECT        项目根目录（DUO），默认本脚本所在目录
 #   RESULTS        日志与汇总输出目录。**若已在 shell 中 export 过无文本后缀的 multi_task/.../ 基路径，会覆盖自动命名**；
 #                  本脚本在 TRAIN_EXTRA 含 --use_text_condition / --multitask_text_only 时，若检测到 RESULTS 仍为
 #                  「无文本后缀的基路径」，会自动改为带 _textcond / _mttextonly 的目录。完全自定义请 unset RESULTS 后
@@ -55,13 +55,14 @@
 #   TEXT_ENCODER_MODEL  可选，离线 sentence-transformers 目录的绝对路径（须含 config.json）。
 #                    未设置时，若存在下面「相对 PROJECT」的默认快照目录，则自动解析并仅在启用
 #                    文本条件时向 train/evaluate 追加 --text_encoder_model。
-#                    默认相对路径（PROJECT=GTGdfgo，模型在上一级 zyh_dfgo）:
+#                    默认相对路径（PROJECT=DUO，模型在上一级 zyh_dfgo）:
 #                    ../models--sentence-transformers--all-MiniLM-L6-v2/snapshots/c9745ed1d9f207416be6d2e6f8de32d1f16199bf
 #   USE_RETURNS  设为 1 时，在 TRAIN_EXTRA / EVAL_EXTRA_CMD 基础上再追加
 #                    --returns_condition --include_returns（显式标量 return 条件，与 config 手工改等价）
 #   CUDA_VISIBLE_DEVICES  见脚本中部「GPU」注释；或设 GPU_ID（由 scripts/gpu_env.sh 处理）。
 #   CPU_THREADS      可选，限制 OpenMP/BLAS/PyTorch 使用的 CPU 线程数（如 4），减轻占满宿主机 CPU。
 #                    也可在 train.py / evaluate.py / construct_trajectories.py 使用 --cpu_threads N。
+#   PROXY_FILTER     可选 0/1；若 export 则 train/evaluate 追加 --proxy_filter（不设则默认 1：多任务会 ensure 各任务 proxy）。
 #
 # 同一次 bash：run{N}_seed* 仅 seed 递增；仅「完整流水线」结束后 N 写入 .gtg_pipeline_batch 并在下次 +1。
 #
@@ -380,7 +381,7 @@ if [[ "${USE_RETURNS:-0}" == "1" ]]; then
   echo "[USE_RETURNS] 已追加 --returns_condition --include_returns 至 train / evaluate"
 fi
 
-# 离线 MiniLM：默认解析 zyh_dfgo 下 HF hub 快照（相对 PROJECT=GTGdfgo）；可 export TEXT_ENCODER_MODEL 覆盖
+# 离线 MiniLM：默认解析 zyh_dfgo 下 HF hub 快照（相对 PROJECT=DUO）；可 export TEXT_ENCODER_MODEL 覆盖
 _TEXT_ENCODER_REL="../models--sentence-transformers--all-MiniLM-L6-v2/snapshots/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
 if [[ -z "${TEXT_ENCODER_MODEL:-}" ]]; then
   _te_resolve="$(cd "$PROJECT" && realpath "$_TEXT_ENCODER_REL" 2>/dev/null || true)"
@@ -419,6 +420,11 @@ if [[ -n "${EVAL_EXTRA_CMD:-}" ]]; then
   read -r -a _eval_cmd_extra_arr <<< "$EVAL_EXTRA_CMD"
 fi
 
+PROXY_FILTER_EXTRA=()
+if [[ -n "${PROXY_FILTER:-}" ]]; then
+  PROXY_FILTER_EXTRA=(--proxy_filter "${PROXY_FILTER}")
+fi
+
 for ((run = 0; run < NUM_RUNS; run++)); do
   SEED=$((START_SEED + run))
   RUN_DIR="$RESULTS/run${BATCH_RUN}_seed${SEED}"
@@ -441,6 +447,7 @@ for ((run = 0; run < NUM_RUNS; run++)); do
       "${_TPJ[@]}" \
       "${_TE_EXTRA[@]}" \
       "${_train_extra_arr[@]}" \
+      "${PROXY_FILTER_EXTRA[@]}" \
       >"$RUN_DIR/train.log" 2>&1
   else
     echo "  跳过训练（EVAL_ONLY=1），覆盖 evaluate.log"
@@ -465,6 +472,7 @@ for ((run = 0; run < NUM_RUNS; run++)); do
     "${_TPJ[@]}" \
     "${EVAL_EXTRA[@]}" \
     "${_eval_cmd_extra_arr[@]}" \
+    "${PROXY_FILTER_EXTRA[@]}" \
     >"$RUN_DIR/evaluate.log" 2>&1
 
   echo "  完成: $RUN_DIR"

@@ -26,9 +26,18 @@ def _safe_wandb_log(metrics):
 
 
 def cycle(dl):
+    """无限重复遍历 ``dl``。若 ``dl`` 因 ``drop_last=True`` 且样本数不足等原因长度为 0，
+    则内层 ``for`` 永不执行，旧实现会在 ``while True`` 中空转占满 CPU 且永不 yield。"""
     while True:
+        empty = True
         for data in dl:
+            empty = False
             yield data
+        if empty:
+            raise RuntimeError(
+                "DataLoader 未产生任何 batch（空迭代）。常见原因：len(dataset) < batch_size 且 "
+                "drop_last=True。请减小 batch_size 或对不足一整批的数据使用 drop_last=False。"
+            )
 
 class EMA():
     '''
@@ -110,16 +119,19 @@ class Trainer(object):
             sampler = torch.utils.data.WeightedRandomSampler(
                     weights=weights, num_samples=len(self.proxy_dataset.data_y), replacement=True
                     )
-            
+            _n_proxy = int(len(self.proxy_dataset.data_y))
+            _drop_proxy = _n_proxy >= train_batch_size
             self.proxy_dataloader = cycle(torch.utils.data.DataLoader(
-                self.proxy_dataset, batch_size=train_batch_size, num_workers=0, sampler=sampler, pin_memory=True, drop_last=True,
+                self.proxy_dataset, batch_size=train_batch_size, num_workers=0, sampler=sampler, pin_memory=True, drop_last=_drop_proxy,
             ))
         else:
             # 在没有proxy_dataset的情况下，仍然可以训练扩散模型
             self.proxy_dataloader = None
 
+        _n_ds = len(self.dataset)
+        _drop_main = _n_ds >= train_batch_size
         self.dataloader = cycle(torch.utils.data.DataLoader(
-            self.dataset, batch_size=train_batch_size, num_workers=0, shuffle=True, pin_memory=True, drop_last=True,
+            self.dataset, batch_size=train_batch_size, num_workers=0, shuffle=True, pin_memory=True, drop_last=_drop_main,
         ))
         # self.proxy_dataloader = cycle(torch.utils.data.DataLoader(
         #     self.proxy_dataset, batch_size=train_batch_size, num_workers=0, shuffle=True, pin_memory=True, drop_last=True,

@@ -2,7 +2,7 @@
 """
 在 GTOPX 单任务上网格搜索轨迹构造超参 (k, eps)，按 evaluate 日志中的 max_ep_reward 选最优。
 
-用法（在 GTGdfgo 根目录）::
+用法（在 DUO 根目录）::
 
     python scripts/search_gtopx_traj_hyperparams.py --k-list 10,20,30,50 --eps-list 0.01,0.05,0.1
 

@@ -229,8 +229,8 @@ def resolve_multitask_mixed_path(data_dir: str, sig: str | None) -> str:
     raise FileNotFoundError(f"未找到多任务混合轨迹：{leg}")
 
 
-def _gtgdfgo_repo_root() -> Path:
-    """``GTGdfgo/`` 根目录（本文件位于 ``GTGdfgo/diffuser/utils/``）。"""
+def _duo_repo_root() -> Path:
+    """``DUO/`` 根目录（本文件位于 ``DUO/diffuser/utils/``）。"""
     return Path(__file__).resolve().parent.parent.parent
 
 
@@ -267,7 +267,7 @@ def ensure_multitask_mixed_trajectories(
     若 ``generated_datasets/multi_<tasks>_frac…/mixed_mt_*.p`` 不存在，则调用
     ``construct_trajectories.construct_trajectories`` 生成（与单独跑 construct 一致）。
 
-    须在 **项目根 GTGdfgo** 为当前工作目录时调用，或在本函数内会临时 ``chdir`` 到该根目录。
+    须在 **项目根 DUO** 为当前工作目录时调用，或在本函数内会临时 ``chdir`` 到该根目录。
     """
     csv = canonical_train_tasks_csv(",".join(train_tasks_list))
     tasks_sorted = [t.strip() for t in csv.split(",") if t.strip()]
@@ -281,7 +281,7 @@ def ensure_multitask_mixed_trajectories(
     rel_dir = os.path.join(
         "generated_datasets", f"multi_{train_tasks_str}_frac{frac}_sigma{sigma}"
     )
-    root = _gtgdfgo_repo_root()
+    root = _duo_repo_root()
     data_dir = str(root / rel_dir)
 
     if multitask_mixed_paths_exist(data_dir, sig):

@@ -66,7 +66,60 @@ SUPPORTED_TASKS = (
 RewardBatch = namedtuple('Batch', 'trajectories conditions returns')
 Batch = namedtuple('Batch', 'trajectories conditions')
 ValueBatch = namedtuple('ValueBatch', 'trajectories conditions values')
-    
+
+
+class MinimalTrajectoryDataset(torch.utils.data.Dataset):
+    """
+    占位轨迹集：满足 Trainer / DataLoader 与 ``SafeLimitsNormalizer`` 接口，但 **不** 作为扩散步的条件注入来源。
+    用于真实任务 **zero-shot 无上下文轨迹 pkl** 时的评估：采样时 ``conditions`` 仅含 ``ctx_len=0`` 与可选 task/text，见 ``scripts/evaluate.py``。
+    """
+
+    def __init__(
+        self,
+        horizon,
+        observation_dim,
+        action_dim=1,
+        n_fake=256,
+        seed=0,
+    ):
+        super().__init__()
+        self.horizon = int(horizon)
+        self.block_size = self.horizon
+        self.observation_dim = int(observation_dim)
+        self.action_dim = int(action_dim)
+        self.context_length = 0
+        g = torch.Generator()
+        g.manual_seed(int(seed))
+        n_fake = max(int(n_fake), 256)
+        self.points = torch.rand(n_fake, self.horizon, self.observation_dim, generator=g) * 2 - 1
+        self.values = torch.rand(n_fake, self.horizon, 1, generator=g)
+        self.normalizer = SafeLimitsNormalizer(self.points)
+        self.normalizer_values = SafeLimitsNormalizer(self.values)
+        self.normalizer_values.mins = 0.0
+        self.normalizer_values.maxs = 1.0
+        self.num_trajectories = n_fake
+        self.size_of_trajectory = self.horizon
+        self.regret = False
+        self.include_returns = False
+        self.tasks_list = None
+        self.task_indices = None
+        self._multitask_pkl = False
+        self.include_task_idx = False
+        self.task_text_embeds = None
+
+    def __len__(self):
+        return self.num_trajectories * (self.size_of_trajectory - self.block_size + 1)
+
+    def __getitem__(self, idx):
+        traj_idx = idx // (self.size_of_trajectory - self.block_size + 1)
+        ctx_idx = idx % (self.size_of_trajectory - self.block_size + 1)
+        points = self.points[traj_idx, ctx_idx : ctx_idx + self.block_size]
+        values = self.values[traj_idx, ctx_idx : ctx_idx + self.block_size]
+        points = self.normalizer.normalize(points)
+        values_norm = self.normalizer_values.normalize(values)
+        trajectories = torch.cat([points, values_norm], dim=-1)
+        return Batch(trajectories, {})
+
 
 class SequenceDataset(torch.utils.data.Dataset):
 
@@ -365,6 +418,11 @@ class PointRegretDataset(torch.utils.data.Dataset):
         conditions = {}
         conditions["ctx_len"] = np.array([0])
         if not self._multitask_pkl:
+            # 单任务 pkl：仍可在 use_text_condition 时注入 text_embed（与多任务 multitask_text_only 一致）
+            if self.task_text_embeds is not None and self.task_text_embeds.shape[0] >= 1:
+                conditions["text_embed"] = np.asarray(
+                    self.task_text_embeds[0], dtype=np.float32
+                )
             return conditions
         if not self.include_task_idx:
             return conditions

@@ -1,4 +1,4 @@
-# GTGdfgo：供 run_multitask.sh / run_singletask.sh source，用于多卡服务器上选择物理 GPU。
+# DUO：供 run_multitask.sh / run_singletask.sh source，用于多卡服务器上选择物理 GPU。
 #
 # 用法（任选其一）:
 #   1) 运行前: export CUDA_VISIBLE_DEVICES=2

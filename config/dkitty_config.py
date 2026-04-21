@@ -80,3 +80,4 @@ class Config(ParamsProto):
     proxy_n_train_steps = 5000
     proxy_log_freq = 100
     proxy_save_freq = 1000
+    proxy_filter = True

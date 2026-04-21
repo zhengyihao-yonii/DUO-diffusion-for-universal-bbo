@@ -1,4 +1,4 @@
-# Third-party benchmarks (GTGdfgo)
+# Third-party benchmarks (DUO)
 
 ## SOO-Bench
 
@@ -21,7 +21,7 @@ pip install -e ./revive_hybrid/
 
 ### 方式一：脚本安装（推荐）
 
-在 **已激活** 的 Conda 环境（如 `gtg`）中，于 **GTGdfgo 根目录**执行：
+在 **已激活** 的 Conda 环境（如 `gtg`）中，于 **DUO 根目录**执行：
 
 ```bash
 bash scripts/setup_soo_bench.sh
@@ -30,7 +30,7 @@ bash scripts/setup_soo_bench.sh
 ### 方式二：手动安装
 
 ```bash
-cd /path/to/GTGdfgo/thirdparty_benchmark
+cd /path/to/DUO/thirdparty_benchmark
 git clone https://github.com/zhuyiyi-123/SOO-Bench.git
 cd SOO-Bench/
 
@@ -38,7 +38,7 @@ cd SOO-Bench/
 # pip install -e ./revive_hybrid/
 
 pip install -e .
-# Python 3.8：请用 GTGdfgo 提供的兼容依赖（见下），勿直接用上游 requirements.txt
+# Python 3.8：请用 DUO 提供的兼容依赖（见下），勿直接用上游 requirements.txt
 pip install -r ../soo_bench_requirements_dfgo.txt
 cd ../..
 ```
@@ -52,7 +52,7 @@ cd ../..
 
 ### 环境冲突说明
 
-SOO-Bench 的 `requirements.txt` 含 `tensorflow`、`numpy<1.24` 等，与部分 **仅用于 Design-Bench / GTGdfgo** 的环境可能冲突。若安装失败，可：
+SOO-Bench 的 `requirements.txt` 含 `tensorflow`、`numpy<1.24` 等，与部分 **仅用于 Design-Bench / DUO** 的环境可能冲突。若安装失败，可：
 
 1. **单独建环境** 专用于 SOO（官方也推荐 `conda create -n soo-bench python=3.8`），仅在做 SOO 数据实验时激活；或  
 2. 在虚拟环境中 **手动** 按需安装子集，避免与 `torch`/`numpy` 强冲突。
@@ -63,6 +63,6 @@ SOO-Bench 的 `requirements.txt` 含 `tensorflow`、`numpy<1.24` 等，与部分
 python -c "from soo_bench.Taskdata import OfflineTask, REGISTERED_TASK; print(REGISTERED_TASK.keys())"
 ```
 
-### 与 GTGdfgo 主流程
+### 与 DUO 主流程
 
-当前 GTGdfgo 默认数据仍来自 **Design-Bench**（`design_bench.make` 等）。安装 SOO-Bench 仅提供 **`soo_bench` Python 包**；要把任务接进 `construct_trajectories` / `train_vae`，需要额外编写数据适配。
+当前 DUO 默认数据仍来自 **Design-Bench**（`design_bench.make` 等）。安装 SOO-Bench 仅提供 **`soo_bench` Python 包**；要把任务接进 `construct_trajectories` / `train_vae`，需要额外编写数据适配。

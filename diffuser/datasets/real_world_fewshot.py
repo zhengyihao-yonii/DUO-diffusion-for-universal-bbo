@@ -23,7 +23,7 @@ ENV_FEWSHOT_K = "GTG_REAL_WORLD_FEWSHOT_K"
 ENV_FEWSHOT_MODE = "GTG_REAL_WORLD_FEWSHOT_MODE"
 ENV_FEWSHOT_SEED = "GTG_REAL_WORLD_FEWSHOT_SEED"
 
-# GTGdfgo 任务短名 -> fewshot_data 下目录名
+# DUO 任务短名 -> fewshot_data 下目录名
 TASK_KEY_TO_DATA_DIR: dict[str, str] = {
     "lunar_lander": "LunarLander",
     "robot_push": "RobotPush",
@@ -41,16 +41,16 @@ def is_real_world_fewshot_task(name: str) -> bool:
     return name in REAL_WORLD_FEWSHOT_TASK_SPECS
 
 
-def _gtgdfgo_root() -> Path:
+def _duo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
 def default_real_world_data_root() -> Path:
-    """默认 ``<GTGdfgo>/fewshot_data``；可用环境变量 ``GTG_REAL_WORLD_FEWSHOT_DIR`` 覆盖。"""
+    """默认 ``<DUO>/fewshot_data``；可用环境变量 ``GTG_REAL_WORLD_FEWSHOT_DIR`` 覆盖。"""
     env = os.environ.get("GTG_REAL_WORLD_FEWSHOT_DIR")
     if env:
         return Path(env).expanduser().resolve()
-    return _gtgdfgo_root() / "fewshot_data"
+    return _duo_root() / "fewshot_data"
 
 
 def _collect_json_paths(task_dir: Path) -> list[Path]:

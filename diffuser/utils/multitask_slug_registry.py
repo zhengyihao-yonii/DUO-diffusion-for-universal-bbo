@@ -8,7 +8,7 @@
 
 命令行::
 
-    cd GTGdfgo && python -m diffuser.utils.multitask_slug_registry show generated_datasets/multi_..._frac1.0_sigma0.0
+    cd DUO && python -m diffuser.utils.multitask_slug_registry show generated_datasets/multi_..._frac1.0_sigma0.0
 """
 from __future__ import annotations
 

@@ -106,8 +106,9 @@ if __name__ == '__main__':
     parser.add_argument(
         "--train_epochs",
         type=int,
-        default=200,
-        help="扩散训练 epoch 数；n_train_steps = train_epochs * n_steps_per_epoch（默认 200）",
+        default=None,
+        help="扩散训练 epoch 数；n_train_steps = train_epochs * n_steps_per_epoch。"
+        " 未指定时：从头训练默认 200；--real_task_text_only_finetune 微调默认 40（更短，与预训练区分）。",
     )
     parser.add_argument(
         "--real_task_text_only_finetune",
@@ -152,6 +153,14 @@ if __name__ == '__main__':
         default=None,
         help="若未指定 --load_diffusion_checkpoint，可填 epoch 从当前 RUN.prefix 下加载（一般不用）",
     )
+    parser.add_argument(
+        "--proxy_filter",
+        type=int,
+        choices=[0, 1],
+        default=argparse.SUPPRESS,
+        help="1=训练 proxy（单任务训 proxy；多任务 ensure_multitask_proxies）；0=完全不训。"
+        " 也可用环境变量 PROXY_FILTER=0/1（默认 1）",
+    )
 
     args = parser.parse_args(_cli_args)
 
@@ -180,6 +189,9 @@ if __name__ == '__main__':
     real_task_ft = getattr(args, "real_task_text_only_finetune", False) or getattr(
         args, "fewshot_text_only_finetune", False
     )
+    if args.train_epochs is None:
+        # 微调：默认更少优化步数；从头训练保持与历史脚本一致的 200 epoch
+        args.train_epochs = 40 if real_task_ft else 200
     if real_task_ft:
         args.multitask_text_only = True
         args.use_text_condition = True

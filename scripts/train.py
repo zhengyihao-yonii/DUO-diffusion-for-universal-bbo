@@ -20,6 +20,7 @@ from diffuser.utils.multitask_proxy_paths import (
     multitask_proxy_checkpoint_exists,
     multitask_proxy_prefix,
 )
+from diffuser.utils.proxy_filter import proxy_filter_enabled_for_train
 
 apply_torch_cpu_threads_from_env()
 
@@ -285,6 +286,14 @@ def main(**deps):
         Config, "multitask_text_only", False
     ) and not _real_task_ft
 
+    use_proxy_filter = proxy_filter_enabled_for_train(deps)
+    setattr(Config, "proxy_filter", use_proxy_filter)
+    print(
+        f"[train] proxy_filter={int(use_proxy_filter)} "
+        f"({'训练 proxy 并在评估中用于筛选' if use_proxy_filter else '关闭：不训 proxy，评估时仅扩散采样后 eval'})",
+        flush=True,
+    )
+
     # gtopx 等共用 gtopx_config 时类默认 dataset 仍为 gtopx2；必须与真实任务名一致，
     # 否则 ZipDataset / load_gtopx_offline_arrays 维数错误，evaluate 会与 checkpoint 不一致。
     if not getattr(Config, "is_multitask", False) and Config.train_tasks_list:
@@ -440,17 +449,19 @@ def main(**deps):
             task_text_embeds=getattr(Config, "_task_text_embeds_np", None),
         )
         
-        proxy_dataset_config = utils.Config(
-            Config.proxy_loader,
-            dataset=Config.dataset,
-            frac=Config.frac,
-            sigma=Config.sigma,
-            soo_seed=int(getattr(Config, 'seed', 1)),
-            savepath='proxy_dataset_config.pkl',
-        )
-        
         dataset = dataset_config()
-        proxy_dataset = proxy_dataset_config()
+        if use_proxy_filter:
+            proxy_dataset_config = utils.Config(
+                Config.proxy_loader,
+                dataset=Config.dataset,
+                frac=Config.frac,
+                sigma=Config.sigma,
+                soo_seed=int(getattr(Config, 'seed', 1)),
+                savepath='proxy_dataset_config.pkl',
+            )
+            proxy_dataset = proxy_dataset_config()
+        else:
+            proxy_dataset = None
 
     # render_config = utils.Config(
     #     Config.renderer,
@@ -528,7 +539,7 @@ def main(**deps):
         )
         
         # 单任务模式下，为GaussianInvDynDiffusion模型添加proxy_model_config
-        if not Config.is_multitask:
+        if not Config.is_multitask and use_proxy_filter:
             proxy_model_config = utils.Config(
                 Config.proxy_model,
                 savepath='proxy_model_config.pkl',
@@ -563,7 +574,7 @@ def main(**deps):
         )
             
         # 非GaussianInvDynDiffusion模型的proxy_model_config定义
-        if not Config.is_multitask:
+        if not Config.is_multitask and use_proxy_filter:
             proxy_model_config = utils.Config(
                 Config.proxy_model,
                 savepath='proxy_model_config.pkl',
@@ -725,16 +736,24 @@ def main(**deps):
                 vae.eval()
 
     model = model_config()
-    proxy_model = proxy_model_config() if not Config.is_multitask else None
+    if not Config.is_multitask and use_proxy_filter:
+        proxy_model = proxy_model_config()
+    else:
+        proxy_model = None
 
     diffusion = diffusion_config(model)
 
-    if Config.is_multitask:
+    if Config.is_multitask and use_proxy_filter:
         ensure_multitask_proxies(diffusion, dataset, renderer, Config, action_dim, logger)
 
-    # 创建训练器
+    # 创建训练器（load_diffusion_checkpoint → Trainer.load_from_path：加载 model/ema/step，优化器仍从新 Adam 起，在预训练权重上继续更新）
     trainer = trainer_config(diffusion, proxy_model, dataset, proxy_dataset, renderer)
     trainer.vae = vae  # 添加VAE属性到训练器
+    if _ld_path:
+        logger.print(
+            f"[train] 已从预训练 checkpoint 加载扩散权重（微调）：{_ld_path} | trainer.step={trainer.step}",
+            color="cyan",
+        )
 
     # -----------------------------------------------------------------------------#
     # ------------------------ test forward & backward pass -----------------------#
@@ -752,8 +771,8 @@ def main(**deps):
     # --------------------------------- main loop ---------------------------------#
     # -----------------------------------------------------------------------------#
     
-    # 只有在单任务模式下才训练proxy model，多任务模式下不需要
-    if not Config.is_multitask:
+    # 单任务且 proxy_filter：训练 proxy；多任务 proxy 在 ensure_multitask_proxies
+    if not Config.is_multitask and use_proxy_filter:
         logger.print("🚀 开始训练代理模型... 🚀")
         logger.print(f"📈 代理模型训练参数:")
         logger.print(f"   - 批量大小: {Config.batch_size}")
@@ -797,4 +816,8 @@ def main(**deps):
     # 记录训练完成信息到wandb
     if wandb is not None:
         wandb.log({'training_completed': True, 'final_step': trainer.step})
+
+    # save_freq 可能大于总步数（如微调 4000 步而 save_freq=5000），训练循环内可能从未触发 save
+    logger.print("💾 保存最终扩散 checkpoint（含 EMA）…", flush=True)
+    trainer.save()
 

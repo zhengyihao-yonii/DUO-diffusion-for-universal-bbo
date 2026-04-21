@@ -302,27 +302,51 @@ class GaussianDiffusion(nn.Module):
         return model_mean + nonzero_mask * (1.0 * model_log_variance).exp() * noise
 
     @torch.no_grad()
-    def p_sample_loop(self, shape, cond, returns=None, verbose=True, return_diffusion=False, values=None):
+    def p_sample_loop(
+        self,
+        shape,
+        cond,
+        returns=None,
+        verbose=True,
+        return_diffusion=False,
+        values=None,
+        step_callback=None,
+        step_callback_stride=1,
+    ):
         device = self.betas.device
 
         batch_size = shape[0]
         x = 0.5*torch.randn(shape, device=device)
         x = apply_conditioning(x, cond, values=values)
 
-        if return_diffusion: diffusion = [x]
+        if return_diffusion:
+            diffusion = [x]
 
         # progress = utils.Progress(self.n_timesteps) if verbose else utils.Silent()
         # for i in reversed(range(0, self.n_timesteps)):
         progress = utils.Progress(self.n_sample_timesteps) if verbose else utils.Silent()
         start_time = time.time()
-        for i in reversed(range(0, self.n_sample_timesteps)):
+        stride = max(1, int(step_callback_stride))
+        loop_indices = list(reversed(range(0, self.n_sample_timesteps)))
+        for step_ord, i in enumerate(loop_indices):
             timesteps = torch.full((batch_size,), i, device=device, dtype=torch.long)
             x = self.p_sample(x, cond, timesteps, returns)
             x = apply_conditioning(x, cond, values=values)
 
             progress.update({'t': i})
 
-            if return_diffusion: diffusion.append(x)
+            if return_diffusion:
+                diffusion.append(x)
+
+            if step_callback is not None and (
+                step_ord % stride == 0 or i == 0
+            ):
+                step_callback(
+                    timestep_index=int(i),
+                    step_ordinal=int(step_ord),
+                    total_steps=int(self.n_sample_timesteps),
+                    x=x,
+                )
         end_time = time.time() - start_time
         progress.close()
         if return_diffusion:
