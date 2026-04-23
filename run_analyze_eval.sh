@@ -3,13 +3,13 @@
 #
 # sweep_w 消融（max_ablation.{tex,csv}，每 w 一列、跨 seed/run 聚合）:
 #   bash run_analyze_eval.sh -sweep-w
-#   或 SWEEP_W_MODEL_DIR=results/eval_sweep_w_text/mt_xxx_textcond_mttextonly bash run_analyze_eval.sh -sweep-w
+#   或 SWEEP_W_MODEL_DIR=results/eval_sweep_w_text/<mt_* 或 train_eval 归档目录> bash run_analyze_eval.sh -sweep-w
 #
 # 用法:
 #   bash run_analyze_eval.sh -short   # max_short.{csv,tex} + nmax.tex
 #   bash run_analyze_eval.sh -full    # UniSO + 14 列矩阵 max_extended.{csv,tex}
 #   bash run_analyze_eval.sh -final   # text_conditioned_result_analysis.tex
-#   bash run_analyze_eval.sh -sweep-w # max_ablation.{tex,csv}（eval_sweep_w_text 下最新 mt_*）
+#   bash run_analyze_eval.sh -sweep-w # max_ablation.{tex,csv}（eval_sweep_w_text 下自动选目录，见 make_sweep_w_ablation_table）
 #   bash run_analyze_eval.sh          # 以上均生成（--mode all）；text CFG 多 w 对比见 -sweep-w → max_ablation.{tex,csv}
 #
 set -euo pipefail

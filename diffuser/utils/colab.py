@@ -11,7 +11,7 @@ try:
     from IPython.display import HTML
     from IPython import display as ipythondisplay
 except ImportError:
-    # 必须写到 stderr：stdout 会被 train_eval_sweep_w_text 等 ``$(python ...)`` 当作目录名解析
+    # 必须写到 stderr：stdout 会被 ``$(python ...)`` 当作目录名解析
     print(
         "[ utils/colab ] Warning: not importing colab dependencies",
         file=sys.stderr,

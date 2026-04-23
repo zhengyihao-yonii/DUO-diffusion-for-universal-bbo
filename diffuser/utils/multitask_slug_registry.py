@@ -21,6 +21,13 @@ from typing import Any, Optional
 MANIFEST_FILENAME = "multitask_slug_manifest.json"
 
 
+def multitask_manifest_filename(latent_dim: int = 32) -> str:
+    """32 维保持历史文件名；其它维度单独 manifest，避免与 32 维记录互相覆盖。"""
+    if int(latent_dim) == 32:
+        return MANIFEST_FILENAME
+    return f"multitask_slug_manifest_latent{int(latent_dim)}.json"
+
+
 def write_multitask_manifest(
     multi_generated_datasets_dir,
     *,
@@ -33,6 +40,7 @@ def write_multitask_manifest(
     sigma: float,
     horizon: int,
     traj_params_json: str | None,
+    latent_dim: int = 32,
 ) -> Path:
     """写入 ``multitask_slug_manifest.json``（与 ``mixed_mt_*.p`` 同目录）。"""
     from diffuser.utils.traj_params import (
@@ -41,11 +49,14 @@ def write_multitask_manifest(
     )
 
     slug = multitask_slug_id(traj_signature)
+    _ld = int(latent_dim)
+    _mixed = multitask_mixed_basename(traj_signature, _ld)
     payload: dict[str, Any] = {
         "version": 1,
         "slug_id": slug,
         "traj_signature": traj_signature,
-        "mixed_filename": multitask_mixed_basename(traj_signature),
+        "latent_dim": _ld,
+        "mixed_filename": _mixed,
         "train_tasks_csv": ",".join(tasks_list),
         "frac": frac,
         "sigma": sigma,
@@ -57,20 +68,23 @@ def write_multitask_manifest(
         if traj_params_json
         else None,
         "path_notes": {
-            "mixed_p": f"本目录/{multitask_mixed_basename(traj_signature)}",
+            "mixed_p": f"本目录/{_mixed}",
             "trained_models_hyper": f"{slug} + train.py 中 returns/text/mttextonly 路径片段（见 multitask_checkpoint_hyper_dir）",
             "results_layout": "run_multitask.sh 中 w<W>_mt_<hash>... 与 multi_task 下 mt_<hash>... 与 slug 同源",
         },
     }
     root = Path(multi_generated_datasets_dir)
     root.mkdir(parents=True, exist_ok=True)
-    out = root / MANIFEST_FILENAME
+    out = root / multitask_manifest_filename(latent_dim)
     out.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return out
 
 
-def load_multitask_manifest(multi_generated_datasets_dir) -> "Optional[dict[str, Any]]":
-    p = Path(multi_generated_datasets_dir) / MANIFEST_FILENAME
+def load_multitask_manifest(
+    multi_generated_datasets_dir, latent_dim: int = 32
+) -> "Optional[dict[str, Any]]":
+    root = Path(multi_generated_datasets_dir)
+    p = root / multitask_manifest_filename(latent_dim)
     if not p.is_file():
         return None
     return json.loads(p.read_text(encoding="utf-8"))
@@ -88,9 +102,17 @@ def _cli() -> None:
 
     args = ap.parse_args()
     if args.cmd == "show":
-        d = load_multitask_manifest(args.multi_dir)
+        root = Path(args.multi_dir)
+        d = load_multitask_manifest(args.multi_dir, 32)
         if not d:
-            print(f"未找到 {MANIFEST_FILENAME}：{args.multi_dir}")
+            alt = list(root.glob("multitask_slug_manifest_latent*.json"))
+            alt.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            if alt:
+                d = json.loads(alt[0].read_text(encoding="utf-8"))
+        if not d:
+            print(
+                f"未找到 {MANIFEST_FILENAME} 或 multitask_slug_manifest_latent*.json：{args.multi_dir}"
+            )
             raise SystemExit(1)
         print(json.dumps(d, indent=2, ensure_ascii=False))
     elif args.cmd == "hash":

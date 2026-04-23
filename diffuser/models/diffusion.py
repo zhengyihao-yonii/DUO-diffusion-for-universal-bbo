@@ -1,8 +1,9 @@
+import os
 import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
-from typing import Optional
+from typing import Dict, List, Optional, Set, Tuple
 import pdb
 import time
 
@@ -46,6 +47,207 @@ def _cond_text_embed(cond_or_state):
     if not isinstance(cond_or_state, dict):
         return None
     return cond_or_state.get('text_embed')
+
+
+def _env_float(key: str, default: float = 0.0) -> float:
+    raw = os.environ.get(key, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _env_truthy(key: str) -> bool:
+    """True when env var is set to 1/true/yes/on (case-insensitive)."""
+    raw = os.environ.get(key, "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _env_int(key: str, default: int) -> int:
+    raw = os.environ.get(key, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _sample_timesteps_biased_small(
+    batch_size: int,
+    n_timesteps: int,
+    bias_power: float,
+    device: torch.device,
+) -> torch.Tensor:
+    """
+    训练用：提高离散小 t 的采样概率（与均匀 ``torch.randint`` 并存为可选分支）。
+    u ~ Uniform(0,1)，t = floor(u ** (1 + bias_power) * n_timesteps)；bias_power>0 时更常采到小 t。
+    """
+    u = torch.rand(batch_size, device=device)
+    exp = 1.0 + float(bias_power)
+    return (u**exp * float(n_timesteps)).long().clamp(0, n_timesteps - 1)
+
+
+def _p_losses_min_snr_weighted(
+    loss_fn: nn.Module,
+    x_recon: torch.Tensor,
+    targ: torch.Tensor,
+    t: torch.Tensor,
+    alphas_cumprod: torch.Tensor,
+    gamma: float,
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    """
+    min-SNR 风格逐样本加权后再对 batch 取均值（仅训练损失；不改变采样）。
+    权重 w = min(SNR(t), gamma) / SNR(t)，SNR = alpha_bar / (1 - alpha_bar)。
+    """
+    elem = loss_fn._loss(x_recon, targ)
+    w_spatial = loss_fn.weights
+    while w_spatial.dim() < elem.dim():
+        w_spatial = w_spatial.unsqueeze(0)
+    weighted_elem = elem * w_spatial
+    per_sample = weighted_elem.reshape(weighted_elem.shape[0], -1).mean(dim=1)
+    ac = extract(alphas_cumprod, t, (t.shape[0],)).reshape(-1).to(dtype=per_sample.dtype)
+    snr = ac / (1.0 - ac + 1e-8)
+    g = torch.as_tensor(float(gamma), device=per_sample.device, dtype=per_sample.dtype)
+    w_t = torch.minimum(snr, g) / (snr + 1e-8)
+    loss = (per_sample * w_t).mean()
+    if hasattr(loss_fn, "action_dim"):
+        ad = int(loss_fn.action_dim)
+        a0 = (elem[:, :, -ad:] / loss_fn.weights[0, -ad:]).mean()
+    else:
+        a0 = elem.mean()
+    return loss, {"a0_loss": a0}
+
+
+def _per_t_bin_weighted_mse_metrics(
+    loss_fn: nn.Module,
+    n_timesteps: int,
+    x_recon: torch.Tensor,
+    targ: torch.Tensor,
+    t: torch.Tensor,
+) -> Dict[str, torch.Tensor]:
+    """
+    Per-discrete-timestep-bin diffusion MSE (same weighting as WeightedL1/WeightedL2).
+
+    Keys ``train/t_loss/b{idx}_t{lo}_{hi}`` are meant for wandb time-series vs training
+    step (Trainer logs ``steps``). Smaller ``t`` → smaller bin index (for typical
+    schedules, lower ``t`` is closer to clean data).
+    """
+    if not _env_truthy("DUO_LOG_PER_T_LOSS"):
+        return {}
+    w = getattr(loss_fn, "weights", None)
+    if w is None or not torch.is_tensor(t):
+        return {}
+    if t.is_floating_point():
+        return {}
+
+    raw = F.mse_loss(x_recon, targ, reduction="none")
+    w_exp = w
+    while w_exp.dim() < raw.dim():
+        w_exp = w_exp.unsqueeze(0)
+    per_el = raw * w_exp
+    per_sample = per_el.reshape(raw.shape[0], -1).mean(dim=1)
+
+    n_t = max(1, int(n_timesteps))
+    nb = max(2, min(_env_int("DUO_LOG_PER_T_LOSS_BINS", 20), n_t))
+    t_flat = t.long().view(-1)
+    out: Dict[str, torch.Tensor] = {}
+    for b in range(nb):
+        lo = b * n_t // nb
+        if b < nb - 1:
+            hi = (b + 1) * n_t // nb
+            mask = (t_flat >= lo) & (t_flat < hi)
+            hi_key = hi - 1
+        else:
+            mask = t_flat >= lo
+            hi_key = n_t - 1
+        if mask.any():
+            out[f"train/t_loss/b{b:02d}_t{lo}_{hi_key}"] = per_sample[mask].mean()
+    return out
+
+
+def _env_discrete_ce_task_names() -> Set[str]:
+    raw = os.environ.get("DUO_DISCRETE_CE_TASK_NAMES", "tfbind8,tfbind10")
+    return {s.strip() for s in raw.split(",") if s.strip()}
+
+
+def _tfbind_obs_flat_dim(task_name: str) -> Optional[int]:
+    """TF-Bind design_bench logits: L×(C−1) with C=4 → 3 logits per position."""
+    if task_name == "tfbind8":
+        return 8 * 3
+    if task_name == "tfbind10":
+        return 10 * 3
+    return None
+
+
+def _batch_task_names(
+    cond: Dict,
+    train_tasks_list: Tuple[str, ...],
+    batch_size: int,
+    device: torch.device,
+) -> Optional[List[str]]:
+    """
+    每条样本的任务名：优先 ``cond['task_idx']``；若无且仅单任务训练则全员该任务。
+    """
+    if not train_tasks_list:
+        return None
+    tid = cond.get("task_idx") if isinstance(cond, dict) else None
+    if tid is None:
+        if len(train_tasks_list) == 1:
+            return [train_tasks_list[0]] * batch_size
+        return None
+    if not torch.is_tensor(tid):
+        tid = torch.as_tensor(tid, device=device)
+    tid = tid.view(-1).long()
+    if tid.shape[0] != batch_size:
+        return None
+    out: List[str] = []
+    for i in range(batch_size):
+        ix = int(tid[i].item())
+        if ix < 0 or ix >= len(train_tasks_list):
+            return None
+        out.append(train_tasks_list[ix])
+    return out
+
+
+def _discrete_tfbind_ce(
+    x0_pred: torch.Tensor,
+    x0_true: torch.Tensor,
+    *,
+    train_tasks_list: Tuple[str, ...],
+    ce_task_names: Set[str],
+    batch_task_names: Optional[List[str]],
+) -> torch.Tensor:
+    """
+    辅助 CE：对每个 TF-Bind 样本，将 x0 的前 L×3 维 reshape 为 (H,L,3)，补零得到 4 类 logits，
+    目标类为 GT（同空间）在各位置 argmax。若无可计算样本则返回 0。
+    """
+    device = x0_pred.device
+    if batch_task_names is None:
+        return torch.zeros((), device=device, dtype=x0_pred.dtype)
+    B, H, W = x0_pred.shape
+    ces: List[torch.Tensor] = []
+    for b in range(B):
+        name = batch_task_names[b]
+        if name not in ce_task_names:
+            continue
+        D = _tfbind_obs_flat_dim(name)
+        if D is None or D > W:
+            continue
+        pp = x0_pred[b, :, :D].reshape(H, -1, 3)
+        pt = x0_true[b, :, :D].reshape(H, -1, 3)
+        # design-bench to_integers：在最后一维左侧 pad 一个 0 再 argmax
+        zeros = pp.new_zeros(H, pp.shape[1], 1)
+        logits_p = torch.cat([zeros, pp], dim=-1)
+        logits_t = torch.cat([zeros, pt], dim=-1)
+        targ = logits_t.argmax(dim=-1).reshape(-1)
+        logits_flat = logits_p.reshape(-1, 4)
+        ces.append(F.cross_entropy(logits_flat, targ, reduction="mean"))
+    if not ces:
+        return torch.zeros((), device=device, dtype=x0_pred.dtype)
+    return torch.stack(ces).mean()
 
 
 def epsilon_task_text_cfg(
@@ -145,6 +347,9 @@ class GaussianDiffusion(nn.Module):
         cfg_apply_text=True,
         sample_with_task_embedding=True,
         sample_with_text_embedding=True,
+        train_tasks_list: Optional[Tuple[str, ...]] = None,
+        train_timestep_bias_power: float = 0.0,
+        train_loss_min_snr_gamma: float = 0.0,
     ):
         super().__init__()
         self.horizon = horizon
@@ -160,6 +365,7 @@ class GaussianDiffusion(nn.Module):
         self.cfg_apply_text = bool(cfg_apply_text)
         self.sample_with_task_embedding = bool(sample_with_task_embedding)
         self.sample_with_text_embedding = bool(sample_with_text_embedding)
+        self._train_tasks_list: Tuple[str, ...] = tuple(train_tasks_list or ())
 
         betas = cosine_beta_schedule(n_timesteps)
         alphas = 1. - betas
@@ -198,6 +404,9 @@ class GaussianDiffusion(nn.Module):
         ## get loss coefficients and initialize objective
         loss_weights = self.get_loss_weights(action_weight, loss_discount, loss_weights)
         self.loss_fn = Losses[loss_type](loss_weights, self.action_dim)
+        # 可选训练策略（默认 0 关闭，不改变原 loss / 均匀 t 采样路径）
+        self._train_ts_bias = float(train_timestep_bias_power)
+        self._train_min_snr_gamma = float(train_loss_min_snr_gamma)
 
     def get_loss_weights(self, action_weight, discount, weights_dict):
         '''
@@ -492,15 +701,72 @@ class GaussianDiffusion(nn.Module):
         assert noise.shape == x_recon.shape
 
         if self.predict_epsilon:
-            loss, info = self.loss_fn(x_recon, noise)
+            if self._train_min_snr_gamma > 0.0:
+                loss, info = _p_losses_min_snr_weighted(
+                    self.loss_fn,
+                    x_recon,
+                    noise,
+                    t,
+                    self.alphas_cumprod,
+                    float(self._train_min_snr_gamma),
+                )
+            else:
+                loss, info = self.loss_fn(x_recon, noise)
         else:
-            loss, info = self.loss_fn(x_recon, x_start)
+            if self._train_min_snr_gamma > 0.0:
+                loss, info = _p_losses_min_snr_weighted(
+                    self.loss_fn,
+                    x_recon,
+                    x_start,
+                    t,
+                    self.alphas_cumprod,
+                    float(self._train_min_snr_gamma),
+                )
+            else:
+                loss, info = self.loss_fn(x_recon, x_start)
+
+        lam = _env_float("DUO_DISCRETE_CE_LAMBDA", 0.0)
+        if lam > 0 and self.predict_epsilon:
+            eps_hat = x_recon
+            x0_hat = self.predict_start_from_noise(x_noisy, t, eps_hat)
+            x0_tgt = x_start
+            names = _batch_task_names(cond, self._train_tasks_list, x_start.shape[0], x_start.device)
+            ce = _discrete_tfbind_ce(
+                x0_hat,
+                x0_tgt,
+                train_tasks_list=self._train_tasks_list,
+                ce_task_names=_env_discrete_ce_task_names(),
+                batch_task_names=names,
+            )
+            loss = loss + lam * ce
+            info = dict(info)
+            info["ce_loss"] = ce.detach()
+            info["discrete_ce_lambda"] = torch.tensor(lam, device=loss.device)
+
+        _t_for_bins = t
+        if torch.is_tensor(_t_for_bins) and not _t_for_bins.is_floating_point():
+            _targ = noise if self.predict_epsilon else x_start
+            _extra = _per_t_bin_weighted_mse_metrics(
+                self.loss_fn,
+                int(self.n_timesteps),
+                x_recon,
+                _targ,
+                _t_for_bins,
+            )
+            if _extra:
+                info = dict(info)
+                info.update(_extra)
 
         return loss, info
 
     def loss(self, x, cond, returns=None):
         batch_size = len(x)
-        t = torch.randint(0, self.n_timesteps, (batch_size,), device=x.device).long()
+        if self._train_ts_bias > 0.0:
+            t = _sample_timesteps_biased_small(
+                batch_size, self.n_timesteps, self._train_ts_bias, x.device
+            )
+        else:
+            t = torch.randint(0, self.n_timesteps, (batch_size,), device=x.device).long()
         return self.p_losses(x, cond, t, returns)
 
     def forward(self, cond, *args, **kwargs):
@@ -517,7 +783,11 @@ class GaussianInvDynDiffusion(nn.Module):
         cfg_apply_text=True,
         sample_with_task_embedding=True,
         sample_with_text_embedding=True,
-        ar_inv=False, train_only_inv=False):
+        ar_inv=False, train_only_inv=False,
+        train_tasks_list: Optional[Tuple[str, ...]] = None,
+        train_timestep_bias_power: float = 0.0,
+        train_loss_min_snr_gamma: float = 0.0,
+    ):
         super().__init__()
         self.horizon = horizon
         self.observation_dim = observation_dim
@@ -544,6 +814,7 @@ class GaussianInvDynDiffusion(nn.Module):
         self.cfg_apply_text = bool(cfg_apply_text)
         self.sample_with_task_embedding = bool(sample_with_task_embedding)
         self.sample_with_text_embedding = bool(sample_with_text_embedding)
+        self._train_tasks_list: Tuple[str, ...] = tuple(train_tasks_list or ())
 
         betas = cosine_beta_schedule(n_timesteps)
         alphas = 1. - betas
@@ -581,6 +852,8 @@ class GaussianInvDynDiffusion(nn.Module):
         ## get loss coefficients and initialize objective
         loss_weights = self.get_loss_weights(loss_discount)
         self.loss_fn = Losses['state_l2'](loss_weights)
+        self._train_ts_bias = float(train_timestep_bias_power)
+        self._train_min_snr_gamma = float(train_loss_min_snr_gamma)
 
     def get_loss_weights(self, discount):
         '''
@@ -742,9 +1015,60 @@ class GaussianInvDynDiffusion(nn.Module):
         assert noise.shape == x_recon.shape
 
         if self.predict_epsilon:
-            loss, info = self.loss_fn(x_recon, noise)
+            if self._train_min_snr_gamma > 0.0:
+                loss, info = _p_losses_min_snr_weighted(
+                    self.loss_fn,
+                    x_recon,
+                    noise,
+                    t,
+                    self.alphas_cumprod,
+                    float(self._train_min_snr_gamma),
+                )
+            else:
+                loss, info = self.loss_fn(x_recon, noise)
         else:
-            loss, info = self.loss_fn(x_recon, x_start)
+            if self._train_min_snr_gamma > 0.0:
+                loss, info = _p_losses_min_snr_weighted(
+                    self.loss_fn,
+                    x_recon,
+                    x_start,
+                    t,
+                    self.alphas_cumprod,
+                    float(self._train_min_snr_gamma),
+                )
+            else:
+                loss, info = self.loss_fn(x_recon, x_start)
+
+        lam = _env_float("DUO_DISCRETE_CE_LAMBDA", 0.0)
+        if lam > 0 and self.predict_epsilon:
+            eps_hat = x_recon
+            x0_hat = self.predict_start_from_noise(x_noisy, t, eps_hat)
+            x0_tgt = x_start
+            names = _batch_task_names(cond, self._train_tasks_list, x_start.shape[0], x_start.device)
+            ce = _discrete_tfbind_ce(
+                x0_hat,
+                x0_tgt,
+                train_tasks_list=self._train_tasks_list,
+                ce_task_names=_env_discrete_ce_task_names(),
+                batch_task_names=names,
+            )
+            loss = loss + lam * ce
+            info = dict(info)
+            info["ce_loss"] = ce.detach()
+            info["discrete_ce_lambda"] = torch.tensor(lam, device=loss.device)
+
+        if torch.is_tensor(t) and not t.is_floating_point():
+            _targ = noise if self.predict_epsilon else x_start
+            _extra = _per_t_bin_weighted_mse_metrics(
+                self.loss_fn,
+                int(self.n_timesteps),
+                x_recon,
+                _targ,
+                t,
+            )
+            if _extra:
+                info = dict(info)
+                info.update(_extra)
 
         return loss, info
 
@@ -766,7 +1090,12 @@ class GaussianInvDynDiffusion(nn.Module):
                 info = {'a0_loss': loss}
         else:
             batch_size = len(x)
-            t = torch.randint(0, self.n_timesteps, (batch_size,), device=x.device).long()
+            if self._train_ts_bias > 0.0:
+                t = _sample_timesteps_biased_small(
+                    batch_size, self.n_timesteps, self._train_ts_bias, x.device
+                )
+            else:
+                t = torch.randint(0, self.n_timesteps, (batch_size,), device=x.device).long()
             diffuse_loss, info = self.p_losses(x[:, :, self.action_dim:], cond, t, returns)
             # Calculating inv loss
             x_t = x[:, :-1, self.action_dim:]

@@ -18,7 +18,7 @@ DFGO 列在每种模式（单任务 / 小组 multi / 全任务 multi / text）�
 
 所有汇总表与 UniSO 输入均位于 ``results/analysis_table/``：宽表 ``max_short.*``、矩阵 ``max_extended.*``、``text_conditioned_result_analysis.*``、``nmax.tex``，以及 ``max_ablation.*``（text CFG 消融，由 ``--mode sweep_w`` 生成）、``uniso_result.tex``、``uniso_nresult.tex``、``d_best.json``（可选）。
 ``text_conditioned_result_analysis``（``--mode final``）：``text_conditioned_only/all_frac1.0_sigma0.0/``（可用 ``EVAL_ALL_TASK_FRAC_SIG`` 覆盖）下**每个超参子目录一列** DFGO。默认一次生成全部；也可用 ``--mode short|full|final``（见 ``run_analyze_eval.sh``）。``--mode sweep_w`` 或 ``bash run_analyze_eval.sh -sweep-w`` 生成 ``max_ablation.{tex,csv}``（``eval_sweep_w_text`` 下 text CFG 消融表）。
-矩阵 ``max_extended``、``nmax`` 中 DFGO「全任务 multitask text」列：若存在 ``results/eval_sweep_w_text/<mt_*>/`` 且 ``DUO_SWEEP_W_DISABLE`` 未置 1，则按 ``max_ablation`` **Mean rank 行各 w 列**（UniSO、GTG ST 与各 w 联合排名后的平均秩）选出最优 ``condition_guidance_w_text``，该列数据来自对应 ``eval_w*.log``（caption 中备注 ``mt_<16hex>`` 与统一 ``w``）。
+矩阵 ``max_extended``、``nmax`` 中 DUO「全任务 multitask text」列：若存在 ``results/eval_sweep_w_text/<mt_*>/`` 且 ``DUO_SWEEP_W_DISABLE`` 未置 1，则按 ``max_ablation`` **Mean rank 行各 w 列**（UniSO、GTG ST 与各 w 联合排名后的平均秩）选出最优 ``condition_guidance_w_text``，该列数据来自对应 ``eval_w*.log``。
 矩阵列为 **UniSO-T**（``uniso_result.tex`` 中 **UniSO-T Improved** 列）+ 14 列方法（含全任务 text 的 ``all`` 与 ``all_improved`` 两列）；文本多任务目录后缀见 ``MATRIX12_TEXT_SUFFIXES``。
 """
 from __future__ import annotations
@@ -649,13 +649,13 @@ def merge_eval_sweep_w_text_into_duo(
     results_root: Path,
 ) -> str:
     """
-    从 ``results/eval_sweep_w_text/<mt_*>/`` 的 ``eval_w*.log`` 按与 ``max_ablation`` **Mean rank 行中各 w 列**
+    从 ``results/eval_sweep_w_text/<mt_* 或 sweep 归档目录>/`` 的 ``eval_w*.log`` 按与 ``max_ablation`` **Mean rank 行中各 w 列**
     相同的准则（UniSO、GTG ST 与各 w 联合排名后，取平均秩最小的 ``w``）选出最优 ``w``，
     注入虚拟实验键 ``eval_sweep_w_text/<mt>/w_text<w>``（及 ``…_ret``，数值相同供 +returns 列使用），
     并设置 ``DUO_SWEEP_W_PREFIX``，使 ``duo_all_text_prefix`` / ``all_improved`` / nmax multi text 均指向该前缀。
 
     可用 ``DUO_SWEEP_W_DISABLE=1`` 关闭；``SWEEP_W_MODEL_DIR`` 指定 ``mt_*`` 目录（否则选最新 ``mt_*``）。
-    返回供 LaTeX caption 追加的英文说明片段（无注入时为空串）。
+    返回空串（不向 caption 追加说明；注入成功后控制台仍可打印选用的 ``w``）。
     """
     _swd = _env_compat("DUO_SWEEP_W_DISABLE", "GTGDFGO_SWEEP_W_DISABLE", "")
     if _swd.strip().lower() in ("1", "true", "yes"):
@@ -701,19 +701,7 @@ def merge_eval_sweep_w_text_into_duo(
     w_tag = f"w_text{best_w:g}"
     duo[f"{base}/{w_tag}"] = stats
     duo[f"{base}/{w_tag}_ret"] = stats
-
-    hex_m = _MT_SLUG_HEX_RE.match(mt)
-    hex_note = hex_m.group(1) if hex_m else re.sub(r"[^0-9a-f]", "", mt)[:16]
-    mt_esc = _latex_tt(mt)
-    slug_tt = _latex_tt(f"mt_{hex_note}")
-    return (
-        " \\textbf{DFGO full multitask text} (matrix cols.\\ fullT / nmax multi text): "
-        f"\\texttt{{eval\\_sweep\\_w\\_text/{mt_esc}}} "
-        f"with unified $\\texttt{{condition\\_guidance\\_w\\_text}}={best_w:g}$ "
-        r"(best $w$: lowest mean rank among $w$ columns in \texttt{max\_ablation}, joint per-task ranking with UniSO and GTG ST). "
-        rf"Trajectory slug \texttt{{{slug_tt}}} is the 16-hex-digit digest prefix of the multitask trajectory signature (SHA-256). "
-        r"+returns text columns use the same sweep logits (no separate ret eval). "
-    )
+    return ""
 
 
 def latex_hyper_selection_minipage_lines(
@@ -1225,8 +1213,8 @@ def _nmax_baseline_method_cell(method: str) -> str:
     return method
 
 
-def _nresult_midrule_before_dfgo(last_baseline_method: str) -> bool:
-    """最后一行基线为 UniSO-T 时，其与 DFGO 之间需 ``\\midrule``（RaM 行后已有 ``\\midrule``，不再重复）。"""
+def _nresult_midrule_before_duo(last_baseline_method: str) -> bool:
+    """最后一行基线为 UniSO-T 时，其与 DUO 之间需 ``\\midrule``（RaM 行后已有 ``\\midrule``，不再重复）。"""
     return _nresult_plain_method_name(last_baseline_method).startswith("UniSO-T")
 
 
@@ -1352,17 +1340,17 @@ def _nmax_parse_task_value(plain: str) -> float | None:
 
 def nmax_avg_rank_denominator_total(n_base: int, parsed: list[tuple[str, str, list[str], str]]) -> int:
     """
-    源表 ``/22`` 表示参与排名的方法数（不含 ``$\\mathcal{D}$(best)`` 行）。
-    ``nmax`` 在相同方法集合上增加 DFGO single、multi 两行，故分母 = ``(n_base - 1) + 2``
-    （首行为 D(best) 时）；否则 ``n_base + 2``。
+    源表 ``/N`` 表示参与排名的方法数（不含 ``$\\mathcal{D}$(best)`` 行）。
+    ``nmax`` 在相同方法集合上增加一行 DUO（全任务 text），故分母 = ``(n_base - 1) + 1``
+    （首行为 D(best) 时）；否则 ``n_base + 1``。
     """
     if parsed and r"$\mathcal{D}$(best)" in parsed[0][0]:
-        return (n_base - 1) + 2
-    return n_base + 2
+        return (n_base - 1) + 1
+    return n_base + 1
 
 
-def nmax_fmt_dfgo_avg_rank(mu: float, n_total: int) -> str:
-    """DFGO 两行 Avg.\\ Rank：``mean / N``（与基线 ``a / N`` 同一分母 ``N``）。"""
+def nmax_fmt_duo_avg_rank(mu: float, n_total: int) -> str:
+    """DUO 行 Avg.\\ Rank：``mean / N``（与基线 ``a / N`` 同一分母 ``N``）。"""
     if mu is None or not np.isfinite(float(mu)):
         return "--"
     return f"{float(mu):.3f} / {n_total}"
@@ -1383,7 +1371,7 @@ def nmax_fix_avg_rank_denominator(cell: str, n_total: int) -> str:
 
 
 def _nmax_parse_avg_rank_value(plain: str) -> float | None:
-    """Avg.\\ Rank：越小越好；``/``、``--`` 跳过；``a / b`` 取第一个数（含 DFGO ``m / N``）。"""
+    """Avg.\\ Rank：越小越好；``/``、``--`` 跳过；``a / b`` 取第一个数（含 DUO ``m / N``）。"""
     s = plain.strip()
     if not s or s in ("--", "—", "nan"):
         return None
@@ -1812,18 +1800,18 @@ MATRIX12_COLUMN_KEYS: list[tuple[str, str]] = [
     ("c00_uniso", "UniSO-T"),
     ("c01_gtg_st", "GTG 单任务"),
     ("c02_gtg_st_ret", "GTG 单任务+ret"),
-    ("c03_gdf_st", "DFGO 单任务"),
-    ("c04_gdf_st_ret", "DFGO 单任务+ret"),
-    ("c05_gdf_msub_l", "DFGO 局部multi(label)"),
-    ("c06_gdf_msub_l_ret", "DFGO 局部multi(label)+ret"),
-    ("c07_gdf_mfull_l", "DFGO 全部multi(label)"),
-    ("c08_gdf_mfull_l_ret", "DFGO 全部multi(label)+ret"),
-    ("c09_gdf_msub_t", "DFGO 局部multi(text)"),
-    ("c10_gdf_msub_t_ret", "DFGO 局部multi(text)+ret"),
-    ("c11_gdf_mfull_t", "DFGO 全部multi(text) all"),
-    ("c12_gdf_mfull_t_ret", "DFGO 全部multi(text) all+ret"),
-    ("c13_gdf_mfull_t_imp", "DFGO 全部multi(text) all_improved"),
-    ("c14_gdf_mfull_t_imp_ret", "DFGO 全部multi(text) all_improved+ret"),
+    ("c03_gdf_st", "DUO 单任务"),
+    ("c04_gdf_st_ret", "DUO 单任务+ret"),
+    ("c05_gdf_msub_l", "DUO 局部multi(label)"),
+    ("c06_gdf_msub_l_ret", "DUO 局部multi(label)+ret"),
+    ("c07_gdf_mfull_l", "DUO 全部multi(label)"),
+    ("c08_gdf_mfull_l_ret", "DUO 全部multi(label)+ret"),
+    ("c09_gdf_msub_t", "DUO 局部multi(text)"),
+    ("c10_gdf_msub_t_ret", "DUO 局部multi(text)+ret"),
+    ("c11_gdf_mfull_t", "DUO 全部multi(text) all"),
+    ("c12_gdf_mfull_t_ret", "DUO 全部multi(text) all+ret"),
+    ("c13_gdf_mfull_t_imp", "DUO 全部multi(text) all_improved"),
+    ("c14_gdf_mfull_t_imp_ret", "DUO 全部multi(text) all_improved+ret"),
 ]
 
 
@@ -1883,23 +1871,6 @@ def write_matrix12_latex(
     uniso_by_task: dict[str, str],
 ) -> None:
     """与 ``write_latex`` 相同版式：含 UniSO-T 列与 Mean rank 行。"""
-    _m12_fp = duo_full_multitask_prefix()
-    _m12_ku = best_duo_exp_full_multitask_unified(
-        duo,
-        _m12_fp,
-        [t for t, _, _ in MAX_TEX_TASK_ROWS],
-        False,
-    )
-    m12_note = latex_hyper_selection_minipage_lines(
-        duo,
-        [
-            ("DFGO full T (all)", lambda _: duo_all_text_prefix()),
-            ("DFGO full T (all imp)", lambda _: duo_all_improved_text_prefix()),
-        ],
-        [t for t in TASK_ORDER if t in TASK_TO_SUBGROUP_MULTITASK_EXP],
-        False,
-        unified_full_multitask_labels=("DFGO full L", _m12_fp, _m12_ku),
-    )
     lines = [
         r"% Requires: \usepackage{booktabs}, \usepackage{graphicx}, \usepackage{xcolor}.",
         r"% Per row: best / runner-up across UniSO-T + 14 method columns.",
@@ -1910,10 +1881,10 @@ def write_matrix12_latex(
         r"\resizebox{\linewidth}{!}{",
         r"\begin{tabular}{l|*{15}{c}}",
         r"\toprule",
-        r"Task & \shortstack{UniSO-T} & \shortstack{GTG\\ST} & \shortstack{GTG\\ST+r} & \shortstack{DFGO\\ST} & \shortstack{DFGO\\ST+r} & "
-        r"\shortstack{DFGO\\subL} & \shortstack{DFGO\\subL+r} & \shortstack{DFGO\\fullL} & \shortstack{DFGO\\fullL+r} & "
-        r"\shortstack{DFGO\\subT} & \shortstack{DFGO\\subT+r} & \shortstack{DFGO\\fullT\\,(all)} & \shortstack{DFGO\\fullT\\,(all)+r} & "
-        r"\shortstack{DFGO\\fullT\\,(imp)} & \shortstack{DFGO\\fullT\\,(imp)+r} \\",
+        r"Task & \shortstack{UniSO-T} & \shortstack{GTG\\ST} & \shortstack{GTG\\ST+r} & \shortstack{DUO\\ST} & \shortstack{DUO\\ST+r} & "
+        r"\shortstack{DUO\\subL} & \shortstack{DUO\\subL+r} & \shortstack{DUO\\fullL} & \shortstack{DUO\\fullL+r} & "
+        r"\shortstack{DUO\\subT} & \shortstack{DUO\\subT+r} & \shortstack{DUO\\fullT\\,(all)} & \shortstack{DUO\\fullT\\,(all)+r} & "
+        r"\shortstack{DUO\\fullT\\,(imp)} & \shortstack{DUO\\fullT\\,(imp)+r} \\",
         r"\midrule",
     ]
     task_keys_list = [t for t in TASK_ORDER if t in TASK_TO_SUBGROUP_MULTITASK_EXP]
@@ -1967,7 +1938,6 @@ def write_matrix12_latex(
             r"}",
         ]
     )
-    lines.extend(m12_note)
     lines.extend(
         [
             rf"\label{{{label}}}",
@@ -2068,7 +2038,7 @@ def write_latex_all_fulltext(
     )
     lines = [
         r"% Requires: \usepackage{booktabs}, \usepackage{graphicx}, \usepackage{xcolor}.",
-        r"% Blocks: Task+D(best) | UniSO-T | GTG ST/ST+r | DFGO (text_conditioned_only/all_frac…).",
+        r"% Blocks: Task+D(best) | UniSO-T | GTG ST/ST+r | DUO (text_conditioned_only/all_frac…).",
         r"\begin{table*}[t!]",
         rf"\caption{{{caption}}}",
         r"\vspace{0.3em}",
@@ -2080,7 +2050,7 @@ def write_latex_all_fulltext(
         r"\midrule",
     ]
     n_rows = len(LATEX_TASK_ROWS)
-    # UniSO + GTG ST + GTG ST+r + 每列 DFGO
+    # UniSO + GTG ST + GTG ST+r + 每列 DUO
     n_cols_data = 3 + n_sub
     means_a = np.full((n_rows, n_cols_data), np.nan, dtype=np.float64)
     for ri, (task_key, latex_name, exp_name) in enumerate(LATEX_TASK_ROWS):
@@ -2142,43 +2112,9 @@ def write_latex(
         False,
         allowed_first_hyper=str(ctx["mt_label_hyper"]),
     )
-    short_note = latex_hyper_selection_minipage_lines(
-        duo,
-        [
-            (
-                "single",
-                lambda tk: duo_single_task_prefix(tk),
-                lambda b, p, tk: best_duo_exp_for_task(
-                    b, p, tk, False, hyper_eq=ctx["st_slug"].get(tk)
-                ),
-            ),
-            (
-                "single+text",
-                lambda tk: duo_single_task_prefix(tk),
-                lambda b, p, tk: best_duo_exp_for_task(
-                    b, p, tk, False, hyper_eq=ctx["st_text_slug"].get(tk)
-                ),
-            ),
-            (
-                "multi+text",
-                lambda _: duo_all_text_prefix(),
-                lambda b, p, tk: best_duo_exp_for_multitask_text_maxshort(
-                    b, tk, False, str(ctx["mt_core"])
-                ),
-            ),
-        ],
-        [t for t, _, _ in LATEX_TASK_ROWS],
-        False,
-        unified_full_multitask_labels=(
-            "multi+label",
-            _fp_full,
-            k_full_unified,
-        ),
-    )
     lines = [
         r"% Requires: \usepackage{booktabs}, \usepackage{graphicx}, \usepackage{xcolor}.",
-        r"% Per row: best / runner-up among UniSO-T + GTG + four DUO columns (single / single+text / multi+label / multi+text); "
-        r"DUO uses trajectories from examples/traj_params_per_task_example2.json (override DUO_MAX_SHORT_TRAJ_JSON).",
+        r"% Per row: best / runner-up among UniSO-T + GTG + four DUO columns.",
         r"\begin{table*}[t!]",
         rf"\caption{{{caption}}}",
         r"\vspace{0.3em}",
@@ -2258,7 +2194,6 @@ def write_latex(
             r"}",
         ]
     )
-    lines.extend(short_note)
     lines.extend(
         [
             rf"\label{{{label}}}",
@@ -2280,8 +2215,8 @@ def write_latex_nmax_design_bench(
     label: str,
 ) -> None:
     """
-    归一化分数：基线行为 ``uniso_nresult.tex`` 全文；DFGO 为日志中
-    ``nmax_ep_reward``（与 evaluate 中 ``(y-f.min)/(f.max-f.min)`` 一致，与表内基线可比）。
+    归一化分数：基线来自 ``uniso_nresult.tex``；DUO 行为日志中 ``nmax_ep_reward``
+    （与 evaluate 中归一化一致）。
     """
     parsed = parse_uniso_nresult_rows(uniso_nresult_path)
     if not parsed:
@@ -2292,49 +2227,34 @@ def write_latex_nmax_design_bench(
         return
     n_t = len(DESIGN_BENCH_TASK_ORDER)
     n_base = len(parsed)
-    means_all = np.full((n_t, n_base + 2), np.nan, dtype=np.float64)
+    means_all = np.full((n_t, n_base + 1), np.nan, dtype=np.float64)
     for ti in range(n_t):
         for j in range(n_base):
             v = parse_mean_from_text_cell(parsed[j][2][ti])
             means_all[ti, j] = np.nan if v is None else v
         tk = DESIGN_BENCH_TASK_ORDER[ti]
-        k1 = best_duo_exp_for_task(
-            duo, duo_single_task_prefix(tk), tk, False
-        )
-        g1m = _mean_nmax_from_task_stats(
-            duo.get(k1, {}).get(tk) if k1 else None
-        )
-        means_all[ti, n_base] = np.nan if g1m is None else g1m
         kfull = best_duo_exp_for_task(
             duo, duo_full_multitask_nmax_prefix(), tk, False
         )
         gfm = _mean_nmax_from_task_stats(
             duo.get(kfull, {}).get(tk) if kfull else None
         )
-        means_all[ti, n_base + 1] = np.nan if gfm is None else gfm
+        means_all[ti, n_base] = np.nan if gfm is None else gfm
     mu_r, _sd_r = column_mean_rank_stats_higher_nan_worst(means_all)
     n_rank_total = nmax_avg_rank_denominator_total(n_base, parsed)
-    rank_dfgo_s_plain = nmax_fmt_dfgo_avg_rank(mu_r[n_base], n_rank_total)
-    rank_dfgo_m_plain = nmax_fmt_dfgo_avg_rank(mu_r[n_base + 1], n_rank_total)
-    g1_cells: list[str] = []
+    rank_duo_plain = nmax_fmt_duo_avg_rank(mu_r[n_base], n_rank_total)
     gm_cells: list[str] = []
     for ti, task_key in enumerate(DESIGN_BENCH_TASK_ORDER):
-        k1 = best_duo_exp_for_task(
-            duo, duo_single_task_prefix(task_key), task_key, False
-        )
-        g1_cells.append(stats_cell_latex_nmax(duo, k1 or "", task_key))
         kfull = best_duo_exp_for_task(
             duo, duo_full_multitask_nmax_prefix(), task_key, False
         )
         gm_cells.append(stats_cell_latex_nmax(duo, kfull or "", task_key))
-    n_row = n_base + 2
-    # 列方向：先剥掉源表行内着色，再与 DFGO 一起按数值重算蓝/紫（任务列越大越好，Avg.\ Rank 越小越好）
+    # 列方向：先剥掉源表行内着色，再与 DUO 一起按数值重算蓝/紫（任务列越大越好，Avg.\ Rank 越小越好）
     task_cols_plain: list[list[str]] = [[] for _ in range(5)]
     for ti in range(5):
         col: list[str] = []
         for j in range(n_base):
             col.append(latex_cell_strip_wrappers(parsed[j][2][ti]))
-        col.append(g1_cells[ti])
         col.append(gm_cells[ti])
         task_cols_plain[ti] = col
     for ti in range(5):
@@ -2347,8 +2267,7 @@ def write_latex_nmax_design_bench(
         )
         for j in range(n_base)
     ]
-    avg_plain.append(rank_dfgo_s_plain)
-    avg_plain.append(rank_dfgo_m_plain)
+    avg_plain.append(rank_duo_plain)
     avg_plain = nmax_colorize_column_by_value(avg_plain, higher_is_better=False)
     hdr = (
         r"Method & Venue & Ant & D'Kitty & Superconductor & TF-Bind-8 & TF-Bind-10 & Avg.\ Rank \\"
@@ -2374,30 +2293,14 @@ def write_latex_nmax_design_bench(
         )
         if _nresult_midrule_after_row(method):
             lines.append(r"\midrule")
-    if parsed and _nresult_midrule_before_dfgo(parsed[-1][0]):
+    if parsed and _nresult_midrule_before_duo(parsed[-1][0]):
         lines.append(r"\midrule")
     lines.append(
-        r"\textbf{DFGO} (single) & / & "
+        r"\textbf{DUO} (multi, all tasks, text) & / & "
         + " & ".join(task_cols_plain[ti][n_base] for ti in range(5))
         + r" & "
         + avg_plain[n_base]
         + r" \\"
-    )
-    lines.append(
-        r"\textbf{DFGO} (multi, all tasks, text\_conditioned) & / & "
-        + " & ".join(task_cols_plain[ti][n_base + 1] for ti in range(5))
-        + r" & "
-        + avg_plain[n_base + 1]
-        + r" \\"
-    )
-    nmax_note = latex_hyper_selection_minipage_lines(
-        duo,
-        [
-            ("DFGO ST (nmax)", lambda tk: duo_single_task_prefix(tk)),
-            ("DFGO multi (nmax)", lambda _: duo_full_multitask_nmax_prefix()),
-        ],
-        list(DESIGN_BENCH_TASK_ORDER),
-        False,
     )
     lines.extend(
         [
@@ -2406,11 +2309,63 @@ def write_latex_nmax_design_bench(
             r"}",
         ]
     )
-    lines.extend(nmax_note)
     lines.extend(
         [
             rf"\label{{{label}}}",
             r"\end{table*}",
+            "",
+        ]
+    )
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def write_latex_trajectory_hyperparams(path: Path) -> None:
+    """Standalone table: per-task $n_{\mathrm{traj}}$, $k$, $\varepsilon$ from ``max_short_traj_json_path()``."""
+    jp = max_short_traj_json_path()
+    if not jp.is_file():
+        path.write_text(
+            rf"% Missing trajectory JSON: {jp}\n",
+            encoding="utf-8",
+        )
+        return
+    raw = json.loads(jp.read_text(encoding="utf-8"))
+    defaults: dict[str, Any] = dict(raw.get("defaults") or {})
+    keys = [k for k in raw if k != "defaults"]
+    ordered: list[str] = []
+    for t in TASK_ORDER:
+        if t in keys:
+            ordered.append(t)
+    for k in sorted(keys):
+        if k not in ordered:
+            ordered.append(k)
+    hz = os.environ.get("DUO_MAX_SHORT_HORIZON", "64")
+    cap = (
+        r"Per-task trajectory hyperparameters ($n_{\mathrm{traj}}$, $k$, $\varepsilon$); "
+        rf"diffusion horizon $H={hz}$."
+    )
+    lines = [
+        r"% Requires: \usepackage{booktabs}.",
+        r"\begin{table}[t]",
+        r"\centering",
+        rf"\caption{{{cap}}}",
+        r"\label{tab:duo-traj-hyperparams}",
+        r"\begin{tabular}{lccc}",
+        r"\toprule",
+        r"Task & $n_{\mathrm{traj}}$ & $k$ & $\varepsilon$ \\",
+        r"\midrule",
+    ]
+    for task_key in ordered:
+        row = {**defaults, **(raw[task_key] if isinstance(raw[task_key], dict) else {})}
+        nt = row.get("n_traj", "")
+        kk = row.get("k", "")
+        eps = row.get("eps", "")
+        name = latex_task_display_name(task_key)
+        lines.append(f"{name} & {nt} & {kk} & {eps} \\\\")
+    lines.extend(
+        [
+            r"\bottomrule",
+            r"\end{tabular}",
+            r"\end{table}",
             "",
         ]
     )
@@ -2459,6 +2414,7 @@ ANALYSIS_TABLE_DIR = _PROJECT_ROOT / "results" / "analysis_table"
 OUTPUT_BASE = ANALYSIS_TABLE_DIR / "max_short"
 MATRIX12_BASE = ANALYSIS_TABLE_DIR / "max_extended"
 NMAX_TEX = ANALYSIS_TABLE_DIR / "nmax.tex"
+TRAJECTORY_HYPER_TEX = ANALYSIS_TABLE_DIR / "trajectory_hyperparams.tex"
 UNISO_RESULT_TEX = ANALYSIS_TABLE_DIR / "uniso_result.tex"
 UNISO_NRESULT_TEX = ANALYSIS_TABLE_DIR / "uniso_nresult.tex"
 # run_multitask：仅 --use_text_condition → …_textcond；再加 --multitask_text_only → …_textcond_mttextonly。优先匹配后者。
@@ -2466,54 +2422,32 @@ MATRIX12_TEXT_SUFFIXES: tuple[str, ...] = ("_textcond_mttextonly", "_textcond")
 D_BEST_JSON = ANALYSIS_TABLE_DIR / "d_best.json"
 
 LATEX_CAPTION = (
-    "Un-normalized \\texttt{max\\_ep\\_reward} (mean $\\pm$ std over runs). "
-    "\\textbf{UniSO-T}: the \\textbf{Improved} column under UniSO-T in \\texttt{uniso\\_result.tex} (not the max over UniSO-T/N). "
-    "Mean rank: per task, rank methods by mean (higher better); report mean $\\pm$ std across tasks. "
-    "$\\mathcal{D}$(best): offline training subset (\\texttt{offline\\_train\\_best\\_y}); "
-    "optional \\texttt{results/analysis\\_table/d\\_best.json} overrides. "
-    "\\textbf{single} / \\textbf{single+text}: under \\texttt{single\\_task/\\dots/}, only the hyperfolder matching "
-    "\\texttt{examples/traj\\_params\\_per\\_task\\_example2.json} for that task (plus \\texttt{\\_textcond} for single+text). "
-    "\\textbf{multi+label}: one shared \\texttt{multi\\_task/all\\_<frac\\_sigma>/mt\\_<hex>/} directory for all tasks, "
-    "where \\texttt{mt\\_<hex>} is the digest for the same per-task trajectories as example2 (override \\texttt{DUO\\_FULL\\_MULTITASK\\_HYPER} to force a folder). "
-    "\\textbf{multi+text}: full multitask with text under \\texttt{text\\_conditioned\\_only/\\dots/} or injected \\texttt{eval\\_sweep\\_w\\_text/\\dots/}, "
-    "restricted to runs whose path contains that same \\texttt{mt\\_<hex>}. "
-    "Hyperfolder names are listed in the table note below."
+    "Un-normalized \\texttt{max\\_ep\\_reward} (mean $\\pm$ std over runs): "
+    "UniSO-T (Improved), GTG, and DUO (single / single+text / multitask label / multitask text). "
+    "Mean rank averages per-task ranks (higher reward is better). "
+    "$\\mathcal{D}$(best) uses offline train subset optima (optional overrides from \\texttt{d\\_best.json})."
 )
 LATEX_LABEL = "tab:gtg-duo-eval"
 LATEX_CAPTION_MATRIX12 = (
-    "Un-normalized \\texttt{max\\_ep\\_reward} (mean $\\pm$ std): UniSO-T (Improved) + GTG / DFGO single-task, "
-    "subgroup vs full multitask (label / text $\\times$ returns). "
-    "\\textbf{DFGO fullL} is \\texttt{multi\\_task/all\\_…} (labels, one shared hyperfolder by mean over tasks); "
-    "\\textbf{DFGO fullT (all)} vs \\textbf{(all imp)} are both under \\texttt{text\\_conditioned\\_only} "
-    "(\\texttt{all\\_<frac>} vs \\texttt{all\\_improved\\_<frac>}). "
-    "Mean rank: per task among UniSO-T + 14 columns; mean $\\pm$ std across tasks. "
-    "Best hyperfolder per task is listed in the table note."
+    "Un-normalized \\texttt{max\\_ep\\_reward} (mean $\\pm$ std): UniSO-T with GTG and DUO columns "
+    "(single-task and subgroup vs full multitask; labels vs text; $\\pm$ returns). "
+    "Mean rank across the fifteen method columns."
 )
 LATEX_LABEL_MATRIX12 = "tab:gtg-duo-eval-m12"
 LATEX_CAPTION_NMAX = (
-    "Normalized scores on the five Design-Bench tasks (same setting as \\texttt{uniso\\_nresult.tex}). "
-    "Baseline rows are copied from that table; \\textbf{DFGO} rows report \\texttt{nmax\\_ep\\_reward} "
-    "(mean $\\pm$ std over runs), i.e.\\ $(y-y_{\\min})/(y_{\\max}-y_{\\min})$ in \\texttt{evaluate.py}, "
-    "comparable to the normalized baselines. "
-    "\\textbf{DFGO (single)} uses per-task best under \\texttt{single\\_task/…}; "
-    "\\textbf{DFGO (multi, all tasks, text\\_conditioned)} scans \\texttt{text\\_conditioned\\_only/all\\_improved\\_<frac>/} "
-    "(override with \\texttt{DUO\\_NMAX\\_MULTITASK\\_PREFIX}); not \\texttt{multi\\_task}. "
-    "Best hyperfolder per task is in the table note. "
-    "Missing \\texttt{nmax} cells are worst when ranking. "
-    "Avg.\\ Rank for DFGO: mean per-task rank / $N$ ($N$ = pool size, same as baselines)."
+    "Normalized Design-Bench scores (baselines aligned with \\texttt{uniso\\_nresult.tex}); "
+    "DUO reports multitask text-conditioned \\texttt{nmax\\_ep\\_reward} (mean $\\pm$ std). "
+    "Avg.\\ Rank is mean per-task rank divided by pool size~$N$."
 )
-LATEX_LABEL_NMAX = "tab:dfgo-nmax-designbench"
+LATEX_LABEL_NMAX = "tab:duo-nmax-designbench"
 TEXT_CONDITIONED_RESULT_ANALYSIS_BASE = (
     ANALYSIS_TABLE_DIR / "text_conditioned_result_analysis"
 )
 _LATEX_ESC_ALL_SIG = EVAL_ALL_TASK_FRAC_SIG.replace("_", r"\_")
 LATEX_CAPTION_ALL = (
-    "DFGO (full multitask, text-conditioned): one column per immediate subfolder of "
-    f"\\texttt{{results/text\\_conditioned\\_only/{_LATEX_ESC_ALL_SIG}/}} "
-    "(folder names encode key hyperparameters, e.g.\\ \\texttt{w1.2\\_}$\\cdots$); "
-    "each column pools runs inside that folder only. "
-    "UniSO-T (Improved from \\texttt{uniso\\_result.tex}), GTG ST / ST+r, and DFGO. Mean rank: higher mean reward is better; "
-    "report mean $\\pm$ std of per-task ranks."
+    "Full multitask text-conditioned evaluation: one column per hyperparameter subfolder under "
+    f"\\texttt{{text\\_conditioned\\_only/{_LATEX_ESC_ALL_SIG}/}}. "
+    "UniSO-T (Improved), GTG ST / ST+r, and DUO. Mean rank uses higher reward as better."
 )
 LATEX_LABEL_ALL = "tab:gtg-duo-eval-all-text"
 
@@ -2551,14 +2485,11 @@ def main(mode: str = "all") -> None:
     duo = scan_results_root(DUO_RESULTS)
     gtg = scan_results_root(GTG_RESULTS)
 
-    sweep_note = merge_eval_sweep_w_text_into_duo(duo, DUO_RESULTS)
+    merge_eval_sweep_w_text_into_duo(duo, DUO_RESULTS)
     _swp = _env_compat("DUO_SWEEP_W_PREFIX", "GTGDFGO_SWEEP_W_PREFIX", "")
-    if sweep_note and _swp:
-        print(
-            "eval_sweep_w_text: DUO full multitask text columns use "
-            f"w={_env_compat('DUO_SWEEP_W_VALUE', 'GTGDFGO_SWEEP_W_VALUE', '')} "
-            f"under {_swp}"
-        )
+    _wv = _env_compat("DUO_SWEEP_W_VALUE", "GTGDFGO_SWEEP_W_VALUE", "")
+    if _swp.strip():
+        print(f"eval_sweep_w_text: DUO multitask text uses w={_wv} under {_swp}")
 
     do_short = mode in ("all", "short")
     do_full = mode in ("all", "full")
@@ -2579,7 +2510,7 @@ def main(mode: str = "all") -> None:
             gtg,
             duo,
             d_best_overrides,
-            caption=LATEX_CAPTION + sweep_note,
+            caption=LATEX_CAPTION,
             label=LATEX_LABEL,
             uniso_by_task=uniso_by_task,
         )
@@ -2590,12 +2521,14 @@ def main(mode: str = "all") -> None:
             duo,
             d_best_overrides,
             UNISO_NRESULT_TEX,
-            caption=LATEX_CAPTION_NMAX + sweep_note,
+            caption=LATEX_CAPTION_NMAX,
             label=LATEX_LABEL_NMAX,
         )
         print(f"Wrote {out_base.with_suffix('.csv')}")
         print(f"Wrote {tex_path}")
+        write_latex_trajectory_hyperparams(TRAJECTORY_HYPER_TEX)
         print(f"Wrote {NMAX_TEX}")
+        print(f"Wrote {TRAJECTORY_HYPER_TEX}")
         print(
             f"DUO experiments: {len(duo)}, GTG experiments: {len(gtg)}, comparison rows: {len(rows)}"
         )
@@ -2610,7 +2543,7 @@ def main(mode: str = "all") -> None:
             duo,
             d_best_overrides,
             uniso_by_task,
-            caption=LATEX_CAPTION_ALL + sweep_note,
+            caption=LATEX_CAPTION_ALL,
             label=LATEX_LABEL_ALL,
         )
         print(f"Wrote {all_base.with_suffix('.tex')}")
@@ -2624,7 +2557,7 @@ def main(mode: str = "all") -> None:
         write_matrix12_csv(mbase.with_suffix(".csv"), mrows)
         write_matrix12_latex(
             mbase.with_suffix(".tex"),
-            LATEX_CAPTION_MATRIX12 + sweep_note,
+            LATEX_CAPTION_MATRIX12,
             LATEX_LABEL_MATRIX12,
             gtg,
             duo,
@@ -2648,9 +2581,9 @@ def _parse_args() -> argparse.Namespace:
         default="all",
         help=(
             "Which outputs to generate: "
-            "short = analysis_table/max_short (wide CSV+TeX) and nmax.tex; "
+            "short = analysis_table/max_short (wide CSV+TeX), nmax.tex, and trajectory_hyperparams.tex; "
             "full = analysis_table/max_extended (matrix CSV+TeX); "
-            "final = analysis_table/text_conditioned_result_analysis (DFGO: one column per hyper under all_frac…); "
+            "final = analysis_table/text_conditioned_result_analysis (DUO: one column per hyper under all_frac…); "
             "sweep_w = analysis_table/max_ablation from eval_sweep_w_text (optional SWEEP_W_MODEL_DIR); "
             "all = short + full + final (default). Text-CFG multi-w comparison is max_ablation.tex (not max.tex)."
         ),

@@ -48,12 +48,16 @@ def resolve_multitask_pretrained_run_dir(
     sigma: float,
     mt_hex: str,
     seed: int,
+    latent_dim: int = 32,
 ) -> str:
-    """``trained_models/multi_<token>_frac…/mt_<hex>_textcond_mttextonly/seed<n>/``（无尾斜杠）。"""
+    """``trained_models/multi_<token>_frac…/mt_<hex>_textcond_mttextonly[_latent{d}]/seed<n>/``（无尾斜杠）。"""
     from diffuser.utils.multitask_canon import multitask_path_token
 
     ts = multitask_path_token(multitask_train_tasks_csv)
     hyper = pretrained_hyper_dir_name(mt_hex)
+    _ld = int(latent_dim)
+    if _ld != 32:
+        hyper = f"{hyper}_latent{_ld}"
     return os.path.join(
         f"trained_models/multi_{ts}_frac{frac}_sigma{sigma}",
         hyper,
@@ -99,6 +103,7 @@ def resolve_pretrained_diffusion_pt_for_real_task(
     mt_hex: str | None,
     pretrained_seed: int,
     config: Any | None = None,
+    latent_dim: int = 32,
 ) -> str | None:
     """预训练 multitask text 模型下的 ``state*.pt`` 绝对路径（相对于 cwd）。"""
     h = mt_hex if mt_hex is not None else DEFAULT_PRETRAINED_MT_HEX
@@ -108,6 +113,7 @@ def resolve_pretrained_diffusion_pt_for_real_task(
         sigma=sigma,
         mt_hex=h,
         seed=pretrained_seed,
+        latent_dim=int(latent_dim),
     )
     ckpt_dir = os.path.join(run_dir, "checkpoint")
     return resolve_diffusion_state_pt(ckpt_dir, config)

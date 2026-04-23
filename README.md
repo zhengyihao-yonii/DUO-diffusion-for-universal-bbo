@@ -134,6 +134,67 @@ These tune where aggregated results and text-CFG sweep columns are read from (de
 | `DUO_SWEEP_W_DISABLE` | Truthy values disable sweep-w-specific behavior in some table modes. |
 | `SWEEP_W_MODEL_DIR` | Override model directory for sweep-w ablation resolution. |
 
+### Trajectory JSON / multitask slug (`max_short_traj_context`, tables)
+
+Used by `scripts/analyze_eval_results.py` (wide-table alignment) and training/eval when matching `mt_<hex>` folders to `examples/traj_params_per_task_example2.json`.
+
+| Variable | Purpose |
+|----------|---------|
+| `DUO_MAX_SHORT_TRAJ_JSON` | Path to per-task trajectory hyperparameter JSON (default `examples/traj_params_per_task_example2.json`). |
+| `DUO_MAX_SHORT_HORIZON` | Diffusion horizon for multitask trajectory signature / checkpoint hyper dir (default `64`). |
+| `DUO_MAX_SHORT_FULL_MT_TASKS` | Comma-separated task list for full-multitask slug (must match construct/train). |
+
+### TF-Bind auxiliary CE during diffusion training (`diffuser/models/diffusion.py`)
+
+Adds **MSE + λ·CE** on TF-Bind logit dimensions when `predict_epsilon=True`. `train.py` passes `train_tasks_list` into the diffusion object so batch rows map to task names.
+
+| Variable | Purpose |
+|----------|---------|
+| `DUO_DISCRETE_CE_LAMBDA` | Weight **λ** for the auxiliary cross-entropy term (default **`0`** = CE disabled). |
+| `DUO_DISCRETE_CE_TASK_NAMES` | Comma-separated task names that receive CE (default **`tfbind8,tfbind10`**). |
+
+### Per-timestep diffusion loss during training (`diffuser/models/diffusion.py`)
+
+When enabled, each training log step (same cadence as `log_freq`) includes extra scalars
+``train/t_loss/b{bin}_t{lo}_{hi}``: mean **weighted MSE** (same weighting as the main diffusion loss)
+over batch items whose sampled discrete timestep ``t`` falls in ``[lo, hi]`` (``t`` from
+``torch.randint(0, n_timesteps, ...)``). **Smaller bin index → smaller ``t``** (less noise injected
+in ``q_sample`` for the default beta schedule). Use these curves on wandb vs ``steps`` to see whether
+the model is worse near ``t → 0`` (small noise) vs mid/high ``t``.
+
+| Variable | Purpose |
+|----------|---------|
+| `DUO_LOG_PER_T_LOSS` | Set to `1` / `true` / `yes` / `on` to log per-bin diffusion MSE (default off). |
+| `DUO_LOG_PER_T_LOSS_BINS` | Number of bins (default **`20`**, clamped to ``[2, n_timesteps]``). |
+
+### Oracle sampling curves (`visualize.sh`)
+
+Four eval modes (`mt_text`, `mt_task`, `st_text`, `st_duo`) write `eval_<tag>_seed<seed>.log` under `VISUALIZE_RESULTS`. If a log file already exists, that eval is **skipped** unless overridden below.
+
+| Variable | Purpose |
+|----------|---------|
+| `PYTHON` | Interpreter (default conda path in script; must have PyTorch). |
+| `PROJECT` | Repo root (default: directory containing `visualize.sh`). |
+| `TRAJ_JSON` | Trajectory JSON for multitask `n_traj/k/eps` (default `examples/traj_params_per_task_example2.json`). |
+| `FULL_MT` | Comma-separated `train_tasks` for multitask rows (default 9-task CSV). |
+| `FRAC`, `SIGMA`, `HORIZON`, `CTX_LEN` | Passed through to `evaluate.py` (defaults `1.0`, `0.0`, `64`, `32`). |
+| `N_TRAJ_MT`, `K_MT`, `EPS_MT` | Multitask trajectory scalars before per-task JSON overrides (defaults `1000`, `50`, `0.05`). |
+| `MT_EXPECT_HEX` | Optional expected 16-hex segment inside printed multitask hyper dir (warning only). |
+| `SAMPLE_VIZ_STRIDE`, `SAMPLE_VIZ_MAX_QUERIES` | Sample-viz stepping and query cap (defaults `10`, `512`). |
+| `NUM_SEEDS`, `START_SEED` | Same semantics as `--multi_seeds` when exported before launch. |
+| `VISUALIZE_RESULTS` | Output directory for `visualize.log` and `eval_*.log` (default `results/visualize/task_<TASK>_…`). |
+| `DUMP_ROOT` | Multi-seed JSONL root (default `$VISUALIZE_RESULTS/sample_viz_dump`). |
+| `WANDB_RUN_GROUP_PREFIX` | Prefix for `WANDB_RUN_GROUP` (default `duo_viz`). |
+| `SKIP_MT_TEXT`, `SKIP_MT_TASK`, `SKIP_ST_TEXT`, `SKIP_ST_DUO` | Set to `1` to skip one of the four eval branches. |
+| `VISUALIZE_FORCE_EVAL` | Set to `1` to **re-run** evaluate even when `eval_<tag>_seed*.log` already exists. |
+| `EXTRA_EVAL_FLAGS` | Extra arguments forwarded to each `evaluate.py` invocation (space-separated). |
+
+### Sample-viz JSONL (`evaluate.py`)
+
+| Variable | Purpose |
+|----------|---------|
+| `DUO_SAMPLE_VIZ_DUMP_DIR` | Directory for per-step sample-viz JSONL dumps when not set via CLI `sample_viz_dump_jsonl`. |
+
 ---
 
 

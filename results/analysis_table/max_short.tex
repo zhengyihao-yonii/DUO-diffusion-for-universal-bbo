@@ -1,7 +1,7 @@
 % Requires: \usepackage{booktabs}, \usepackage{graphicx}, \usepackage{xcolor}.
-% Per row: best / runner-up among UniSO-T + GTG + four DUO columns (single / single+text / multi+label / multi+text); DUO uses trajectories from examples/traj_params_per_task_example2.json (override DUO_MAX_SHORT_TRAJ_JSON).
+% Per row: best / runner-up among UniSO-T + GTG + four DUO columns.
 \begin{table*}[t!]
-\caption{Un-normalized \texttt{max\_ep\_reward} (mean $\pm$ std over runs). \textbf{UniSO-T}: the \textbf{Improved} column under UniSO-T in \texttt{uniso\_result.tex} (not the max over UniSO-T/N). Mean rank: per task, rank methods by mean (higher better); report mean $\pm$ std across tasks. $\mathcal{D}$(best): offline training subset (\texttt{offline\_train\_best\_y}); optional \texttt{results/analysis\_table/d\_best.json} overrides. \textbf{single} / \textbf{single+text}: under \texttt{single\_task/\dots/}, only the hyperfolder matching \texttt{examples/traj\_params\_per\_task\_example2.json} for that task (plus \texttt{\_textcond} for single+text). \textbf{multi+label}: one shared \texttt{multi\_task/all\_<frac\_sigma>/mt\_<hex>/} directory for all tasks, where \texttt{mt\_<hex>} is the digest for the same per-task trajectories as example2 (override \texttt{DUO\_FULL\_MULTITASK\_HYPER} to force a folder). \textbf{multi+text}: full multitask with text under \texttt{text\_conditioned\_only/\dots/} or injected \texttt{eval\_sweep\_w\_text/\dots/}, restricted to runs whose path contains that same \texttt{mt\_<hex>}. Hyperfolder names are listed in the table note below. \textbf{DFGO full multitask text} (matrix cols.\ fullT / nmax multi text): \texttt{eval\_sweep\_w\_text/mt\_911054c35daad7e0\_textcond\_mttextonly} with unified $\texttt{condition\_guidance\_w\_text}=8$ (best $w$: lowest mean rank among $w$ columns in \texttt{max\_ablation}, joint per-task ranking with UniSO and GTG ST). Trajectory slug \texttt{mt\_911054c35daad7e0} is the 16-hex-digit digest prefix of the multitask trajectory signature (SHA-256). +returns text columns use the same sweep logits (no separate ret eval). }
+\caption{Un-normalized \texttt{max\_ep\_reward} (mean $\pm$ std over runs): UniSO-T (Improved), GTG, and DUO (single / single+text / multitask label / multitask text). Mean rank averages per-task ranks (higher reward is better). $\mathcal{D}$(best) uses offline train subset optima (optional overrides from \texttt{d\_best.json}).}
 \vspace{0.3em}
 \centering
 \resizebox{\linewidth}{!}{
@@ -9,24 +9,19 @@
 \toprule
 Task & $\mathcal{D}$(best) & \shortstack{UniSO-T} & GTG & single & single+text & multi+label & multi+text \\
 \midrule
-Ant & 165.326 & 455.658 $\pm$ 39.188 & 452.330 $\pm$ 61.502 & 474.207 $\pm$ 11.743 & \textbf{\textcolor{violet}{490.691 $\pm$ 17.299}} & -- & \textbf{\textcolor{blue}{566.659 $\pm$ 9.082}} \\
-D'Kitty & 199.363 & 222.007 $\pm$ 33.677 & \textbf{\textcolor{violet}{264.857 $\pm$ 17.571}} & 257.494 $\pm$ 17.376 & 252.830 $\pm$ 10.977 & -- & \textbf{\textcolor{blue}{307.139 $\pm$ 12.211}} \\
-Superconductor & 74.000 & 82.642 $\pm$ 3.467 & \textbf{\textcolor{violet}{89.802 $\pm$ 6.763}} & 78.774 $\pm$ 4.163 & 76.990 $\pm$ 3.889 & -- & \textbf{\textcolor{blue}{104.827 $\pm$ 7.582}} \\
-TF Bind 8 & 0.439 & 0.857 $\pm$ 0.069 & 0.934 $\pm$ 0.030 & \textbf{\textcolor{blue}{0.957 $\pm$ 0.019}} & \textbf{\textcolor{violet}{0.952 $\pm$ 0.038}} & -- & 0.800 $\pm$ 0.091 \\
-TF Bind 10 & 0.005 & \textbf{\textcolor{blue}{0.944 $\pm$ 0.794}} & 0.632 $\pm$ 0.106 & 0.641 $\pm$ 0.144 & \textbf{\textcolor{violet}{0.787 $\pm$ 0.076}} & -- & 0.730 $\pm$ 0.356 \\
-GTOPX 2 & -196.663 & -90.106 $\pm$ 8.223 & -72.163 $\pm$ 8.495 & \textbf{\textcolor{violet}{-66.664 $\pm$ 15.951}} & -75.231 $\pm$ 20.343 & -- & \textbf{\textcolor{blue}{-48.779 $\pm$ 9.781}} \\
-GTOPX 3 & -152.364 & \textbf{\textcolor{violet}{-44.427 $\pm$ 13.456}} & -53.866 $\pm$ 9.877 & -47.522 $\pm$ 6.089 & -51.900 $\pm$ 13.122 & -- & \textbf{\textcolor{blue}{-29.687 $\pm$ 1.663}} \\
-GTOPX 4 & -216.709 & -74.779 $\pm$ 11.032 & -72.749 $\pm$ 6.632 & \textbf{\textcolor{violet}{-57.550 $\pm$ 12.458}} & -67.212 $\pm$ 11.006 & -- & \textbf{\textcolor{blue}{-49.997 $\pm$ 7.345}} \\
-GTOPX 6 & -111.666 & \textbf{\textcolor{violet}{-48.244 $\pm$ 5.766}} & -55.834 $\pm$ 9.655 & -59.971 $\pm$ 9.638 & -58.092 $\pm$ 2.617 & -- & \textbf{\textcolor{blue}{-30.053 $\pm$ 1.303}} \\
+Ant & 165.326 & 455.658 $\pm$ 39.188 & 452.330 $\pm$ 61.502 & 474.207 $\pm$ 11.743 & 490.691 $\pm$ 17.299 & \textbf{\textcolor{violet}{565.699 $\pm$ 8.628}} & \textbf{\textcolor{blue}{566.659 $\pm$ 9.082}} \\
+D'Kitty & 199.363 & 222.007 $\pm$ 33.677 & 264.857 $\pm$ 17.571 & 257.494 $\pm$ 17.376 & 252.830 $\pm$ 10.977 & \textbf{\textcolor{violet}{300.777 $\pm$ 13.149}} & \textbf{\textcolor{blue}{307.139 $\pm$ 12.211}} \\
+Superconductor & 74.000 & 82.642 $\pm$ 3.467 & 89.802 $\pm$ 6.763 & 78.774 $\pm$ 4.163 & 76.990 $\pm$ 3.889 & \textbf{\textcolor{violet}{100.741 $\pm$ 12.287}} & \textbf{\textcolor{blue}{104.827 $\pm$ 7.582}} \\
+TF Bind 8 & 0.439 & 0.857 $\pm$ 0.069 & 0.934 $\pm$ 0.030 & \textbf{\textcolor{blue}{0.953 $\pm$ 0.035}} & \textbf{\textcolor{violet}{0.952 $\pm$ 0.038}} & 0.724 $\pm$ 0.073 & 0.800 $\pm$ 0.091 \\
+TF Bind 10 & 0.005 & \textbf{\textcolor{blue}{0.944 $\pm$ 0.794}} & 0.632 $\pm$ 0.106 & 0.641 $\pm$ 0.144 & \textbf{\textcolor{violet}{0.787 $\pm$ 0.076}} & 0.632 $\pm$ 0.171 & 0.730 $\pm$ 0.356 \\
+GTOPX 2 & -196.663 & -90.106 $\pm$ 8.223 & -72.163 $\pm$ 8.495 & \textbf{\textcolor{violet}{-66.664 $\pm$ 15.951}} & -75.231 $\pm$ 20.343 & -110.869 $\pm$ 13.664 & \textbf{\textcolor{blue}{-48.779 $\pm$ 9.781}} \\
+GTOPX 3 & -152.364 & \textbf{\textcolor{violet}{-44.427 $\pm$ 13.456}} & -53.866 $\pm$ 9.877 & -47.522 $\pm$ 6.089 & -51.900 $\pm$ 13.122 & -51.175 $\pm$ 14.311 & \textbf{\textcolor{blue}{-29.687 $\pm$ 1.663}} \\
+GTOPX 4 & -216.709 & -74.779 $\pm$ 11.032 & -72.749 $\pm$ 6.632 & \textbf{\textcolor{violet}{-57.550 $\pm$ 12.458}} & -67.212 $\pm$ 11.006 & -63.167 $\pm$ 13.669 & \textbf{\textcolor{blue}{-49.997 $\pm$ 7.345}} \\
+GTOPX 6 & -111.666 & \textbf{\textcolor{violet}{-48.244 $\pm$ 5.766}} & -55.834 $\pm$ 9.655 & -59.971 $\pm$ 9.638 & -58.092 $\pm$ 2.617 & -61.664 $\pm$ 10.439 & \textbf{\textcolor{blue}{-30.053 $\pm$ 1.303}} \\
 \midrule
-Mean rank & / & 3.444 $\pm$ 1.509 & 3.556 $\pm$ 1.236 & \textbf{\textcolor{violet}{3.000 $\pm$ 1.225}} & 3.333 $\pm$ 1.118 & -- & \textbf{\textcolor{blue}{1.667 $\pm$ 1.414}} \\
+Mean rank & / & 3.889 $\pm$ 1.833 & 4.222 $\pm$ 1.481 & \textbf{\textcolor{violet}{3.333 $\pm$ 1.414}} & 3.889 $\pm$ 1.364 & 4.000 $\pm$ 1.803 & \textbf{\textcolor{blue}{1.667 $\pm$ 1.414}} \\
 \bottomrule
 \end{tabular}
 }
-\vspace{0.4em}
-\begin{minipage}{\linewidth}
-\footnotesize
-\textit{Hyper selection (best subfolder per task):} \textbf{multi+label}: no aggregated runs under \texttt{multi\_task/all\_frac1.0\_sigma0.0/mt\_911054c35daad7e0} (\texttt{traj\_params\_per\_task\_example2.json}); table shows ``--''. \par \textbf{single}: ant$\rightarrow$\texttt{1000x64\_k20\_eps0.05}; dkitty$\rightarrow$\texttt{1000x64\_k20\_eps0.01}; superconductor$\rightarrow$\texttt{1000x64\_k20\_eps0.05}; tfbind8$\rightarrow$\texttt{1000x64\_k50\_eps0.05}; tfbind10$\rightarrow$\texttt{1000x64\_k50\_eps0.05}; gtopx2$\rightarrow$\texttt{1000x64\_k20\_eps0.05}; gtopx3$\rightarrow$\texttt{1000x64\_k10\_eps0.01}; gtopx4$\rightarrow$\texttt{1000x64\_k20\_eps0.05}; gtopx6$\rightarrow$\texttt{1000x64\_k20\_eps0.01} \par \textbf{single+text}: ant$\rightarrow$\texttt{1000x64\_k20\_eps0.05\_textcond}; dkitty$\rightarrow$\texttt{1000x64\_k20\_eps0.01\_textcond}; superconductor$\rightarrow$\texttt{1000x64\_k20\_eps0.05\_textcond}; tfbind8$\rightarrow$\texttt{1000x64\_k50\_eps0.05\_textcond}; tfbind10$\rightarrow$\texttt{1000x64\_k50\_eps0.05\_textcond}; gtopx2$\rightarrow$\texttt{1000x64\_k20\_eps0.05\_textcond}; gtopx3$\rightarrow$\texttt{1000x64\_k10\_eps0.01\_textcond}; gtopx4$\rightarrow$\texttt{1000x64\_k20\_eps0.05\_textcond}; gtopx6$\rightarrow$\texttt{1000x64\_k20\_eps0.01\_textcond} \par \textbf{multi+text}: ant$\rightarrow$\texttt{w\_text8}; dkitty$\rightarrow$\texttt{w\_text8}; superconductor$\rightarrow$\texttt{w\_text8}; tfbind8$\rightarrow$\texttt{w\_text8}; tfbind10$\rightarrow$\texttt{w\_text8}; gtopx2$\rightarrow$\texttt{w\_text8}; gtopx3$\rightarrow$\texttt{w\_text8}; gtopx4$\rightarrow$\texttt{w\_text8}; gtopx6$\rightarrow$\texttt{w\_text8}
-\end{minipage}
 \label{tab:gtg-duo-eval}
 \end{table*}

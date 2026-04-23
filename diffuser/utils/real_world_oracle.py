@@ -28,8 +28,8 @@ def is_real_world_oracle_task(name: str) -> bool:
 def _lunar_predict_batch(x: np.ndarray, n_envs: int | None = None) -> np.ndarray:
     """x: (N, 12) in [0,1]；返回每条轨迹在 n_envs 个随机种子下的平均回报（越大越好）。
 
-    默认每个设计评估 5 局（原为从 mcts-transfer 迁入时常用的 50，过慢）。
-    可用环境变量 ``GTG_LUNAR_ORACLE_N_ENVS`` 覆盖（正整数）；或传入 ``n_envs`` 显式指定。
+    默认每个设计评估 50 局（与早期 mcts-transfer 行为一致；更稳但更慢）。
+    可用环境变量 ``GTG_LUNAR_ORACLE_N_ENVS`` 覆盖（正整数，例如 5 加速）；或传入 ``n_envs`` 显式指定。
     """
     import torch
 
@@ -37,7 +37,7 @@ def _lunar_predict_batch(x: np.ndarray, n_envs: int | None = None) -> np.ndarray
 
     if n_envs is None:
         raw = os.environ.get("GTG_LUNAR_ORACLE_N_ENVS", "").strip()
-        n_envs = int(raw) if raw else 5
+        n_envs = int(raw) if raw else 50
     n_envs = max(1, int(n_envs))
 
     x = np.asarray(x, dtype=np.float64)

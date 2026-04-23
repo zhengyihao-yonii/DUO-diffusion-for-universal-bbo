@@ -18,6 +18,9 @@ class Config(ParamsProto):
     horizon = 64
     n_diffusion_steps = 200
     n_sample_timesteps = 200
+    # 可选扩散训练改进（默认 0；CLI --train_timestep_bias_power / --train_loss_min_snr_gamma 可覆盖）
+    train_timestep_bias_power = 0.0
+    train_loss_min_snr_gamma = 0.0
     action_weight = 10
     loss_weights = None
     loss_discount = 1

@@ -1,0 +1,21 @@
+% Requires: \usepackage{booktabs}.
+\begin{table}[t]
+\centering
+\caption{Per-task trajectory hyperparameters ($n_{\mathrm{traj}}$, $k$, $\varepsilon$); diffusion horizon $H=64$.}
+\label{tab:duo-traj-hyperparams}
+\begin{tabular}{lccc}
+\toprule
+Task & $n_{\mathrm{traj}}$ & $k$ & $\varepsilon$ \\
+\midrule
+Ant & 1000 & 20 & 0.05 \\
+D'Kitty & 1000 & 20 & 0.01 \\
+Superconductor & 1000 & 20 & 0.05 \\
+TF Bind 8 & 1000 & 50 & 0.05 \\
+TF Bind 10 & 1000 & 50 & 0.05 \\
+GTOPX 2 & 1000 & 20 & 0.05 \\
+GTOPX 3 & 1000 & 10 & 0.01 \\
+GTOPX 4 & 1000 & 20 & 0.05 \\
+GTOPX 6 & 1000 & 20 & 0.01 \\
+\bottomrule
+\end{tabular}
+\end{table}

@@ -32,6 +32,14 @@ def set_seed(seed: int) -> None:
 from sklearn.preprocessing import StandardScaler
 from dataset_utils import TASKNAME2DIM, MultiDatasetLoader, save_dataset_info, load_dataset_info
 
+from diffuser.utils.vae_layout import (
+    distance_matrix_cache_filename,
+    generated_vae_info_filename,
+    per_task_latent_train_filename,
+    raw_train_pkl_path_from_latent_path,
+    vae_state_pt_filename,
+)
+
 @contextmanager
 def suppress_output():
     """
@@ -216,6 +224,7 @@ def construct_trajectories(
     pretrained_vae_info=None,
     finetune_epochs=50,
     finetune_lr=3e-5,
+    latent_dim=32,
 ):
     """
     构建轨迹，支持单任务和多任务模式
@@ -236,9 +245,11 @@ def construct_trajectories(
     - pretrained_vae_info: **单任务 real-world 必填**，指向仅含 Design-Bench 等多任务预训练的 ``vae_info.p``，
       在 few-shot 数据上 **微调** VAE（小学习率），兼顾预训练表征与真实域分布。
     - finetune_epochs / finetune_lr: 微调轮数与学习率（仅 real-world）
+    - latent_dim: VAE 隐空间维度；决定 ``_vae_latent{d}_train.p`` / ``vae_latent{d}.pt`` / mixed 文件名后缀。
     """
     set_seed(seed)
     traj_len = horizon
+    _latent = int(latent_dim)
 
     from diffuser.utils.traj_params import (
         coerce_traj_param_dicts,
@@ -287,7 +298,9 @@ def construct_trajectories(
     # 多任务必须与单任务一致：按 n_traj/k/eps/horizon 检查各任务 pkl；不能仅因 mixed 存在就跳过，
     # 否则更换 n_traj 后仍会命中旧的 mixed，且 run_multitask 后续 train 会指向不存在的 data_path。
     if is_multitask:
-        mixed_short = os.path.join(output_dir_early, multitask_mixed_basename(mt_sig))
+        mixed_short = os.path.join(
+            output_dir_early, multitask_mixed_basename(mt_sig, _latent)
+        )
         mixed_long = os.path.join(output_dir_early, f"mixed_{mt_sig}.p")
         mixed_legacy = os.path.join(output_dir_early, "mixed_trajectories_train.p")
         all_task_pkls_exist = True
@@ -297,7 +310,9 @@ def construct_trajectories(
             task_eps = eps[task_name]
             task_pkl = os.path.join(
                 _generated_task_dir(task_name, frac, sigma),
-                f"{task_name}_{task_n_traj}x{traj_len}_k{task_k}_eps{task_eps}_vae_latent32_train.p",
+                per_task_latent_train_filename(
+                    task_name, task_n_traj, traj_len, task_k, task_eps, _latent
+                ),
             )
             if not os.path.isfile(task_pkl):
                 all_task_pkls_exist = False
@@ -322,7 +337,9 @@ def construct_trajectories(
         tn = tasks_list[0]
         task_pkl = os.path.join(
             output_dir_early,
-            f"{tn}_{n_traj[tn]}x{traj_len}_k{k[tn]}_eps{eps[tn]}_vae_latent32_train.p",
+            per_task_latent_train_filename(
+                tn, n_traj[tn], traj_len, k[tn], eps[tn], _latent
+            ),
         )
         if os.path.isfile(task_pkl):
             print(f"已存在轨迹文件，跳过数据加载与 VAE：{task_pkl}")
@@ -361,7 +378,7 @@ def construct_trajectories(
                 self.sigma = sigma
                 self.fixed_dim = fixed_dim
                 self.force_retrain = False
-                self.latent_dim = 32  # 固定隐空间维度
+                self.latent_dim = _latent  # 与轨迹 / vae_latent{d}.pt 命名一致
                 self.d_model = 256
                 self.nhead = 4
                 self.num_layers = 4
@@ -453,7 +470,7 @@ def construct_trajectories(
                 self.sigma = sigma
                 self.fixed_dim = fixed_dim
                 self.force_retrain = False
-                self.latent_dim = 32
+                self.latent_dim = _latent
                 self.d_model = 256
                 self.nhead = 4
                 self.num_layers = 4
@@ -534,7 +551,7 @@ def construct_trajectories(
     # 检查轨迹文件是否已存在（多任务需各任务 pkl + multi 下 mixed）
     all_files_exist = True
     if is_multitask:
-        mixed_here = os.path.join(output_dir, multitask_mixed_basename(mt_sig))
+        mixed_here = os.path.join(output_dir, multitask_mixed_basename(mt_sig, _latent))
         mixed_long = os.path.join(output_dir, f"mixed_{mt_sig}.p")
         mixed_legacy = os.path.join(output_dir, "mixed_trajectories_train.p")
         if not (
@@ -550,7 +567,9 @@ def construct_trajectories(
                 task_eps = eps[task_name]
                 task_output_path = os.path.join(
                     _generated_task_dir(task_name, frac, sigma),
-                    f"{task_name}_{task_n_traj}x{traj_len}_k{task_k}_eps{task_eps}_vae_latent32_train.p",
+                    per_task_latent_train_filename(
+                        task_name, task_n_traj, traj_len, task_k, task_eps, _latent
+                    ),
                 )
                 if not os.path.exists(task_output_path):
                     all_files_exist = False
@@ -562,7 +581,9 @@ def construct_trajectories(
             task_eps = eps[task_name]
             task_output_path = os.path.join(
                 output_dir,
-                f"{task_name}_{task_n_traj}x{traj_len}_k{task_k}_eps{task_eps}_vae_latent32_train.p",
+                per_task_latent_train_filename(
+                    task_name, task_n_traj, traj_len, task_k, task_eps, _latent
+                ),
             )
             if not os.path.exists(task_output_path):
                 all_files_exist = False
@@ -596,7 +617,9 @@ def construct_trajectories(
             if task_n <= 0:
                 raise ValueError(f"任务 {task_name} 数据块为空: start={start_idx}, end={end_idx}")
             
-            dist_task_path = os.path.join(task_out_dir, "distance_vae.p")
+            dist_task_path = os.path.join(
+                task_out_dir, distance_matrix_cache_filename(_latent)
+            )
             distances_t, dist_cache_ok = _load_distance_matrix_cache(
                 dist_task_path, task_points, allow_legacy_plain=False
             )
@@ -692,7 +715,9 @@ def construct_trajectories(
             # 保存任务特定的轨迹数据（任务名目录下）
             task_output_path = os.path.join(
                 task_out_dir,
-                f"{task_name}_{task_n_traj}x{traj_len}_k{task_k}_eps{task_eps}_vae_latent32_train.p",
+                per_task_latent_train_filename(
+                    task_name, task_n_traj, traj_len, task_k, task_eps, _latent
+                ),
             )
             task_obj = [our_data, our_data_vals, pr, cumulative_regret_to_go, timesteps]
             pkl.dump(task_obj, open(task_output_path, "wb"))
@@ -700,13 +725,13 @@ def construct_trajectories(
         
         # 保存VAE信息（仅 multi 目录，供 evaluate 等解析）
         vae_info = {
-            'latent_dim': 32,
-            'vae_path': os.path.join(model_save_dir, "vae_latent32.pt"),
-            'fixed_dim': fixed_dim,
-            'tasks': tasks_list,
-            'task_dims_info': task_dims_info
+            "latent_dim": _latent,
+            "vae_path": os.path.join(model_save_dir, vae_state_pt_filename(_latent)),
+            "fixed_dim": fixed_dim,
+            "tasks": tasks_list,
+            "task_dims_info": task_dims_info,
         }
-        vae_info_path = os.path.join(multi_dir, "vae_info.p")
+        vae_info_path = os.path.join(multi_dir, generated_vae_info_filename(_latent))
         pkl.dump(vae_info, open(vae_info_path, "wb"))
         print(f"VAE信息已保存至: {vae_info_path}")
         
@@ -750,13 +775,15 @@ def construct_trajectories(
             tasks_list  # 保存任务列表，用于映射任务索引
         ]
         
-        mixed_output_path = os.path.join(multi_dir, multitask_mixed_basename(mt_sig))
+        mixed_output_path = os.path.join(
+            multi_dir, multitask_mixed_basename(mt_sig, _latent)
+        )
         pkl.dump(mixed_trajectory_obj, open(mixed_output_path, "wb"))
         print(f"混合轨迹文件已保存至: {mixed_output_path}")
         print(f"混合轨迹数量: {mixed_our_data.shape[0]}")
         from diffuser.utils.multitask_slug_registry import write_multitask_manifest
 
-        write_multitask_manifest(
+        _manifest_written = write_multitask_manifest(
             multi_dir,
             traj_signature=mt_sig,
             tasks_list=tasks_list,
@@ -767,10 +794,9 @@ def construct_trajectories(
             sigma=sigma,
             horizon=traj_len,
             traj_params_json=traj_params_json,
+            latent_dim=_latent,
         )
-        print(
-            f"多任务 slug 清单已写入: {os.path.join(multi_dir, 'multitask_slug_manifest.json')}"
-        )
+        print(f"多任务 slug 清单已写入: {_manifest_written}")
         
         print("多任务轨迹构建完成！")
         return multi_dir, all_trajectories
@@ -779,7 +805,9 @@ def construct_trajectories(
         task_name = tasks_list[0]
         print(f"为任务 {task_name} 生成轨迹...")
         
-        distance_file = os.path.join(output_dir, "distance_vae.p")
+        distance_file = os.path.join(
+            output_dir, distance_matrix_cache_filename(_latent)
+        )
         distances, dist_cache_ok = _load_distance_matrix_cache(
             distance_file, points, allow_legacy_plain=True
         )
@@ -851,7 +879,12 @@ def construct_trajectories(
         timesteps = torch.arange(traj_len).repeat(task_n_traj, 1)
         
         # 保存轨迹数据（参考dfgo-main的命名方式）
-        task_output_path = os.path.join(output_dir, f"{task_name}_{task_n_traj}x{traj_len}_k{task_k}_eps{task_eps}_vae_latent32_train.p")
+        task_output_path = os.path.join(
+            output_dir,
+            per_task_latent_train_filename(
+                task_name, task_n_traj, traj_len, task_k, task_eps, _latent
+            ),
+        )
         task_obj = [our_data, our_data_vals, pr, cumulative_regret_to_go, timesteps]
         pkl.dump(task_obj, open(task_output_path, "wb"))
         print(f"任务 {task_name} 的轨迹数据已保存至: {task_output_path}")
@@ -864,9 +897,14 @@ def construct_trajectories(
             "task": task_name,
             "original_dim": task_dims_info[task_name]["original_dim"],
         }
+        if is_real_world_fewshot_task(task_name):
+            # 供 evaluate 中 D(best)=few-shot 池内 max(y) 与 construct 子集一致
+            vae_info["real_world_fewshot_k"] = fewshot_k
+            vae_info["real_world_fewshot_mode"] = fewshot_mode
+            vae_info["real_world_fewshot_seed"] = int(seed)
         if pretrained_vae_info:
             vae_info["pretrained_vae_info_source"] = os.path.abspath(pretrained_vae_info)
-        vae_info_path = os.path.join(output_dir, "vae_info.p")
+        vae_info_path = os.path.join(output_dir, generated_vae_info_filename(_latent))
         pkl.dump(vae_info, open(vae_info_path, "wb"))
         print(f"VAE信息已保存至: {vae_info_path}")
         
@@ -930,6 +968,12 @@ if __name__ == "__main__":
         default=3e-5,
         help="real-world 微调学习率（默认 3e-5）",
     )
+    parser.add_argument(
+        "--latent_dim",
+        type=int,
+        default=32,
+        help="VAE 隐空间维度；32 保持历史文件名，其它维度使用 _vae_latent{d}_train.p / vae_latent{d}.pt / mixed_*_latent{d}.p",
+    )
 
     args = parser.parse_args()
     
@@ -971,5 +1015,6 @@ if __name__ == "__main__":
         pretrained_vae_info=args.pretrained_vae_info,
         finetune_epochs=args.finetune_epochs,
         finetune_lr=args.finetune_lr,
+        latent_dim=int(args.latent_dim),
     )
     sys.exit(0)

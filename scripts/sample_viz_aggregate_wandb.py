@@ -73,6 +73,10 @@ def main() -> None:
 
     run_name = args.run_name or f"{args.group}_sample_viz_mean"
     wandb.init(project=args.project, name=run_name, group=args.group, job_type="sample_viz_agg")
+    # 不能用全局 wandb.log(..., step=0..N) 对每个 tag 重复一遍：全局 step 必须单调递增，
+    # 否则只有第一个 tag（通常为 mt_text）有完整曲线，其余 tag 会被丢弃/合并成一个点。
+    wandb.define_metric("sample_viz_step")
+    wandb.define_metric("sample_viz/*", step_metric="sample_viz_step")
 
     for tag in args.tags:
         rows = aggregate_tag(dump_dir, tag, seeds)
@@ -80,6 +84,7 @@ def main() -> None:
             s = int(r["viz_step"])
             wandb.log(
                 {
+                    "sample_viz_step": s,
                     f"sample_viz/{tag}/mean_y": r["mean_y"],
                     f"sample_viz/{tag}/max_y": r["max_y"],
                     f"sample_viz/{tag}/mean_y_norm": r["mean_y_norm"],
@@ -87,7 +92,6 @@ def main() -> None:
                     f"sample_viz/{tag}/t_index": int(round(r["t_index"])),
                     f"sample_viz/{tag}/denoise_progress": r["denoise_progress"],
                 },
-                step=s,
             )
 
     wandb.finish()

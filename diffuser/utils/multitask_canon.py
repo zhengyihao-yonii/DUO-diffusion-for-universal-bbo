@@ -65,3 +65,29 @@ def multitask_path_token(train_tasks: str) -> str:
     if "," not in csv:
         return csv
     return "_".join(csv.split(","))
+
+
+def diffusion_train_path_suffix(
+    train_timestep_bias_power: float,
+    train_loss_min_snr_gamma: float,
+) -> str:
+    """
+    扩散训练可选改进（小 t 偏斜 / min-SNR）：非零时在 ``trained_models`` 的 RUN.prefix 中段追加片段，
+    与默认全零训练目录区分；全零时返回空串（与历史路径一致）。
+
+    片段形如 ``_tsbias0.5_msnr5``，插在 ``run_suffix`` 之后、``_latent{d}`` 之前（与 ``train.py`` 一致）。
+    """
+    parts: list[str] = []
+
+    def _append(label: str, value: float) -> None:
+        v = float(value)
+        if abs(v) <= 1e-12:
+            return
+        s = f"{v:.8g}"
+        parts.append(f"{label}{s}")
+
+    _append("tsbias", train_timestep_bias_power)
+    _append("msnr", train_loss_min_snr_gamma)
+    if not parts:
+        return ""
+    return "_" + "_".join(parts)

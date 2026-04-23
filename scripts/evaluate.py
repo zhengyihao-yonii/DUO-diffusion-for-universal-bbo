@@ -6,6 +6,7 @@ import re
 import diffuser.utils as utils
 from ml_logger import logger
 import torch
+import math
 
 from diffuser.cpu_threads import apply_torch_cpu_threads_from_env
 
@@ -30,6 +31,30 @@ from diffuser.datasets.real_world_fewshot import (
 )
 from diffuser.utils.proxy_filter import resolve_proxy_filter_for_eval
 from diffuser.utils.real_world_oracle import oracle_predict
+from diffuser.utils.vae_layout import resolve_generated_vae_info_path
+
+
+def _real_world_d_best_fewshot_params(eval_task: str, Config, is_multitask: bool) -> tuple[int | None, str, int]:
+    """
+    D(best) 与 construct 的 few-shot 池对齐：优先读 ``vae_info.p`` 中 construct 写入的字段。
+    """
+    fk: int | None = getattr(Config, "fewshot_k", None)
+    fm = str(getattr(Config, "fewshot_mode", "all"))
+    fseed: int | None = getattr(Config, "fewshot_seed", None)
+    if not is_multitask and is_real_world_fewshot_task(eval_task):
+        _ld = int(getattr(Config, "latent_dim", 32))
+        _base = f"./generated_datasets/{eval_task}_frac{Config.frac}_sigma{Config.sigma}"
+        _vip = resolve_generated_vae_info_path(_base, _ld)
+        if _vip and os.path.isfile(_vip):
+            with open(_vip, "rb") as f:
+                _vi = pkl.load(f)
+            if isinstance(_vi, dict) and "real_world_fewshot_seed" in _vi:
+                fk = _vi.get("real_world_fewshot_k", fk)
+                fm = str(_vi.get("real_world_fewshot_mode", fm))
+                fseed = int(_vi["real_world_fewshot_seed"])
+    if fseed is None:
+        fseed = int(getattr(Config, "seed", 1))
+    return fk, fm, fseed
 
 
 def _real_world_proxy_fallback_dirs(logger_prefix: str) -> list[str]:
@@ -260,9 +285,7 @@ def _ensure_single_task_real_world_proxy(
         n_ensembles=Config.proxy_n_ensembles,
         device=Config.device,
     )
-    diffusion_config = utils.Config(
-        Config.diffusion,
-        savepath="diffusion_config.pkl",
+    _diff_kw_rw = dict(
         horizon=Config.horizon,
         observation_dim=observation_dim,
         action_dim=action_dim,
@@ -282,6 +305,21 @@ def _ensure_single_task_real_world_proxy(
         cfg_apply_text=bool(getattr(Config, "cfg_apply_text", True)),
         sample_with_task_embedding=bool(getattr(Config, "sample_with_task_embedding", True)),
         sample_with_text_embedding=bool(getattr(Config, "sample_with_text_embedding", True)),
+    )
+    _diff_kw_rw["train_timestep_bias_power"] = float(
+        getattr(Config, "train_timestep_bias_power", 0.0)
+    )
+    _diff_kw_rw["train_loss_min_snr_gamma"] = float(
+        getattr(Config, "train_loss_min_snr_gamma", 0.0)
+    )
+    if Config.diffusion != "models.GaussianInvDynDiffusion":
+        _diff_kw_rw["n_sample_timesteps"] = int(
+            getattr(Config, "n_sample_timesteps", Config.n_diffusion_steps)
+        )
+    diffusion_config = utils.Config(
+        Config.diffusion,
+        savepath="diffusion_config.pkl",
+        **_diff_kw_rw,
     )
     Config.batch_size = 128
     trainer_config = utils.Config(
@@ -410,17 +448,19 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
 
     # 轨迹数据路径：多任务使用混合 pkl（与 train 一致）
     if rw_zs_no_ctx:
+        _ld_zs = int(getattr(Config, "latent_dim", 32))
         if is_multitask:
             train_tasks_str = "_".join(train_tasks_list)
-            vae_info_early = (
-                f"./generated_datasets/multi_{train_tasks_str}_frac{Config.frac}_sigma{Config.sigma}/vae_info.p"
+            _vae_base_early = (
+                f"./generated_datasets/multi_{train_tasks_str}_frac{Config.frac}_sigma{Config.sigma}"
             )
         else:
-            vae_info_early = (
-                f"./generated_datasets/{eval_task}_frac{Config.frac}_sigma{Config.sigma}/vae_info.p"
+            _vae_base_early = (
+                f"./generated_datasets/{eval_task}_frac{Config.frac}_sigma{Config.sigma}"
             )
+        vae_info_early = resolve_generated_vae_info_path(_vae_base_early, _ld_zs)
         latent_obs = int(deps.get("latent_observation_dim") or 32)
-        if os.path.isfile(vae_info_early):
+        if vae_info_early and os.path.isfile(vae_info_early):
             with open(vae_info_early, "rb") as f:
                 _vi = pkl.load(f)
             latent_obs = int(_vi.get("latent_dim", latent_obs))
@@ -444,6 +484,7 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
 
         _sig = getattr(Config, "multitask_traj_signature", None)
         _skip_auto = bool(deps.get("skip_auto_construct_trajectories", False))
+        _latent = int(getattr(Config, "latent_dim", 32))
         try:
             ensure_multitask_mixed_trajectories(
                 train_tasks_list=list(train_tasks_list),
@@ -457,8 +498,9 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
                 traj_params_json=deps.get("traj_params_json"),
                 fixed_dim=int(getattr(Config, "fixed_dim", 128)),
                 skip_auto=_skip_auto,
+                latent_dim=_latent,
             )
-            mixed_data_path = resolve_multitask_mixed_path(data_dir, _sig)
+            mixed_data_path = resolve_multitask_mixed_path(data_dir, _sig, _latent)
         except FileNotFoundError as e:
             raise FileNotFoundError(
                 f"{e}\n请先运行 construct_trajectories.py 生成混合轨迹，或去掉 --skip_auto_construct_trajectories。"
@@ -580,14 +622,20 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
             )
         proxy_state_dict = torch.load(proxy_loadpath, map_location=Config.device)
 
-    # 与 ZipDataset 一致的离线训练子集上 y 的最优值（非全局最优；亦非上面 DesignBench 仅用于归一化的全库 min/max）
+    # 与 ZipDataset 一致的离线训练子集上 y 的最优值（真实任务 few-shot：池内 max(y)，见 vae_info 元数据）
     from diffuser.utils.offline_train_best import offline_training_best_y
 
+    _rw_fk, _rw_fm, _rw_fs = _real_world_d_best_fewshot_params(
+        eval_task, Config, is_multitask
+    )
     _y_tr_best = offline_training_best_y(
         eval_task,
         frac=float(Config.frac),
         sigma=float(Config.sigma),
         seed=int(getattr(Config, "seed", 1)),
+        real_world_fewshot_k=_rw_fk,
+        real_world_fewshot_mode=_rw_fm,
+        real_world_fewshot_seed=_rw_fs,
     )
     logger.print(
         f"[{eval_task}] offline_train_best_y: {_y_tr_best}",
@@ -598,14 +646,18 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
     latent_dim = observation_dim
     vae_input_output_dim = getattr(Config, 'fixed_dim', 128)
 
+    _ld_vae = int(getattr(Config, "latent_dim", 32))
     if is_multitask:
         train_tasks_str = '_'.join(train_tasks_list)
-        vae_info_path = f"./generated_datasets/multi_{train_tasks_str}_frac{Config.frac}_sigma{Config.sigma}/vae_info.p"
+        _vae_base = (
+            f"./generated_datasets/multi_{train_tasks_str}_frac{Config.frac}_sigma{Config.sigma}"
+        )
     else:
-        vae_info_path = f"./generated_datasets/{eval_task}_frac{Config.frac}_sigma{Config.sigma}/vae_info.p"
+        _vae_base = f"./generated_datasets/{eval_task}_frac{Config.frac}_sigma{Config.sigma}"
+    vae_info_path = resolve_generated_vae_info_path(_vae_base, _ld_vae)
 
     scaler = None
-    if os.path.exists(vae_info_path):
+    if vae_info_path and os.path.exists(vae_info_path):
         try:
             with open(vae_info_path, 'rb') as f:
                 vae_info = pkl.load(f)
@@ -658,9 +710,7 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
         ),
     )
 
-    diffusion_config = utils.Config(
-        Config.diffusion,
-        savepath='diffusion_config.pkl',
+    _diff_kw_eval = dict(
         horizon=Config.horizon,
         observation_dim=observation_dim,
         action_dim=action_dim,
@@ -680,6 +730,21 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
         cfg_apply_text=bool(getattr(Config, "cfg_apply_text", True)),
         sample_with_task_embedding=bool(getattr(Config, "sample_with_task_embedding", True)),
         sample_with_text_embedding=bool(getattr(Config, "sample_with_text_embedding", True)),
+    )
+    _diff_kw_eval["train_timestep_bias_power"] = float(
+        getattr(Config, "train_timestep_bias_power", 0.0)
+    )
+    _diff_kw_eval["train_loss_min_snr_gamma"] = float(
+        getattr(Config, "train_loss_min_snr_gamma", 0.0)
+    )
+    if Config.diffusion != "models.GaussianInvDynDiffusion":
+        _diff_kw_eval["n_sample_timesteps"] = int(
+            getattr(Config, "n_sample_timesteps", Config.n_diffusion_steps)
+        )
+    diffusion_config = utils.Config(
+        Config.diffusion,
+        savepath='diffusion_config.pkl',
+        **_diff_kw_eval,
     )
 
     Config.batch_size = 128
@@ -819,6 +884,7 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
             if _wiz:
                 wandb.log(
                     {
+                        "sample_viz_step": _step_i,
                         f"sample_viz/{_sv_tag}/mean_y": m,
                         f"sample_viz/{_sv_tag}/max_y": mx,
                         f"sample_viz/{_sv_tag}/mean_y_norm": nm,
@@ -826,7 +892,6 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
                         f"sample_viz/{_sv_tag}/t_index": int(timestep_index),
                         f"sample_viz/{_sv_tag}/denoise_progress": _prog,
                     },
-                    step=_step_i,
                 )
             if _dump_base is not None:
                 _dj = (
@@ -963,7 +1028,16 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
                 )
                 samples = decoded_samples
 
-        queries.append(samples[:, context_length:])
+        tail = samples[:, context_length:]
+        # 不用 proxy 时：不再“取前 N 个点”，而是优先取每条轨迹末尾的若干点，
+        # 使 batch_size * k ≈ num_queries（通常 128）。若超过则后续随机采样到 num_queries。
+        if not use_proxy_filter:
+            bs = int(tail.shape[0])
+            tl = int(tail.shape[1])
+            k_need = int(math.ceil(float(num_queries) / max(1, bs)))
+            k = max(1, min(tl, k_need))
+            tail = tail[:, -k:, :]
+        queries.append(tail)
         contexts.append(samples[:, :context_length])
 
     queries = torch.cat(queries, dim=0).reshape(-1, original_observation_dim if vae is not None else observation_dim)
@@ -982,8 +1056,16 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
         queries_proxy_score = trainer.proxy_model(queries_norm).flatten()
         queries = queries[torch.argsort(queries_proxy_score)[-num_queries:]].cpu()
     else:
-        n_take = min(num_queries, queries.shape[0])
-        queries = queries[:n_take].cpu()
+        # 从“每条轨迹末尾 k 个点”构成的候选池中随机选 num_queries 个（若不足则全取）
+        q = queries_cpu
+        n = int(q.shape[0])
+        if n > num_queries:
+            gen = torch.Generator(device="cpu")
+            gen.manual_seed(int(getattr(Config, "seed", 0)))
+            idx = torch.randperm(n, generator=gen)[: int(num_queries)]
+            queries = q[idx]
+        else:
+            queries = q
 
     if vae is None:
         queries = dataset.normalizer.unnormalize(queries).numpy()
@@ -1175,13 +1257,17 @@ def evaluate(**deps):
                     except ValueError:
                         _to = 300
                     _st = wandb.Settings(init_timeout=_to)
+                _wgroup = os.environ.get("WANDB_RUN_GROUP", "").strip() or "evaluation"
                 wandb.init(
                     project="decdiff-opt",
                     config=Config,
                     name=run_name,
-                    group="evaluation",
+                    group=_wgroup,
                     settings=_st,
                 )
+                if hasattr(wandb, "define_metric"):
+                    wandb.define_metric("sample_viz_step")
+                    wandb.define_metric("sample_viz/*", step_metric="sample_viz_step")
             except Exception as e:
                 print(
                     f"[wandb] init 失败（评估仍继续，仅不同步云端）: {e}",

@@ -1,6 +1,7 @@
 import diffuser.utils as utils
 import diffuser.models as models
 import torch
+import torch.nn.functional as F
 
 from tqdm import tqdm
 import pickle as pkl
@@ -10,15 +11,20 @@ wandb = None
 import os
 from pathlib import Path
 from diffuser.models.vae import VAE
-from torch.utils.data import DataLoader, ConcatDataset
 from diffuser.utils.training import Trainer
-from diffuser.cpu_threads import (
-    apply_torch_cpu_threads_from_env,
-    dataloader_num_workers_cap,
-)
+from diffuser.cpu_threads import apply_torch_cpu_threads_from_env
 from diffuser.utils.multitask_proxy_paths import (
     multitask_proxy_checkpoint_exists,
     multitask_proxy_prefix,
+)
+from diffuser.utils.multitask_canon import (
+    canonical_train_tasks_csv,
+    multitask_path_token,
+)
+from diffuser.utils.vae_layout import (
+    raw_train_pkl_path_from_latent_path,
+    vae_state_pt_filename,
+    vae_train_dir_suffix,
 )
 from diffuser.utils.proxy_filter import proxy_filter_enabled_for_train
 
@@ -100,87 +106,58 @@ def ensure_multitask_proxies(diffusion, dataset, renderer, Config, action_dim, l
         proxy_trainer.train_proxy(n_train_steps=Config.proxy_n_train_steps)
         logger.print(f"[multitask proxy] 任务 {task_name} proxy 训练完成")
 
-def train_multitask_vae(tasks_list, latent_dim=32, batch_size=64, n_epochs=100, lr=1e-4, device='cuda'):
+def train_multitask_vae(
+    tasks_list,
+    latent_dim: int = 32,
+    fixed_dim: int = 128,
+    frac: float = 1.0,
+    sigma: float = 0.0,
+    seed: int = 0,
+    device: str = "cuda",
+    *,
+    num_epochs: int = 100,
+    force_retrain: bool = False,
+) -> VAE:
     """
-    在多个数据集上训练统一的VAE模型
-    
-    参数:
-    - tasks_list: 训练数据集列表
-    - latent_dim: VAE的隐空间维度
-    - batch_size: 批量大小
-    - n_epochs: 训练轮数
-    - lr: 学习率
-    - device: 训练设备
-    
-    返回:
-    - 训练好的VAE模型
+    与 ``construct_trajectories`` 一致：多任务 VAE 仅通过 ``train_vae.main`` 训练，
+    产出 ``dataset_info.p`` / ``scaler_*.p`` / ``vae_info.p`` 及带验证集的 loss 日志。
     """
-    print(f"开始在以下数据集上训练多任务VAE: {tasks_list}")
-    
-    # 创建VAE模型（与 train_vae.py 一致：固定 128 维输入）
-    vae = VAE(input_dim=128, latent_dim=latent_dim)
-    vae.to(device)
-    
-    # 准备多任务数据集
-    datasets = []
-    for task in tasks_list:
-        print(f"加载数据集: {task}")
-        # 为每个任务创建数据加载器配置
-        task_dataset_config = utils.Config(
-            'datasets.ZipDataset',  # 使用ZipDataset作为数据加载器
-            dataset=task,
-            frac=1.0,  # 使用全部数据
-            sigma=0.0,  # 默认噪声
-        )
-        task_dataset = task_dataset_config()
-        datasets.append(task_dataset)
-    
-    # 合并所有数据集
-    combined_dataset = ConcatDataset(datasets)
-    print(f"合并后的数据集大小: {len(combined_dataset)}")
-    
-    # 创建数据加载器
-    dataloader = DataLoader(
-        combined_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=dataloader_num_workers_cap(4),
+    from train_vae import main as train_vae_main
+
+    _csv = canonical_train_tasks_csv(
+        ",".join(str(t).strip() for t in tasks_list if str(t).strip())
     )
-    
-    # 设置优化器
-    optimizer = torch.optim.Adam(vae.parameters(), lr=lr)
-    
-    # 训练循环
-    vae.train()
-    for epoch in range(n_epochs):
-        epoch_loss = 0.0
-        for batch in tqdm(dataloader, desc=f'Epoch {epoch+1}/{n_epochs}'):
-            # 假设数据集中的每个元素都是(x, y)格式，我们只需要x进行VAE训练
-            x = batch[0].to(device)
-            
-            # 前向传播
-            recon_x, mu, logvar = vae(x)
-            
-            # 计算VAE损失 (重建损失 + KL散度)
-            loss = vae.loss_function(recon_x, x, mu, logvar)
-            
-            # 反向传播和优化
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            
-            epoch_loss += loss.item()
-        
-        # 打印每轮的平均损失
-        avg_loss = epoch_loss / len(dataloader)
-        print(f'Epoch {epoch+1}, Loss: {avg_loss:.4f}')
-        
-        # 记录到wandb
-        if wandb is not None:
-            wandb.log({'vae_epoch': epoch + 1, 'vae_loss': avg_loss})
-    
-    vae.eval()
-    print("多任务VAE训练完成")
+
+    class VAEArgs:
+        """与 ``construct_trajectories.VAEArgs``（多任务）对齐的占位 namespace。"""
+
+    ns = VAEArgs()
+    ns.tasks = _csv
+    ns.task = None
+    ns.frac = float(frac)
+    ns.sigma = float(sigma)
+    ns.fixed_dim = int(fixed_dim)
+    ns.force_retrain = bool(force_retrain)
+    ns.latent_dim = int(latent_dim)
+    ns.d_model = 256
+    ns.nhead = 4
+    ns.num_layers = 4
+    ns.dropout = 0.1
+    ns.batch_size = 64
+    ns.val_split = 0.1
+    ns.lr = 1e-4
+    ns.weight_decay = 1e-5
+    ns.num_epochs = int(num_epochs)
+    ns.kl_weight = 0.1
+    ns.seed = int(seed)
+    ns.device = str(device)
+    ns.pretrained_vae_info = None
+
+    print(
+        f"[multitask VAE] 调用 train_vae.main（与 construct 相同），tasks={_csv}, "
+        f"latent_dim={latent_dim}, num_epochs={num_epochs}"
+    )
+    vae, _scalers, _save_dir = train_vae_main(ns)
     return vae
 
 def main(**deps):
@@ -200,8 +177,6 @@ def main(**deps):
 
     RUN._update(deps)
     print(deps)
-
-    from diffuser.utils.multitask_canon import canonical_train_tasks_csv
 
     if 'train_tasks' in deps and ',' in str(deps.get('train_tasks', '')):
         deps['train_tasks'] = canonical_train_tasks_csv(deps['train_tasks'])
@@ -401,6 +376,7 @@ def main(**deps):
 
         _sig = getattr(Config, "multitask_traj_signature", None)
         _skip_auto = bool(deps.get("skip_auto_construct_trajectories", False))
+        _latent = int(getattr(Config, "latent_dim", 32))
         ensure_multitask_mixed_trajectories(
             train_tasks_list=list(Config.train_tasks_list),
             frac=float(Config.frac),
@@ -413,8 +389,9 @@ def main(**deps):
             traj_params_json=deps.get("traj_params_json"),
             fixed_dim=int(getattr(Config, "fixed_dim", 128)),
             skip_auto=_skip_auto,
+            latent_dim=_latent,
         )
-        mixed_data_path = resolve_multitask_mixed_path(data_dir, _sig)
+        mixed_data_path = resolve_multitask_mixed_path(data_dir, _sig, _latent)
         
         # 直接加载混合轨迹文件
         dataset = PointRegretDataset(
@@ -486,6 +463,15 @@ def main(**deps):
     # -----------------------------------------------------------------------------#
     # ------------------------------ model & trainer ------------------------------#
     # -----------------------------------------------------------------------------#
+    _ts_bias = float(getattr(Config, "train_timestep_bias_power", 0.0))
+    _min_snr = float(getattr(Config, "train_loss_min_snr_gamma", 0.0))
+    if _ts_bias > 0.0 or _min_snr > 0.0:
+        print(
+            f"[diffusion train opt] train_timestep_bias_power={_ts_bias}, "
+            f"train_loss_min_snr_gamma={_min_snr}",
+            flush=True,
+        )
+
     if Config.diffusion == 'models.GaussianInvDynDiffusion':
         model_config = utils.Config(
             Config.model,
@@ -535,7 +521,14 @@ def main(**deps):
             cfg_apply_text=bool(getattr(Config, "cfg_apply_text", True)),
             sample_with_task_embedding=bool(getattr(Config, "sample_with_task_embedding", True)),
             sample_with_text_embedding=bool(getattr(Config, "sample_with_text_embedding", True)),
+            train_tasks_list=tuple(Config.train_tasks_list),
             device=Config.device,
+            train_timestep_bias_power=float(
+                getattr(Config, "train_timestep_bias_power", 0.0)
+            ),
+            train_loss_min_snr_gamma=float(
+                getattr(Config, "train_loss_min_snr_gamma", 0.0)
+            ),
         )
         
         # 单任务模式下，为GaussianInvDynDiffusion模型添加proxy_model_config
@@ -592,6 +585,9 @@ def main(**deps):
             observation_dim=observation_dim,
             action_dim=action_dim,
             n_timesteps=Config.n_diffusion_steps,
+            n_sample_timesteps=int(
+                getattr(Config, "n_sample_timesteps", Config.n_diffusion_steps)
+            ),
             loss_type=Config.loss_type,
             clip_denoised=Config.clip_denoised,
             predict_epsilon=Config.predict_epsilon,
@@ -607,7 +603,14 @@ def main(**deps):
             cfg_apply_text=bool(getattr(Config, "cfg_apply_text", True)),
             sample_with_task_embedding=bool(getattr(Config, "sample_with_task_embedding", True)),
             sample_with_text_embedding=bool(getattr(Config, "sample_with_text_embedding", True)),
+            train_tasks_list=tuple(Config.train_tasks_list),
             device=Config.device,
+            train_timestep_bias_power=float(
+                getattr(Config, "train_timestep_bias_power", 0.0)
+            ),
+            train_loss_min_snr_gamma=float(
+                getattr(Config, "train_loss_min_snr_gamma", 0.0)
+            ),
         )
 
     _ld_path = getattr(Config, "load_diffusion_checkpoint", None)
@@ -644,21 +647,30 @@ def main(**deps):
     
     # 确定VAE模型路径
     fixed_dim = getattr(Config, 'fixed_dim', 128)
+    _latent = int(getattr(Config, "latent_dim", 32))
+    _vae_pt = vae_state_pt_filename(_latent)
+    _vae_sub = vae_train_dir_suffix(_latent)
     if Config.is_multitask:
-        # 与 train_vae.py / construct_trajectories 保存目录一致（含 _dim{fixed_dim}）
-        train_tasks_str = '_'.join(Config.train_tasks_list)
-        vae_model_path = f"./trained_models/vae/multi_{train_tasks_str}_frac{Config.frac}_sigma{Config.sigma}_dim{fixed_dim}/vae_latent32.pt"
+        # 与 train_vae.main / construct 一致：multi_<字典序 token>
+        train_tasks_str = multitask_path_token(
+            canonical_train_tasks_csv(",".join(Config.train_tasks_list))
+        )
+        vae_model_path = (
+            f"./trained_models/vae/multi_{train_tasks_str}_frac{Config.frac}_sigma{Config.sigma}_dim{fixed_dim}{_vae_sub}/{_vae_pt}"
+        )
         print(f"多任务模式，VAE模型路径: {vae_model_path}")
     else:
         task_name = Config.train_tasks_list[0]
-        vae_model_path = f"./trained_models/vae/{task_name}_frac{Config.frac}_sigma{Config.sigma}_dim{fixed_dim}/vae_latent32.pt"
+        vae_model_path = (
+            f"./trained_models/vae/{task_name}_frac{Config.frac}_sigma{Config.sigma}_dim{fixed_dim}{_vae_sub}/{_vae_pt}"
+        )
         print(f"单任务模式，VAE模型路径: {vae_model_path}")
     
     # 确保模型目录存在
     os.makedirs(os.path.dirname(vae_model_path), exist_ok=True)
     
     # 创建VAE模型实例（input_dim 与 train_vae / 轨迹构建一致）
-    vae = VAE(input_dim=fixed_dim, latent_dim=32)
+    vae = VAE(input_dim=fixed_dim, latent_dim=_latent)
     vae.to(Config.device)
     
     # 尝试加载现有模型
@@ -673,21 +685,24 @@ def main(**deps):
             print(f"开始在多个数据集上训练VAE: {Config.train_tasks_list}")
             vae = train_multitask_vae(
                 tasks_list=Config.train_tasks_list,
-                latent_dim=32,
-                batch_size=64,
-                n_epochs=100,
-                lr=1e-4,
-                device=Config.device,
+                latent_dim=_latent,
+                fixed_dim=int(fixed_dim),
+                frac=float(Config.frac),
+                sigma=float(Config.sigma),
+                seed=int(getattr(Config, "seed", 0)),
+                device=str(Config.device),
+                num_epochs=100,
+                force_retrain=False,
             )
-            # 保存训练好的VAE模型
-            torch.save(vae.state_dict(), vae_model_path)
-            print(f"多任务VAE模型已保存至: {vae_model_path}")
+            # train_vae.main 已写入与 vae_model_path 同目录的权重与 scaler / vae_info
+            vae.eval()
+            print(f"多任务VAE已由 train_vae 写入: {os.path.dirname(os.path.abspath(vae_model_path))}")
         else:
             # 单任务VAE训练逻辑，使用原有数据集训练VAE
             print(f"单任务模式: 使用{Config.dataset}数据集训练VAE")
             
             # 加载原始观测数据用于训练VAE
-            original_data_path = Config.data_path.replace('_vae_latent32_train.p', '_train.p')
+            original_data_path = raw_train_pkl_path_from_latent_path(Config.data_path)
             
             if os.path.exists(original_data_path):
                 print(f"加载原始观测数据: {original_data_path}")
@@ -714,8 +729,12 @@ def main(**deps):
                     total_loss = 0
                     for batch in dataloader:
                         x = batch[0].to(Config.device)
-                        recon_x, mu, logvar = vae(x)
-                        loss = vae.loss_function(recon_x, x, mu, logvar)
+                        recon_x, mu, logvar, _z = vae(x)
+                        recon_loss = F.mse_loss(recon_x, x, reduction="sum") / x.size(0)
+                        kl_loss = -0.5 * torch.mean(
+                            torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
+                        )
+                        loss = recon_loss + 0.1 * kl_loss
                         
                         optimizer.zero_grad()
                         loss.backward()

@@ -13,8 +13,14 @@
 #   bash run_multitask.sh "dkitty,ant" 3 1000 50 0.05 64 1.0 0.0
 # 任务名顺序仅影响展示；目录 multi_ant_dkitty_* 与 "ant,dkitty" / "dkitty,ant" 共用。
 #
-# 全 9 任务 + 每任务 JSON 轨迹 + 文本条件（all_improved_frac* 目录）一条命令（无 export）:
+# 全 9 任务 + 每任务 JSON 轨迹 + **文本条件**（走 text_conditioned_only / all_improved_frac*）——须显式传入 TRAIN_EXTRA：
 #   USE_TRAJ_PARAMS_JSON=1 TRAJ_PARAMS_JSON="$PWD/examples/traj_params_per_task_example.json" TRAIN_EXTRA="--use_text_condition --multitask_text_only" bash run_multitask.sh "ant,dkitty,gtopx2,gtopx3,gtopx4,gtopx6,superconductor,tfbind10,tfbind8" 1 1000 50 0.05 64 1.0 0.0
+#
+# 仅需 JSON 轨迹（mt_<hex>）、**不要文本条件**（仅 task_idx 多任务分类）：USE_TRAJ_PARAMS_JSON **不会**自动打开文本；
+# 若 shell 里曾 export 过 TRAIN_EXTRA / USE_TEXT_CONDITION（例如按上一行示例跑过一次），请先取消，否则会仍带 --use_text_condition：
+#   unset TRAIN_EXTRA USE_TEXT_CONDITION
+#   USE_TRAJ_PARAMS_JSON=1 TRAJ_PARAMS_JSON="$PWD/examples/traj_params_per_task_example2.json" START_SEED=0 \
+#     bash run_multitask.sh "ant,dkitty,gtopx2,gtopx3,gtopx4,gtopx6,superconductor,tfbind10,tfbind8" 5 1000 50 0.05 64 1.0 0.0
 #
 # 每任务轨迹参数不同（JSON）仅用于「全 9 任务一起训」的 all 配置（含 superconductor）；需显式打开开关；位置参数 n_traj/k/eps 仍要给出（作基线再被 JSON 覆盖）:
 #   USE_TRAJ_PARAMS_JSON=1 TRAJ_PARAMS_JSON=examples/traj_params_per_task_example.json \
@@ -49,9 +55,14 @@
 #   USE_TRAJ_PARAMS_JSON  默认 0。设为 1 时仅当 train_tasks 为全 9 任务（字典序，见脚本内 _FULL_MT_TASKS_CSV，含 superconductor）时生效：
 #                    从 TRAJ_PARAMS_JSON 读每任务轨迹参数并传给 construct/train/evaluate；否则报错退出。
 #                    为 0 时不传 --traj_params_json（与旧版一致；环境里 export 了 TRAJ_PARAMS_JSON 也不生效）。
+#                    **与是否使用文本条件无关**：文本由 TRAIN_EXTRA / USE_TEXT_CONDITION 决定；若只要 JSON 轨迹+无文本，请勿设 TRAIN_EXTRA 中的 --use_text_condition。
 #   TRAJ_PARAMS_JSON  仅在 USE_TRAJ_PARAMS_JSON=1 时必填；启用时 RESULTS 超参段为短 slug（mt_<hex>），与 mixed_mt_<hex>.p 同源；完整参数见 multitask_slug_manifest.json。
 #   TRAIN_EPOCHS  扩散训练 epoch 数，传给 train.py --train_epochs（n_train_steps = TRAIN_EPOCHS * config 内 n_steps_per_epoch）。
 #                 默认 200；可 export TRAIN_EPOCHS=N 覆盖。
+#   LATENT_DIM    默认 32；非 32 时 construct/train/evaluate 传 --latent_dim，且 RESULTS 超参目录与 trained_models 的 mt_*_latent{d} 对齐。
+#   TRAIN_TIMESTEP_BIAS_POWER   默认 0.0。>0 时 train 传 --train_timestep_bias_power（小 t 偏斜采样）。
+#   TRAIN_LOSS_MIN_SNR_GAMMA    默认 0.0。>0 时 train 传 --train_loss_min_snr_gamma（min-SNR 损失加权）。
+#                 非零时 RESULTS 与 trained_models 超参段追加 _tsbias… / _msnr…（与 train.py RUN.prefix 一致）。
 #   TEXT_ENCODER_MODEL  可选，离线 sentence-transformers 目录的绝对路径（须含 config.json）。
 #                    未设置时，若存在下面「相对 PROJECT」的默认快照目录，则自动解析并仅在启用
 #                    文本条件时向 train/evaluate 追加 --text_encoder_model。
@@ -127,6 +138,14 @@ FRAC="${7:-1.0}"
 SIGMA="${8:-0.0}"
 
 TRAIN_EPOCHS="${TRAIN_EPOCHS:-200}"
+LATENT_DIM="${LATENT_DIM:-32}"
+TRAIN_TIMESTEP_BIAS_POWER="${TRAIN_TIMESTEP_BIAS_POWER:-0.0}"
+TRAIN_LOSS_MIN_SNR_GAMMA="${TRAIN_LOSS_MIN_SNR_GAMMA:-0.0}"
+_DIFF_TRAIN_SUF="$(
+  cd "$PROJECT" && PYTHONPATH="$PROJECT${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -c \
+    'import sys; from diffuser.utils.multitask_canon import diffusion_train_path_suffix; print(diffusion_train_path_suffix(float(sys.argv[1]), float(sys.argv[2])))' \
+    "${TRAIN_TIMESTEP_BIAS_POWER}" "${TRAIN_LOSS_MIN_SNR_GAMMA}"
+)"
 
 USE_TRAJ_PARAMS_JSON="${USE_TRAJ_PARAMS_JSON:-0}"
 _TRAJ_SIG=""
@@ -190,6 +209,10 @@ fi
 if [[ "${USE_RETURNS:-0}" == "1" ]]; then
   _MT_HYPER="${_MT_HYPER}${RESULTS_SUFFIX:-_ret}"
 fi
+_MT_HYPER="${_MT_HYPER}${_DIFF_TRAIN_SUF}"
+if [[ "${LATENT_DIM}" != "32" ]]; then
+  _MT_HYPER="${_MT_HYPER}_latent${LATENT_DIM}"
+fi
 _optional_mt_suffix=""
 if [[ -n "${_tc:-}" ]] && [[ -n "${_mto:-}" ]]; then
   _optional_mt_suffix="${_TEXTCOND_MTTEXTONLY_SUFFIX}"
@@ -233,6 +256,10 @@ if [[ -n "${_tc:-}" ]] && [[ -n "${_mto:-}" ]]; then
     _HYPER_CORE="${_HYPER_CORE}_ret"
   fi
   _HYPER="w${_W_TEXT}_${_HYPER_CORE}"
+  _HYPER="${_HYPER}${_DIFF_TRAIN_SUF}"
+  if [[ "${LATENT_DIM}" != "32" ]]; then
+    _HYPER="${_HYPER}_latent${LATENT_DIM}"
+  fi
   _RESULTS_ALL_LAYOUT="$PROJECT/results/text_conditioned_only/${_TASK_FRAC_SIG}/${_HYPER}"
   _ALL_RUN_LAYOUT=1
   echo "[text-cond-layout] multitask textcond+mttextonly（含 subgroup）：RESULTS=${_RESULTS_ALL_LAYOUT}（w_text=${_W_TEXT}）"
@@ -325,8 +352,13 @@ if [[ "$USE_TRAJ_PARAMS_JSON" == "1" ]]; then
   echo "  traj_sig（完整逻辑签名，见 multitask_slug_manifest.json）: ${_TRAJ_SIG}"
   echo "  slug_id（短目录名 mt_<hex>，与 train checkpoint / RESULTS 超参段一致）: ${_SLUG_ID}"
 fi
-echo "  TRAIN_EPOCHS: $TRAIN_EPOCHS（默认 200，可用环境变量覆盖）"
+echo "  TRAIN_EPOCHS: $TRAIN_EPOCHS（默认 200，可用环境变量覆盖）  LATENT_DIM=${LATENT_DIM}"
+echo "  TRAIN_TIMESTEP_BIAS_POWER=${TRAIN_TIMESTEP_BIAS_POWER}  TRAIN_LOSS_MIN_SNR_GAMMA=${TRAIN_LOSS_MIN_SNR_GAMMA}"
 echo "  TRAIN_EXTRA: ${TRAIN_EXTRA:-<未设置>}"
+if [[ "$USE_TRAJ_PARAMS_JSON" == "1" ]] \
+  && [[ "${TRAIN_EXTRA:-}" == *"--use_text_condition"* || "${TRAIN_EXTRA:-}" == *"--multitask_text_only"* ]]; then
+  echo "[hint] USE_TRAJ_PARAMS_JSON 只负责轨迹 JSON；若你想要「无文本」多任务，通常应 unset TRAIN_EXTRA（当前 TRAIN_EXTRA 仍含文本相关标志）。" >&2
+fi
 if [[ "${_ALL_RUN_LAYOUT:-0}" == "1" ]]; then
   echo "  结果布局: text_conditioned_only 超参子目录: ${_HYPER}"
 else
@@ -363,6 +395,7 @@ else
     --k "$K" \
     --eps "$EPS" \
     --horizon "$HORIZON" \
+    --latent_dim "$LATENT_DIM" \
     "${_TPJ[@]}" \
     >"$CONSTRUCT_LOG" 2>&1
 
@@ -371,6 +404,10 @@ else
   if [[ -f "$_MULTI_DATA_DIR/multitask_slug_manifest.json" ]]; then
     cp -f "$_MULTI_DATA_DIR/multitask_slug_manifest.json" "$RESULTS/" || true
     echo "[slug] 已复制 multitask_slug_manifest.json -> $RESULTS/"
+  fi
+  if [[ "${LATENT_DIM}" != "32" && -f "$_MULTI_DATA_DIR/multitask_slug_manifest_latent${LATENT_DIM}.json" ]]; then
+    cp -f "$_MULTI_DATA_DIR/multitask_slug_manifest_latent${LATENT_DIM}.json" "$RESULTS/" || true
+    echo "[slug] 已复制 multitask_slug_manifest_latent${LATENT_DIM}.json -> $RESULTS/"
   fi
   unset _MULTI_DATA_DIR
 fi
@@ -444,6 +481,9 @@ for ((run = 0; run < NUM_RUNS; run++)); do
       --horizon "$HORIZON" \
       --frac "$FRAC" \
       --sigma "$SIGMA" \
+      --latent_dim "$LATENT_DIM" \
+      --train_timestep_bias_power "$TRAIN_TIMESTEP_BIAS_POWER" \
+      --train_loss_min_snr_gamma "$TRAIN_LOSS_MIN_SNR_GAMMA" \
       "${_TPJ[@]}" \
       "${_TE_EXTRA[@]}" \
       "${_train_extra_arr[@]}" \
@@ -469,6 +509,9 @@ for ((run = 0; run < NUM_RUNS; run++)); do
     --horizon "$HORIZON" \
     --frac "$FRAC" \
     --sigma "$SIGMA" \
+    --latent_dim "$LATENT_DIM" \
+    --train_timestep_bias_power "$TRAIN_TIMESTEP_BIAS_POWER" \
+    --train_loss_min_snr_gamma "$TRAIN_LOSS_MIN_SNR_GAMMA" \
     "${_TPJ[@]}" \
     "${EVAL_EXTRA[@]}" \
     "${_eval_cmd_extra_arr[@]}" \

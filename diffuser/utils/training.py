@@ -290,12 +290,13 @@ class Trainer(object):
 
             new_trajectory = self.ema_model.conditional_sample(conditions, values=values, returns=returns)
             # new_trajectory = self.ema_model.back_and_forth_sample(batch.trajectories, conditions, values=values, returns=returns)
-            # 由于我们使用了VAE降维，需要使用VAE从隐空间(32维)解码回原始dkitty空间(12维)
+            # 使用 VAE 将隐空间轨迹解码回原始设计空间
             with torch.no_grad():
                 # 获取隐空间表示
                 latent_observation = new_trajectory[..., context_length:, :-1].cpu()
-                # 重塑以便通过VAE
-                latent_observation_reshaped = latent_observation.reshape(-1, 32).to(self.device)
+                # 重塑以便通过 VAE（维度与 self.vae.latent_dim 一致）
+                _ld = int(getattr(self.vae, "latent_dim", 32))
+                latent_observation_reshaped = latent_observation.reshape(-1, _ld).to(self.device)
                 # 使用VAE解码到原始空间
                 decoded_observation = self.vae.decode(latent_observation_reshaped).cpu()
                 # 确保维度正确，dkitty原始观测维度是12

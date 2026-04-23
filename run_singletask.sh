@@ -40,6 +40,10 @@
 #   CUDA_VISIBLE_DEVICES / GPU_ID  见脚本中部「GPU」注释与 scripts/gpu_env.sh。
 #   CPU_THREADS      可选，限制 OpenMP/BLAS/PyTorch CPU 线程数；等价于 train/evaluate/construct 的 --cpu_threads N。
 #   PROXY_FILTER     可选 0/1；若 export 则 train/evaluate 追加 --proxy_filter（不设则默认 1：训练 proxy 并在评估中筛选）。
+#   LATENT_DIM       默认 32；非 32 时传 --latent_dim，且 RESULTS 超参目录追加 _latent{d}（与 train.py RUN.prefix 一致）。
+#   TRAIN_TIMESTEP_BIAS_POWER   默认 0.0（关闭）。>0 时 train.py --train_timestep_bias_power，训练离散 t 偏斜小 t（如 0.5）。
+#   TRAIN_LOSS_MIN_SNR_GAMMA    默认 0.0（关闭）。>0 时 train.py --train_loss_min_snr_gamma，min-SNR 损失加权（如 5）。
+#                 非零时 RESULTS 超参目录与 trained_models 中段会追加 _tsbias… / _msnr…（与 train.py 一致）。
 #
 # 目录命名：同一次 bash 内为 run{N}_seed{s},{s+1},...（仅 seed 变）；N 仅在「又一次完整 bash（非 EVAL_ONLY）」
 #          结束后 +1，并写入 .gtg_pipeline_batch。无该文件时会根据已有 run*_seed* 推断最大批次。
@@ -93,9 +97,17 @@ eps="$5"
 HORIZON="${6:-64}"
 FRAC="${7:-1.0}"
 SIGMA="${8:-0.0}"
+LATENT_DIM="${LATENT_DIM:-32}"
+TRAIN_TIMESTEP_BIAS_POWER="${TRAIN_TIMESTEP_BIAS_POWER:-0.0}"
+TRAIN_LOSS_MIN_SNR_GAMMA="${TRAIN_LOSS_MIN_SNR_GAMMA:-0.0}"
 
 PYTHON="${PYTHON:-/home/xk/anaconda3/envs/gtg/bin/python}"
 PROJECT="${PROJECT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+_DIFF_TRAIN_SUF="$(
+  cd "$PROJECT" && PYTHONPATH="$PROJECT${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -c \
+    'import sys; from diffuser.utils.multitask_canon import diffusion_train_path_suffix; print(diffusion_train_path_suffix(float(sys.argv[1]), float(sys.argv[2])))' \
+    "${TRAIN_TIMESTEP_BIAS_POWER}" "${TRAIN_LOSS_MIN_SNR_GAMMA}"
+)"
 # 与 results/single_task/** 及 analyze_eval_results 约定一致：tasks_frac → hyper（含 n_traj x horizon）
 _ST_FRAC_SIG="${task_name}_frac${FRAC}_sigma${SIGMA}"
 _ST_HYPER="${n_traj}x${HORIZON}_k${k}_eps${eps}"
@@ -104,6 +116,10 @@ if [[ "${USE_RETURNS:-0}" == "1" ]]; then
 fi
 if [[ "${USE_TEXT_CONDITION:-0}" == "1" ]]; then
   _ST_HYPER="${_ST_HYPER}${SINGLE_TASK_TEXTCOND_SUFFIX:-_textcond}"
+fi
+_ST_HYPER="${_ST_HYPER}${_DIFF_TRAIN_SUF}"
+if [[ "${LATENT_DIM}" != "32" ]]; then
+  _ST_HYPER="${_ST_HYPER}_latent${LATENT_DIM}"
 fi
 base_dir="${RESULTS:-$PROJECT/results/single_task/${_ST_FRAC_SIG}/${_ST_HYPER}}"
 mkdir -p "$base_dir"
@@ -155,8 +171,9 @@ else
 fi
 
 echo "=== DUO 单任务: $task_name | num_runs=$num_runs | start_seed=$START_SEED (seed: $START_SEED .. $((START_SEED + num_runs - 1))) ==="
-echo "  n_traj=$n_traj k=$k eps=$eps horizon=$HORIZON frac=$FRAC sigma=$SIGMA"
+echo "  n_traj=$n_traj k=$k eps=$eps horizon=$HORIZON frac=$FRAC sigma=$SIGMA  LATENT_DIM=${LATENT_DIM}"
 echo "  USE_TEXT_CONDITION=${USE_TEXT_CONDITION:-0}  TRAIN_EPOCHS=${TRAIN_EPOCHS:-200}（对齐多任务时请与 mt 训练一致）"
+echo "  TRAIN_TIMESTEP_BIAS_POWER=${TRAIN_TIMESTEP_BIAS_POWER}  TRAIN_LOSS_MIN_SNR_GAMMA=${TRAIN_LOSS_MIN_SNR_GAMMA}"
 echo "  EVAL_ONLY=${EVAL_ONLY:-0}  BATCH_RUN=${BATCH_RUN}"
 echo "  PROJECT=$PROJECT"
 echo "  RESULTS=$base_dir"
@@ -177,6 +194,7 @@ else
     --k "$k" \
     --eps "$eps" \
     --horizon "$HORIZON" \
+    --latent_dim "$LATENT_DIM" \
     >"$construct_log" 2>&1
   construct_status=$?
   if [[ $construct_status -ne 0 ]]; then
@@ -272,6 +290,9 @@ for ((run = 0; run < num_runs; run++)); do
       --horizon "$HORIZON" \
       --frac "$FRAC" \
       --sigma "$SIGMA" \
+      --latent_dim "$LATENT_DIM" \
+      --train_timestep_bias_power "$TRAIN_TIMESTEP_BIAS_POWER" \
+      --train_loss_min_snr_gamma "$TRAIN_LOSS_MIN_SNR_GAMMA" \
       "${RETURNS_EXTRA[@]}" \
       "${_TE_EXTRA[@]}" \
       "${TEXT_TRAIN_EXTRA[@]}" \
@@ -292,6 +313,9 @@ for ((run = 0; run < num_runs; run++)); do
     --horizon "$HORIZON" \
     --frac "$FRAC" \
     --sigma "$SIGMA" \
+    --latent_dim "$LATENT_DIM" \
+    --train_timestep_bias_power "$TRAIN_TIMESTEP_BIAS_POWER" \
+    --train_loss_min_snr_gamma "$TRAIN_LOSS_MIN_SNR_GAMMA" \
     "${RETURNS_EXTRA[@]}" \
     "${TEXT_EVAL_EXTRA[@]}" \
     "${_eval_cmd_extra_arr[@]}" \

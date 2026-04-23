@@ -186,9 +186,17 @@ def multitask_slug_id(traj_signature: str) -> str:
     return f"mt_{h}"
 
 
-def multitask_mixed_basename(traj_signature: str) -> str:
-    """混合轨迹文件名，例如 ``mixed_mt_a1b2c3d4e5f67890.p``。"""
-    return f"mixed_{multitask_slug_id(traj_signature)}.p"
+def multitask_mixed_basename(traj_signature: str, latent_dim: int = 32) -> str:
+    """
+    混合轨迹短文件名。
+
+    - ``latent_dim == 32``：保持历史命名 ``mixed_mt_<hex>.p``。
+    - 其它维度：``mixed_mt_<hex>_latent{d}.p``，避免与 32 维产物混用同一 mixed 文件。
+    """
+    core = multitask_slug_id(traj_signature)
+    if int(latent_dim) == 32:
+        return f"mixed_{core}.p"
+    return f"mixed_{core}_latent{int(latent_dim)}.p"
 
 
 def multitask_checkpoint_hyper_dir(
@@ -205,14 +213,20 @@ def multitask_checkpoint_hyper_dir(
     return f"{multitask_slug_id(sig)}{ret_infix}{text_infix}{mttextonly_infix}"
 
 
-def resolve_multitask_mixed_path(data_dir: str, sig: str | None) -> str:
+def resolve_multitask_mixed_path(
+    data_dir: str, sig: str | None, latent_dim: int = 32
+) -> str:
     """
-    优先短文件名 ``mixed_<slug_id>.p``；其次旧版 ``mixed_<完整sig>.p``；再 ``mixed_trajectories_train.p``。
+    优先短文件名 ``mixed_<slug_id>.p``（或带 ``_latent{d}`` 的变体）；其次旧版 ``mixed_<完整sig>.p``；
+    再 ``mixed_trajectories_train.p``。
     """
     import os
 
     if sig:
-        p_short = os.path.join(data_dir, multitask_mixed_basename(sig))
+        p_lat = os.path.join(data_dir, multitask_mixed_basename(sig, latent_dim))
+        if os.path.isfile(p_lat):
+            return p_lat
+        p_short = os.path.join(data_dir, multitask_mixed_basename(sig, 32))
         if os.path.isfile(p_short):
             return p_short
         p_long = os.path.join(data_dir, f"mixed_{sig}.p")
@@ -223,7 +237,8 @@ def resolve_multitask_mixed_path(data_dir: str, sig: str | None) -> str:
         return leg
     if sig:
         raise FileNotFoundError(
-            f"未找到多任务混合轨迹：{os.path.join(data_dir, multitask_mixed_basename(sig))}、"
+            f"未找到多任务混合轨迹：{os.path.join(data_dir, multitask_mixed_basename(sig, latent_dim))}、"
+            f"{os.path.join(data_dir, multitask_mixed_basename(sig, 32))}、"
             f"{os.path.join(data_dir, f'mixed_{sig}.p')} 或 {leg}"
         )
     raise FileNotFoundError(f"未找到多任务混合轨迹：{leg}")
@@ -234,12 +249,17 @@ def _duo_repo_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent
 
 
-def multitask_mixed_paths_exist(data_dir: str, sig: str | None) -> bool:
+def multitask_mixed_paths_exist(
+    data_dir: str, sig: str | None, latent_dim: int = 32
+) -> bool:
     """是否与 :func:`resolve_multitask_mixed_path` 一致的「已存在」判定（不抛错）。"""
     if not sig:
         leg = os.path.join(data_dir, "mixed_trajectories_train.p")
         return os.path.isfile(leg)
-    p_short = os.path.join(data_dir, multitask_mixed_basename(sig))
+    p_lat = os.path.join(data_dir, multitask_mixed_basename(sig, latent_dim))
+    if os.path.isfile(p_lat):
+        return True
+    p_short = os.path.join(data_dir, multitask_mixed_basename(sig, 32))
     if os.path.isfile(p_short):
         return True
     p_long = os.path.join(data_dir, f"mixed_{sig}.p")
@@ -262,6 +282,7 @@ def ensure_multitask_mixed_trajectories(
     traj_params_json: str | None = None,
     fixed_dim: int = 128,
     skip_auto: bool = False,
+    latent_dim: int = 32,
 ) -> None:
     """
     若 ``generated_datasets/multi_<tasks>_frac…/mixed_mt_*.p`` 不存在，则调用
@@ -284,11 +305,11 @@ def ensure_multitask_mixed_trajectories(
     root = _duo_repo_root()
     data_dir = str(root / rel_dir)
 
-    if multitask_mixed_paths_exist(data_dir, sig):
+    if multitask_mixed_paths_exist(data_dir, sig, latent_dim):
         return
 
     if skip_auto:
-        resolve_multitask_mixed_path(data_dir, sig)
+        resolve_multitask_mixed_path(data_dir, sig, latent_dim)
 
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
@@ -312,9 +333,10 @@ def ensure_multitask_mixed_trajectories(
             fixed_dim=fixed_dim,
             horizon=horizon,
             traj_params_json=traj_params_json,
+            latent_dim=int(latent_dim),
         )
     finally:
         os.chdir(_prev)
 
-    if not multitask_mixed_paths_exist(data_dir, sig):
-        resolve_multitask_mixed_path(data_dir, sig)
+    if not multitask_mixed_paths_exist(data_dir, sig, latent_dim):
+        resolve_multitask_mixed_path(data_dir, sig, latent_dim)

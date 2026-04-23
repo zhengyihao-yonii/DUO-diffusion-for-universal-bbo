@@ -43,6 +43,12 @@ if __name__ == '__main__':
     parser.add_argument("--k", type=int, default=50)
     parser.add_argument("--eps", type=float, default=0.05)
     parser.add_argument("--n_traj", type=int, default=1000)
+    parser.add_argument(
+        "--latent_dim",
+        type=int,
+        default=32,
+        help="VAE 隐空间维度；须与 construct / train 一致；非 32 时 RUN.prefix 含 _latent{d}",
+    )
 
     parser.add_argument(
         "--condition_guidance_w_task",
@@ -156,6 +162,24 @@ if __name__ == '__main__':
         " few-shot 默认 1，可用 0 或环境变量 PROXY_FILTER=0",
     )
     parser.add_argument(
+        "--run_suffix",
+        type=str,
+        default="",
+        help="Optional suffix appended to RUN.prefix hyper dir (e.g. _ce0.2).",
+    )
+    parser.add_argument(
+        "--train_timestep_bias_power",
+        type=float,
+        default=0.0,
+        help="须与训练一致：非零时 RUN.prefix 含 _tsbias…（与 train.py 对齐）。",
+    )
+    parser.add_argument(
+        "--train_loss_min_snr_gamma",
+        type=float,
+        default=0.0,
+        help="须与训练一致：非零时 RUN.prefix 含 _msnr…（与 train.py 对齐）。",
+    )
+    parser.add_argument(
         "--latent_observation_dim",
         type=int,
         default=None,
@@ -200,6 +224,7 @@ if __name__ == '__main__':
         args.eval_task = args.task
     from diffuser.utils.multitask_canon import (
         canonical_train_tasks_csv,
+        diffusion_train_path_suffix,
         multitask_path_token,
         multitask_text_only_path_infix,
         returns_cond_path_infix,
@@ -273,6 +298,7 @@ if __name__ == '__main__':
                 sigma=float(args.sigma),
                 mt_hex=_mh,
                 seed=int(getattr(args, "pretrained_diffusion_seed", 0)),
+                latent_dim=int(getattr(args, "latent_dim", 32)),
             )
             args.diffusion_checkpoint_dir = os.path.join(run_dir, "checkpoint")
             _pt = resolve_diffusion_state_pt(args.diffusion_checkpoint_dir, None)
@@ -299,15 +325,28 @@ if __name__ == '__main__':
             args.horizon,
             args.traj_params_json,
         )
-        args.data_path = f"generated_datasets/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{multitask_mixed_basename(sig)}"
+        _ld = int(args.latent_dim)
+        args.data_path = f"generated_datasets/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{multitask_mixed_basename(sig, _ld)}"
         args.multitask_traj_signature = sig
         args.traj_n_traj_dict = n_d
         args.traj_k_dict = k_d
         args.traj_eps_dict = e_d
         _hyper = multitask_checkpoint_hyper_dir(sig, _ret, _txt, _mto)
+        if args.run_suffix:
+            _hyper = f"{_hyper}{args.run_suffix}"
+        _dtrain = diffusion_train_path_suffix(
+            float(getattr(args, "train_timestep_bias_power", 0.0)),
+            float(getattr(args, "train_loss_min_snr_gamma", 0.0)),
+        )
+        if _dtrain:
+            _hyper = f"{_hyper}{_dtrain}"
+        if _ld != 32:
+            _hyper = f"{_hyper}_latent{_ld}"
         RUN.prefix = f"trained_models/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{_hyper}/seed{args.seed}/"
     else:
         # 单任务模式，保持原有逻辑
+        from diffuser.utils.vae_layout import per_task_latent_train_filename
+
         task_name = train_tasks_list[0]
         if zshot and args.n_traj == 1000 and args.k == 50:
             args.n_traj = 100
@@ -318,10 +357,21 @@ if __name__ == '__main__':
             _zsuf = "_fewshot_ft"
         else:
             _zsuf = ""
-        args.data_path = f'generated_datasets/{args.train_tasks}_frac{args.frac}_sigma{args.sigma}/{task_name}_{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}_vae_latent32_train.p'
+        _ld = int(args.latent_dim)
+        args.data_path = (
+            f"generated_datasets/{args.train_tasks}_frac{args.frac}_sigma{args.sigma}/"
+            + per_task_latent_train_filename(
+                task_name, args.n_traj, args.horizon, args.k, args.eps, _ld
+            )
+        )
+        _lat_tag = f"_latent{_ld}" if _ld != 32 else ""
+        _dtrain = diffusion_train_path_suffix(
+            float(getattr(args, "train_timestep_bias_power", 0.0)),
+            float(getattr(args, "train_loss_min_snr_gamma", 0.0)),
+        )
         RUN.prefix = (
             f"trained_models/{args.train_tasks}_frac{args.frac}_sigma{args.sigma}/"
-            f"{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}{_zsuf}{_ret}{_txt}{_mto}/seed{args.seed}/"
+            f"{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}{_zsuf}{_ret}{_txt}{_mto}{_dtrain}{_lat_tag}/seed{args.seed}/"
         )
     
     logger.print(RUN.prefix, color='green')

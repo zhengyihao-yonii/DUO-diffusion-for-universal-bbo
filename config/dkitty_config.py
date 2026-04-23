@@ -16,6 +16,8 @@ class Config(ParamsProto):
     diffusion = 'models.GaussianDiffusion'
     horizon = 64
     n_diffusion_steps = 200
+    train_timestep_bias_power = 0.0
+    train_loss_min_snr_gamma = 0.0
     action_weight = 10
     loss_weights = None
     loss_discount = 1

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-从 ``eval_sweep_w_text/<mt_*_textcond_mttextonly>/seed*/eval_w*.log`` 汇总 text CFG 消融：
+从 ``eval_sweep_w_text/<实验目录>/seed*/eval_w*.log`` 汇总 text CFG 消融（目录可为历史 ``mt_*`` 或
+``train_eval_sweep_w_text.sh`` 生成的参数 slug）：
 **同一 mt_* 目录下所有 seed** 的 ``eval_w*.log`` 全部参与聚合；每个 ``w`` 一列，格内为
 该 (task, w) 在所有可用 seed 上的 **max_ep_reward 的 mean ± std**。
 
@@ -13,7 +14,8 @@
     python scripts/make_sweep_w_ablation_table.py
     python scripts/make_sweep_w_ablation_table.py --model-dir results/eval_sweep_w_text/mt_xxx_textcond_mttextonly
 
-默认在 ``results/eval_sweep_w_text/`` 下选取 **最近修改的** ``mt_*`` 目录；若无则回退到最新 ``run_*`` 旧目录。
+默认在 ``results/eval_sweep_w_text/`` 下选取 **最近修改的** ``mt_*`` 目录；若无则选含 ``seed*/eval_w*.log`` 的最新实验目录；
+再否则回退到最新 ``run_*`` 旧目录。
 """
 from __future__ import annotations
 
@@ -287,7 +289,7 @@ def build_sweep_injected_task_stats(
 
 
 def discover_default_model_dir(sweep_root: Path) -> Path:
-    """优先 ``mt_*``；否则最新 ``run_<8位日期>_`` 旧目录。"""
+    """优先 ``mt_*``；其次含 ``seed*/eval_w*.log`` 的 sweep 归档目录；否则 ``run_<时间戳>`` 旧目录。"""
     if not sweep_root.is_dir():
         raise FileNotFoundError(f"未找到: {sweep_root}")
     mt_dirs = sorted(
@@ -297,6 +299,25 @@ def discover_default_model_dir(sweep_root: Path) -> Path:
     )
     if mt_dirs:
         return mt_dirs[0].resolve()
+
+    flat_sweep: list[tuple[float, Path]] = []
+    for p in sweep_root.iterdir():
+        if not p.is_dir() or p.name.startswith(".") or p.name.startswith("mt_"):
+            continue
+        if _RE_RUN_LEGACY.match(p.name):
+            continue
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        for sd in p.iterdir():
+            if sd.is_dir() and _RE_SEED_DIR.match(sd.name) and any(sd.glob("eval_w*.log")):
+                flat_sweep.append((mtime, p))
+                break
+    if flat_sweep:
+        flat_sweep.sort(key=lambda t: t[0], reverse=True)
+        return flat_sweep[0][1].resolve()
+
     legacy = sorted(
         [
             p
@@ -309,7 +330,7 @@ def discover_default_model_dir(sweep_root: Path) -> Path:
     if legacy:
         return legacy[0].resolve()
     raise FileNotFoundError(
-        f"{sweep_root} 下无 mt_* 或 run_YYYYMMDD_HHMMSS 目录；请指定 --model-dir"
+        f"{sweep_root} 下无 mt_*、无含 seed*/eval_w*.log 的目录、也无 run_YYYYMMDD_HHMMSS；请指定 --model-dir"
     )
 
 

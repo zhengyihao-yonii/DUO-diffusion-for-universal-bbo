@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "slug_id": "mt_911054c35daad7e0",
+  "traj_signature": "ptask__ant_n1000_k20_eps0.05__dkitty_n1000_k20_eps0.01__gtopx2_n1000_k20_eps0.05__gtopx3_n1000_k10_eps0.01__gtopx4_n1000_k20_eps0.05__gtopx6_n1000_k20_eps0.01__superconductor_n1000_k20_eps0.05__tfbind10_n1000_k50_eps0.05__tfbind8_n1000_k50_eps0.05",
+  "mixed_filename": "mixed_mt_911054c35daad7e0.p",
+  "train_tasks_csv": "ant,dkitty,gtopx2,gtopx3,gtopx4,gtopx6,superconductor,tfbind10,tfbind8",
+  "frac": 1.0,
+  "sigma": 0.0,
+  "horizon": 64,
+  "n_traj": {
+    "ant": 1000,
+    "dkitty": 1000,
+    "gtopx2": 1000,
+    "gtopx3": 1000,
+    "gtopx4": 1000,
+    "gtopx6": 1000,
+    "superconductor": 1000,
+    "tfbind10": 1000,
+    "tfbind8": 1000
+  },
+  "k": {
+    "ant": 20,
+    "dkitty": 20,
+    "gtopx2": 20,
+    "gtopx3": 10,
+    "gtopx4": 20,
+    "gtopx6": 20,
+    "superconductor": 20,
+    "tfbind10": 50,
+    "tfbind8": 50
+  },
+  "eps": {
+    "ant": 0.05,
+    "dkitty": 0.01,
+    "gtopx2": 0.05,
+    "gtopx3": 0.01,
+    "gtopx4": 0.05,
+    "gtopx6": 0.01,
+    "superconductor": 0.05,
+    "tfbind10": 0.05,
+    "tfbind8": 0.05
+  },
+  "traj_params_json": "/data/xk/zyh_dfgo/DUO/examples/traj_params_per_task_example2.json",
+  "path_notes": {
+    "mixed_p": "本目录/mixed_mt_911054c35daad7e0.p",
+    "trained_models_hyper": "mt_911054c35daad7e0 + train.py 中 returns/text/mttextonly 路径片段（见 multitask_checkpoint_hyper_dir）",
+    "results_layout": "run_multitask.sh 中 w<W>_mt_<hash>... 与 multi_task 下 mt_<hash>... 与 slug 同源"
+  }
+}

@@ -27,6 +27,11 @@
 #   SKIP_TRAIN_IF_CKPT  默认 1：few-shot 若 trained_models/.../fewshot_ft.../seed*/checkpoint/ 已有
 #                  state.pt 或 state_*.pt，则跳过 train.py 仅跑 evaluate（重跑失败评估时不必重训）。
 #                  FORCE_FEWSHOT_TRAIN=1 强制重新微调。
+#   --eval-only 或 EVAL_ONLY=1：只跑 evaluate.py；zero-shot / few-shot 均不跑 construct、不跑 train。
+#                  few-shot 需已有同目录下 checkpoint；可用 BATCH_RUN 指定批次，RESULTS 指向已有实验根目录。
+#   --latent_dim D  与 train/evaluate/construct 一致（默认 32）；非 32 时 few-shot 默认 vae 元数据为
+#                  generated_datasets/multi_*/vae_info_latent{D}.p，且 _fewshot_trained_ckpt_dir 含 _latent{D}。
+#   TRAIN_TIMESTEP_BIAS_POWER / TRAIN_LOSS_MIN_SNR_GAMMA  环境变量，默认 0.0；few-shot train.py 会传入对应 CLI（扩散训练可选改进）。
 #   CONDITION_GUIDANCE_W_TEXT  文本 CFG 权重（--condition_guidance_w_text），默认 8（与 eval_sweep_w_text 中 w=8 对齐）。
 #                  也可 --condition_guidance_w_text <x> 或 --w_text <x>。
 #   --pretrained_vae_info /abs/path/vae_info.p   # few-shot；不设则见下方自动解析
@@ -139,6 +144,14 @@ while [[ $# -gt 0 ]]; do
       GTG_WANDB_OFFLINE_CLI=1
       shift
       ;;
+    --eval-only)
+      EVAL_ONLY=1
+      shift
+      ;;
+    --latent_dim)
+      LATENT_DIM="$2"
+      shift 2
+      ;;
     --condition_guidance_w_text | --w_text)
       CONDITION_GUIDANCE_W_TEXT="$2"
       shift 2
@@ -220,6 +233,14 @@ if ! [[ "$NUM_SEEDS" =~ ^[1-9][0-9]*$ ]]; then
 fi
 # Few-shot 扩散微调：默认 40 epoch（train.py 对 --real_task_text_only_finetune 未写 --train_epochs 时亦为 40）；预训练级 200 请 export TRAIN_EPOCHS=200
 TRAIN_EPOCHS="${TRAIN_EPOCHS:-40}"
+LATENT_DIM="${LATENT_DIM:-32}"
+TRAIN_TIMESTEP_BIAS_POWER="${TRAIN_TIMESTEP_BIAS_POWER:-0.0}"
+TRAIN_LOSS_MIN_SNR_GAMMA="${TRAIN_LOSS_MIN_SNR_GAMMA:-0.0}"
+_DIFF_TRAIN_SUF="$(
+  cd "$PROJECT" && PYTHONPATH="$PROJECT${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -c \
+    'import sys; from diffuser.utils.multitask_canon import diffusion_train_path_suffix; print(diffusion_train_path_suffix(float(sys.argv[1]), float(sys.argv[2])))' \
+    "${TRAIN_TIMESTEP_BIAS_POWER}" "${TRAIN_LOSS_MIN_SNR_GAMMA}"
+)"
 EVAL_ONLY="${EVAL_ONLY:-0}"
 USE_RETURNS="${USE_RETURNS:-0}"
 AUTO_CONTINUE="${AUTO_CONTINUE:-0}"
@@ -238,29 +259,34 @@ _resolve_pretrained_vae_info_if_needed() {
   fi
   local _cand
   _cand="$(
-    FRAC="$FRAC" SIGMA="$SIGMA" PROJECT="$PROJECT" \
+    FRAC="$FRAC" SIGMA="$SIGMA" PROJECT="$PROJECT" LATENT_DIM="$LATENT_DIM" \
       PRETRAINED_MULTITASK_TRAIN_TASKS="$PRETRAINED_MULTITASK_TRAIN_TASKS" \
       "$PYTHON" -c "
-import importlib.util, os
+import importlib.util, os, sys
 project = os.environ['PROJECT']
+sys.path.insert(0, project)
 path = os.path.join(project, 'diffuser/utils/multitask_canon.py')
 spec = importlib.util.spec_from_file_location('multitask_canon', path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
+from diffuser.utils.vae_layout import resolve_generated_vae_info_path
 csv = os.environ['PRETRAINED_MULTITASK_TRAIN_TASKS']
 frac = float(os.environ['FRAC'])
 sigma = float(os.environ['SIGMA'])
+ld = int(os.environ.get('LATENT_DIM', '32'))
 tok = mod.multitask_path_token(mod.canonical_train_tasks_csv(csv))
-print(os.path.join(project, f'generated_datasets/multi_{tok}_frac{frac}_sigma{sigma}/vae_info.p'))
+base = os.path.join(project, f'generated_datasets/multi_{tok}_frac{frac}_sigma{sigma}')
+p = resolve_generated_vae_info_path(base, ld)
+print(p or '')
 "
   )"
-  if [[ -f "$_cand" ]]; then
+  if [[ -n "$_cand" ]] && [[ -f "$_cand" ]]; then
     PRETRAINED_VAE_INFO="$_cand"
     echo "[auto] PRETRAINED_VAE_INFO=$PRETRAINED_VAE_INFO"
     echo "      （multi 数据集目录 = PRETRAINED_MULTITASK_TRAIN_TASKS + FRAC/SIGMA；与 --pretrained_mt_hex 无关）"
     return 0
   fi
-  echo "错误: few-shot 需要 vae_info.p。未指定 --pretrained_vae_info，且默认路径不存在：" >&2
+  echo "错误: few-shot 需要多任务 vae 元数据（vae_info.p 或 vae_info_latent*.p）。未指定 --pretrained_vae_info，且默认路径不存在：" >&2
   echo "      $_cand" >&2
   echo "      请先生成多任务 VAE，或显式传入 --pretrained_vae_info / export PRETRAINED_VAE_INFO=..." >&2
   exit 1
@@ -291,13 +317,16 @@ _max_batch_from_dirs() {
 # 与 train.py 单任务 --real_task_text_only_finetune 的 RUN.prefix 中段一致（_fewshot_ft + 条件后缀）
 _fewshot_trained_ckpt_dir() {
   local t="$1" seed="$2"
-  local _ret="" _txt _mto
+  local _ret="" _txt _mto _lat=""
+  if [[ "${LATENT_DIM:-32}" != "32" ]]; then
+    _lat="_latent${LATENT_DIM}"
+  fi
   if [[ "${USE_RETURNS:-0}" == "1" ]]; then
     _ret="${GTG_RETCOND_PATH_INFIX:-_retcond}"
   fi
   _txt="${GTG_TEXTCOND_PATH_INFIX:-_textcond}"
   _mto="${GTG_MTTEXTONLY_PATH_INFIX:-_mttextonly}"
-  echo "${PROJECT}/trained_models/${t}_frac${FRAC}_sigma${SIGMA}/${N_TRAJ}x${HORIZON}_k${K}_eps${EPS}_fewshot_ft${_ret}${_txt}${_mto}/seed${seed}/checkpoint"
+  echo "${PROJECT}/trained_models/${t}_frac${FRAC}_sigma${SIGMA}/${N_TRAJ}x${HORIZON}_k${K}_eps${EPS}_fewshot_ft${_ret}${_txt}${_mto}${_DIFF_TRAIN_SUF:-}${_lat}/seed${seed}/checkpoint"
 }
 
 _tasks_to_run() {
@@ -402,6 +431,7 @@ _run_zero_shot_one() {
       --frac "$FRAC" \
       --sigma "$SIGMA" \
       --seed "$seed" \
+      --latent_dim "$LATENT_DIM" \
       "${RETURNS_EXTRA[@]}" \
       "${CPU_EXTRA[@]}" \
       "${W_TEXT_EXTRA[@]}" \
@@ -443,6 +473,7 @@ _run_few_shot_one() {
   if [[ "${USE_RETURNS}" == "1" ]]; then
     _ST_HYPER="${_ST_HYPER}${RESULTS_SUFFIX:-_ret}"
   fi
+  _ST_HYPER="${_ST_HYPER}${_DIFF_TRAIN_SUF:-}"
   _ST_HYPER="${_ST_HYPER}_mt${PRETRAINED_MT_HEX}_ft"
 
   # RESULTS=完整路径 时覆盖本任务的 base_dir（单任务重跑）；否则与 single_task 类似写入 real_task/few_shot
@@ -494,6 +525,7 @@ _run_few_shot_one() {
   echo "=========================================="
   echo "[Few-shot] TASK=$t  PRETRAINED_MT_HEX=$PRETRAINED_MT_HEX  n_traj=$N_TRAJ k=$K eps=$EPS horizon=$HORIZON"
   echo "  TRAIN_EPOCHS=$TRAIN_EPOCHS（扩散微调；与预训练 200 epoch 区分，可用 TRAIN_EPOCHS=200 加长）"
+  echo "  TRAIN_TIMESTEP_BIAS_POWER=$TRAIN_TIMESTEP_BIAS_POWER  TRAIN_LOSS_MIN_SNR_GAMMA=$TRAIN_LOSS_MIN_SNR_GAMMA"
   echo "  NUM_SEEDS=$NUM_SEEDS  START_SEED=$start_seed  （seed: $start_seed .. $((start_seed + NUM_SEEDS - 1))）"
   echo "  PRETRAINED_VAE_INFO=$PRETRAINED_VAE_INFO"
   echo "  condition_guidance_w_text=${CONDITION_GUIDANCE_W_TEXT}"
@@ -521,6 +553,7 @@ _run_few_shot_one() {
       --k "$K" \
       --eps "$EPS" \
       --horizon "$HORIZON" \
+      --latent_dim "$LATENT_DIM" \
       "${CONSTRUCT_EXTRA[@]}" \
       "${CPU_EXTRA[@]}" \
       >"$construct_log" 2>&1
@@ -569,6 +602,9 @@ _run_few_shot_one() {
         --horizon "$HORIZON" \
         --frac "$FRAC" \
         --sigma "$SIGMA" \
+        --latent_dim "$LATENT_DIM" \
+        --train_timestep_bias_power "$TRAIN_TIMESTEP_BIAS_POWER" \
+        --train_loss_min_snr_gamma "$TRAIN_LOSS_MIN_SNR_GAMMA" \
         "${RETURNS_EXTRA[@]}" \
         "${_TE_EXTRA[@]}" \
         "${CPU_EXTRA[@]}" \
@@ -595,6 +631,9 @@ _run_few_shot_one() {
       --horizon "$HORIZON" \
       --frac "$FRAC" \
       --sigma "$SIGMA" \
+      --latent_dim "$LATENT_DIM" \
+      --train_timestep_bias_power "$TRAIN_TIMESTEP_BIAS_POWER" \
+      --train_loss_min_snr_gamma "$TRAIN_LOSS_MIN_SNR_GAMMA" \
       "${RETURNS_EXTRA[@]}" \
       "${CPU_EXTRA[@]}" \
       "${W_TEXT_EXTRA[@]}" \

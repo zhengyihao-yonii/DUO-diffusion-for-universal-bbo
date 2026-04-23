@@ -11,12 +11,17 @@
 #   NUM_SEEDS=3 START_SEED=0 ./scripts/train_eval_sweep_w_text.sh
 #   NUM_RUNS=3 START_SEED=1 ./scripts/train_eval_sweep_w_text.sh
 #
-# 日志目录（与 checkpoint 中间段 ``mt_<16hex>_textcond_mttextonly`` 一致，见 print_multitask_ckpt_hyper_dir.py）:
-#   results/eval_sweep_w_text/<CKPT_HYPER_DIR>/seed<SEED>/
-# 同一套轨迹参数（同一 mt_*）下多次执行会**写入同一 seed 目录**（eval 日志用 >> 追加），便于补跑部分 w（如 W_VALUES_OVERRIDE="16.0 32.0"）。
-# 每次运行会在 <CKPT_HYPER_DIR>/ 下追加 run_meta_<时间戳>.env 记录参数。
+# 日志目录：归档 train.log / eval_w*.log / sweep.log；默认与 trained_models/multi_* 下 RUN.prefix 中段一致。
+#   results/eval_sweep_w_text/<SWEEP_ARCHIVE_SLUG>/seed<SEED>/
+# SWEEP_ARCHIVE_SLUG 默认由 scripts/print_multitask_ckpt_hyper_dir.py 输出（mt_<hex>_textcond_mttextonly + RUN_SUFFIX + _latent{d}），
+#   与 train.py / evaluate.py 的 multitask 超参目录名一致；若 Python 失败则回退为任务名 + 标量超参的长 slug。
+#   同一组参数多次运行仍写入同一目录，便于补跑部分 w（eval 日志 >> 追加）。
+# 每次运行在本目录下追加 run_meta_<时间戳>.env。
+# LATENT_DIM  默认 32；须与 train/eval 的 --latent_dim 一致。可用环境变量 LATENT_DIM=64 或命令行：
+#   ./scripts/train_eval_sweep_w_text.sh --latent_dim 64
+#   （命令行优先于环境变量中的 LATENT_DIM）
 #
-# 默认不把 checkpoint 下的 npz 复制到 results（SWEEP_COPY_NPZ=0）；需要本地留档时: SWEEP_COPY_NPZ=1 ./scripts/train_eval_sweep_w_text.sh
+# TRAIN_TIMESTEP_BIAS_POWER / TRAIN_LOSS_MIN_SNR_GAMMA  默认 0.0；非零时传给 train.py（小 t 偏斜 / min-SNR）。
 #
 # PROXY_FILTER  可选 0/1；若 export 则 train/evaluate 追加 --proxy_filter（不设则默认 1）。
 #
@@ -26,6 +31,32 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}"
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
+
+# ---------- 解析命令行（须在 LATENT_DIM 默认值之前）----------
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --latent_dim=*)
+      LATENT_DIM="${1#*=}"
+      shift
+      ;;
+    --latent_dim)
+      if [[ -z "${2:-}" ]]; then
+        echo "错误: --latent_dim 需要整数参数" >&2
+        exit 1
+      fi
+      LATENT_DIM="$2"
+      shift 2
+      ;;
+    -h | --help)
+      sed -n '1,28p' "$0"
+      exit 0
+      ;;
+    *)
+      echo "未知参数: $1（支持: --latent_dim <int>、--latent_dim=<int>、-h）" >&2
+      exit 1
+      ;;
+  esac
+done
 
 canonical_train_tasks_token() {
   local csv="$1"
@@ -63,6 +94,9 @@ TRAIN_EPOCHS="${TRAIN_EPOCHS:-200}"
 TEXT_ENCODER="${TEXT_ENCODER:-sentence-transformers/all-MiniLM-L6-v2}"
 
 TRAJ_PARAMS_JSON="${TRAJ_PARAMS_JSON:-}"
+LATENT_DIM="${LATENT_DIM:-32}"
+TRAIN_TIMESTEP_BIAS_POWER="${TRAIN_TIMESTEP_BIAS_POWER:-0.0}"
+TRAIN_LOSS_MIN_SNR_GAMMA="${TRAIN_LOSS_MIN_SNR_GAMMA:-0.0}"
 
 if [[ -n "${W_VALUES_OVERRIDE:-}" ]]; then
   read -ra W_VALUES <<< "${W_VALUES_OVERRIDE}"
@@ -70,18 +104,34 @@ else
   W_VALUES=(0.0 0.8 1.2 2.0)
 fi
 
-CKPT_HYPER_DIR="${CKPT_HYPER_DIR:-}"
 EVAL_SWEEP_DIR="${EVAL_SWEEP_DIR:-results/eval_sweep_w_text}"
 
 SKIP_TRAIN="${SKIP_TRAIN:-0}"
 SKIP_EVAL="${SKIP_EVAL:-0}"
 LOG_TO_TERMINAL="${LOG_TO_TERMINAL:-0}"
-# 是否把 checkpoint 目录下与当前 w 匹配的 performance/samples *.npz 复制到 seed 目录下的 npz_w*/（默认 0 不复制，减小 results 体积）
-SWEEP_COPY_NPZ="${SWEEP_COPY_NPZ:-0}"
 
 PROXY_FILTER_EXTRA=()
 if [[ -n "${PROXY_FILTER:-}" ]]; then
   PROXY_FILTER_EXTRA=(--proxy_filter "${PROXY_FILTER}")
+fi
+
+# 离散任务辅助 CE（tfbind8/10）：只需设置环境变量 DUO_DISCRETE_CE_LAMBDA（以及可选 DUO_DISCRETE_CE_TASK_NAMES）。
+# 为避免覆盖默认实验，自动将该 lambda 追加到 hyper 目录名与 RUN.prefix（train/evaluate 的 --run_suffix）。
+RUN_SUFFIX="${RUN_SUFFIX:-}"
+if [[ -z "${RUN_SUFFIX}" && -n "${DUO_DISCRETE_CE_LAMBDA:-}" ]]; then
+  # 只有 lambda > 0 才加后缀；lambda=0 时保持与历史实验同一路径（不新增目录）
+  _lam_raw="${DUO_DISCRETE_CE_LAMBDA// /}"
+  if python3 - <<PY >/dev/null 2>&1
+import sys
+try:
+    v = float("${_lam_raw}")
+except Exception:
+    sys.exit(1)
+sys.exit(0 if v > 0.0 else 2)
+PY
+  then
+    RUN_SUFFIX="_ce${_lam_raw}"
+  fi
 fi
 
 # ---------- 解析 SEED 列表 ----------
@@ -109,10 +159,10 @@ fi
 
 export PROJECT_ROOT
 TRAIN_TASKS_TOKEN="$(canonical_train_tasks_token "${TRAIN_TASKS}")"
-_multi_base="trained_models/multi_${TRAIN_TASKS_TOKEN}_frac${FRAC}_sigma${SIGMA}"
 
-_PRINT_MT=(
-  python3 "${PROJECT_ROOT}/scripts/print_multitask_ckpt_hyper_dir.py"
+SWEEP_ARCHIVE_SLUG=""
+_print_hyper_args=(
+  python "${PROJECT_ROOT}/scripts/print_multitask_ckpt_hyper_dir.py"
   --train_tasks "${TRAIN_TASKS}"
   --frac "${FRAC}"
   --sigma "${SIGMA}"
@@ -120,34 +170,28 @@ _PRINT_MT=(
   --k "${K}"
   --eps "${EPS}"
   --horizon "${HORIZON}"
+  --hyper_suffix "${RUN_SUFFIX:-}"
+  --latent_dim "${LATENT_DIM}"
+  --train_timestep_bias_power "${TRAIN_TIMESTEP_BIAS_POWER}"
+  --train_loss_min_snr_gamma "${TRAIN_LOSS_MIN_SNR_GAMMA}"
 )
 if [[ -n "${TRAJ_PARAMS_JSON}" ]]; then
-  _PRINT_MT+=(--traj_params_json "${TRAJ_PARAMS_JSON}")
+  _print_hyper_args+=(--traj_params_json "${TRAJ_PARAMS_JSON}")
 fi
-
-# 超参目录名（与 train/eval 的 RUN.prefix 中间段一致，如 mt_911054c35daad7e0_textcond_mttextonly）
-# 只取以 mt_ 开头的行：避免 import 时误打到 stdout 的提示混进 ``$(...)`` 变成错误目录名（曾见 colab 警告）
-if [[ -z "${CKPT_HYPER_DIR}" ]]; then
-  _hyper_lines="$("${_PRINT_MT[@]}" 2>&1)" || true
-  CKPT_HYPER_DIR="$(printf '%s\n' "${_hyper_lines}" | grep -E '^mt_' | tail -n 1)"
-  if [[ -z "${CKPT_HYPER_DIR}" && -n "${_hyper_lines}" ]]; then
-    echo "错误: print_multitask_ckpt_hyper_dir 未得到 mt_* 行，完整输出：" >&2
-    printf '%s\n' "${_hyper_lines}" >&2
+if _py_hyper="$("${_print_hyper_args[@]}" 2>/dev/null)" && [[ -n "${_py_hyper}" ]]; then
+  SWEEP_ARCHIVE_SLUG="${_py_hyper}"
+fi
+if [[ -z "${SWEEP_ARCHIVE_SLUG}" ]]; then
+  echo "[train_eval_sweep_w_text] 警告: print_multitask_ckpt_hyper_dir 失败，使用回退 slug（与 checkpoint 中段可能不一致）" >&2
+  _eps_slug="${EPS//./p}"
+  _tpj_slug=""
+  if [[ -n "${TRAJ_PARAMS_JSON}" ]]; then
+    _tpj_slug="_$(basename "${TRAJ_PARAMS_JSON}")"
+    _tpj_slug="${_tpj_slug// /_}"
   fi
+  SWEEP_ARCHIVE_SLUG="${TRAIN_TASKS_TOKEN}_frac${FRAC}_sigma${SIGMA}_n${N_TRAJ}x${HORIZON}_k${K}_eps${_eps_slug}_lat${LATENT_DIM}${RUN_SUFFIX:-}${_tpj_slug}"
 fi
-if [[ -z "${CKPT_HYPER_DIR}" && -d "${_multi_base}" ]]; then
-  _cand=()
-  while IFS= read -r -d '' d; do _cand+=("$d"); done < <(find "${_multi_base}" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
-  if [[ ${#_cand[@]} -eq 1 ]]; then
-    CKPT_HYPER_DIR="$(basename "${_cand[0]}")"
-  fi
-fi
-if [[ -z "${CKPT_HYPER_DIR}" ]]; then
-  echo "错误: 无法确定 CKPT_HYPER_DIR（print_multitask_ckpt_hyper_dir 失败且 trained_models 下无唯一目录）；可手动设置 CKPT_HYPER_DIR=" >&2
-  exit 1
-fi
-
-MODEL_ROOT="${EVAL_SWEEP_DIR}/${CKPT_HYPER_DIR}"
+MODEL_ROOT="${EVAL_SWEEP_DIR}/${SWEEP_ARCHIVE_SLUG}"
 mkdir -p "${MODEL_ROOT}"
 
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
@@ -161,11 +205,16 @@ RUN_ID="$(date +%Y%m%d_%H%M%S)"
   echo "SEED_LIST=${SEED_LIST[*]}"
   echo "START_SEED=${START_SEED} NUM_SEEDS=${NUM_SEEDS} SEEDS=${SEEDS:-}"
   echo "TRAJ_PARAMS_JSON=${TRAJ_PARAMS_JSON:-}"
+  echo "LATENT_DIM=${LATENT_DIM}"
+  echo "TRAIN_TIMESTEP_BIAS_POWER=${TRAIN_TIMESTEP_BIAS_POWER}"
+  echo "TRAIN_LOSS_MIN_SNR_GAMMA=${TRAIN_LOSS_MIN_SNR_GAMMA}"
   echo "PROXY_FILTER=${PROXY_FILTER:-}"
+  echo "DUO_DISCRETE_CE_LAMBDA=${DUO_DISCRETE_CE_LAMBDA:-}"
+  echo "DUO_DISCRETE_CE_TASK_NAMES=${DUO_DISCRETE_CE_TASK_NAMES:-}"
+  echo "RUN_SUFFIX=${RUN_SUFFIX:-}"
   echo "W_VALUES=${W_VALUES[*]}"
   echo "SKIP_TRAIN=${SKIP_TRAIN} SKIP_EVAL=${SKIP_EVAL}"
-  echo "CKPT_HYPER_DIR=${CKPT_HYPER_DIR}"
-  echo "SWEEP_COPY_NPZ=${SWEEP_COPY_NPZ}"
+  echo "SWEEP_ARCHIVE_SLUG=${SWEEP_ARCHIVE_SLUG}"
   echo "---"
 } > "${MODEL_ROOT}/run_meta_${RUN_ID}.env"
 
@@ -183,10 +232,7 @@ for SEED in "${SEED_LIST[@]}"; do
     fi
   }
 
-  _log "本目录: ${LOG_ROOT}（本 seed 的训练/评估日志）"
-  if [[ -n "${CKPT_HYPER_DIR:-}" ]]; then
-    _log "CKPT_HYPER_DIR=${CKPT_HYPER_DIR}（checkpoint: ${_multi_base}/${CKPT_HYPER_DIR}/seed${SEED}/）"
-  fi
+  _log "本目录: ${LOG_ROOT}（本 seed 的训练/评估日志；归档根: ${MODEL_ROOT}）"
 
   _TRAIN_EXTRA=(
     python train.py
@@ -203,9 +249,15 @@ for SEED in "${SEED_LIST[@]}"; do
     --text_encoder_model "${TEXT_ENCODER}"
     --train_epochs "${TRAIN_EPOCHS}"
   )
+  if [[ -n "${RUN_SUFFIX}" ]]; then
+    _TRAIN_EXTRA+=(--run_suffix "${RUN_SUFFIX}")
+  fi
   if [[ -n "${TRAJ_PARAMS_JSON}" ]]; then
     _TRAIN_EXTRA+=(--traj_params_json "${TRAJ_PARAMS_JSON}")
   fi
+  _TRAIN_EXTRA+=(--latent_dim "${LATENT_DIM}")
+  _TRAIN_EXTRA+=(--train_timestep_bias_power "${TRAIN_TIMESTEP_BIAS_POWER}")
+  _TRAIN_EXTRA+=(--train_loss_min_snr_gamma "${TRAIN_LOSS_MIN_SNR_GAMMA}")
   _TRAIN_EXTRA+=("${PROXY_FILTER_EXTRA[@]}")
 
   _EVAL_BASE=(
@@ -222,9 +274,15 @@ for SEED in "${SEED_LIST[@]}"; do
     --multitask_text_only
     --text_encoder_model "${TEXT_ENCODER}"
   )
+  if [[ -n "${RUN_SUFFIX}" ]]; then
+    _EVAL_BASE+=(--run_suffix "${RUN_SUFFIX}")
+  fi
   if [[ -n "${TRAJ_PARAMS_JSON}" ]]; then
     _EVAL_BASE+=(--traj_params_json "${TRAJ_PARAMS_JSON}")
   fi
+  _EVAL_BASE+=(--latent_dim "${LATENT_DIM}")
+  _EVAL_BASE+=(--train_timestep_bias_power "${TRAIN_TIMESTEP_BIAS_POWER}")
+  _EVAL_BASE+=(--train_loss_min_snr_gamma "${TRAIN_LOSS_MIN_SNR_GAMMA}")
   _EVAL_BASE+=("${PROXY_FILTER_EXTRA[@]}")
 
   if [[ "${SKIP_TRAIN}" != "1" ]]; then
@@ -249,26 +307,6 @@ for SEED in "${SEED_LIST[@]}"; do
       "${_EVAL_BASE[@]}" --condition_guidance_w_text "${W}" >> "${LOG_ROOT}/eval_w${_wfile}.log" 2>&1 || _ev=$?
       if [[ "${_ev}" -ne 0 ]]; then
         _log "警告: evaluate w=${W} 退出码 ${_ev}，详见 ${LOG_ROOT}/eval_w${_wfile}.log（继续后续 w）"
-      fi
-
-      if [[ "${SWEEP_COPY_NPZ}" == "1" ]]; then
-        if [[ -n "${CKPT_HYPER_DIR:-}" ]]; then
-          _ckpt_root="${_multi_base}/${CKPT_HYPER_DIR}/seed${SEED}"
-          _dst="${LOG_ROOT}/npz_w${_wfile}"
-          mkdir -p "${_dst}"
-          _wtag="$(python3 -c "print(f\"_wtext{float('${W}'):g}\")")"
-          shopt -s nullglob
-          _npz=( "${_ckpt_root}"/performance_*"${_wtag}"*.npz "${_ckpt_root}"/samples_*"${_wtag}"*.npz )
-          shopt -u nullglob
-          if [[ ${#_npz[@]} -gt 0 ]]; then
-            cp -f "${_npz[@]}" "${_dst}/" || true
-            _log "已复制 npz 到 ${_dst}/"
-          else
-            _log "未找到 ${_ckpt_root}/*${_wtag}*.npz"
-          fi
-        else
-          _log "SWEEP_COPY_NPZ=1 但无法确定 CKPT_HYPER_DIR，跳过 npz 复制"
-        fi
       fi
     done
   fi

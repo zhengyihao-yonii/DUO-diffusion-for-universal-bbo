@@ -32,6 +32,7 @@ from diffuser.utils.soo_gtopx import (
     is_gtopx_task,
 )
 from diffuser.utils.construct_runtime import resolve_torch_device
+from diffuser.utils.vae_layout import vae_train_dir_suffix
 
 # 任务映射
 TASKNAME2FULL = {
@@ -74,6 +75,7 @@ def get_original_observation_dim(task_name):
     if is_gtopx_task(task_name):
         return TASKNAME_TO_VAR_NUM[task_name]
     return dim_map.get(task_name, 128)  # 默认返回128
+
 
 def main(args):
     # 设备：--device > 环境变量 GTG_DEVICE > 自动 cuda/cpu（construct 传入的 VAEArgs 无 device 时走后两者）
@@ -218,8 +220,9 @@ def main(args):
     }
 
     _rw_suffix = "_rwft" if finetune_rw else ""
-    # 生成模型保存路径
-    model_save_dir = f"trained_models/vae/{task_str}_frac{args.frac}_sigma{args.sigma}_dim{input_dim}{_rw_suffix}"
+    # 生成模型保存路径（非 32 隐空间单独子目录，避免 scaler / dataset_info / vae_info 与 32 维互覆盖）
+    _lat_dir = vae_train_dir_suffix(args.latent_dim)
+    model_save_dir = f"trained_models/vae/{task_str}_frac{args.frac}_sigma{args.sigma}_dim{input_dim}{_rw_suffix}{_lat_dir}"
     os.makedirs(model_save_dir, exist_ok=True)
     model_path = os.path.join(model_save_dir, f"vae_latent{args.latent_dim}.pt")
     

@@ -1,7 +1,7 @@
 % Requires: \usepackage{booktabs}, \usepackage{graphicx}, \usepackage{xcolor}.
 % Baselines: uniso_nresult.tex; per-column blue/violet = best/2nd in this table (tasks: higher better; Avg.\ Rank: lower better).
 \begin{table*}[t!]
-\caption{Normalized scores on the five Design-Bench tasks (same setting as \texttt{uniso\_nresult.tex}). Baseline rows are copied from that table; \textbf{DFGO} rows report \texttt{nmax\_ep\_reward} (mean $\pm$ std over runs), i.e.\ $(y-y_{\min})/(y_{\max}-y_{\min})$ in \texttt{evaluate.py}, comparable to the normalized baselines. \textbf{DFGO (single)} uses per-task best under \texttt{single\_task/…}; \textbf{DFGO (multi, all tasks, text\_conditioned)} scans \texttt{text\_conditioned\_only/all\_improved\_<frac>/} (override with \texttt{DUO\_NMAX\_MULTITASK\_PREFIX}); not \texttt{multi\_task}. Best hyperfolder per task is in the table note. Missing \texttt{nmax} cells are worst when ranking. Avg.\ Rank for DFGO: mean per-task rank / $N$ ($N$ = pool size, same as baselines). \textbf{DFGO full multitask text} (matrix cols.\ fullT / nmax multi text): \texttt{eval\_sweep\_w\_text/mt\_911054c35daad7e0\_textcond\_mttextonly} with unified $\texttt{condition\_guidance\_w\_text}=8$ (best $w$: lowest mean rank among $w$ columns in \texttt{max\_ablation}, joint per-task ranking with UniSO and GTG ST). Trajectory slug \texttt{mt\_911054c35daad7e0} is the 16-hex-digit digest prefix of the multitask trajectory signature (SHA-256). +returns text columns use the same sweep logits (no separate ret eval). }
+\caption{Normalized Design-Bench scores (baselines aligned with \texttt{uniso\_nresult.tex}); DUO reports multitask text-conditioned \texttt{nmax\_ep\_reward} (mean $\pm$ std). Avg.\ Rank is mean per-task rank divided by pool size~$N$.}
 \vspace{0.3em}
 \centering
 \resizebox{\linewidth}{!}{
@@ -11,41 +11,35 @@ Method & Venue & Ant & D'Kitty & Superconductor & TF-Bind-8 & TF-Bind-10 & Avg.\
 \midrule
 $\mathcal{D}$(best) & / & 0.565 & 0.884 & 0.400 & 0.439 & 0.467 & / \\
 \midrule
-BO-$q$EI &  & 0.812 ± 0.000 & 0.896 ± 0.000 & 0.382 ± 0.013 & 0.802 ± 0.081 & 0.628 ± 0.036 & 17.8 / 24 \\
-CMA-ES &  & \textbf{\textcolor{blue}{1.712 ± 0.754}} & 0.725 ± 0.002 & 0.463 ± 0.042 & 0.944 ± 0.017 & 0.641 ± 0.036 & 11.4 / 24 \\
-REINFORCE &  & 0.248 ± 0.039 & 0.541 ± 0.196 & 0.478 ± 0.017 & 0.935 ± 0.049 & \textbf{\textcolor{blue}{0.673 ± 0.074}} & 13.8 / 24 \\
-Grad. Ascent &  & 0.273 ± 0.023 & 0.853 ± 0.018 & 0.510 ± 0.028 & 0.969 ± 0.021 & 0.646 ± 0.037 & 11.2 / 24 \\
-Grad. Ascent Mean &  & 0.306 ± 0.053 & 0.875 ± 0.024 & 0.508 ± 0.019 & \textbf{\textcolor{blue}{0.985 ± 0.008}} & 0.633 ± 0.030 & 10.6 / 24 \\
-Grad. Ascent Min & \multirow{-6}{*}{Baselines} & 0.282 ± 0.033 & 0.884 ± 0.018 & 0.514 ± 0.020 & 0.979 ± 0.014 & 0.632 ± 0.027 & 11.2 / 24 \\
+BO-$q$EI &  & 0.812 ± 0.000 & 0.896 ± 0.000 & 0.382 ± 0.013 & 0.802 ± 0.081 & 0.628 ± 0.036 & 17.8 / 23 \\
+CMA-ES &  & \textbf{\textcolor{blue}{1.712 ± 0.754}} & 0.725 ± 0.002 & 0.463 ± 0.042 & 0.944 ± 0.017 & 0.641 ± 0.036 & 11.4 / 23 \\
+REINFORCE &  & 0.248 ± 0.039 & 0.541 ± 0.196 & 0.478 ± 0.017 & 0.935 ± 0.049 & \textbf{\textcolor{blue}{0.673 ± 0.074}} & 13.8 / 23 \\
+Grad. Ascent &  & 0.273 ± 0.023 & 0.853 ± 0.018 & 0.510 ± 0.028 & 0.969 ± 0.021 & 0.646 ± 0.037 & 11.2 / 23 \\
+Grad. Ascent Mean &  & 0.306 ± 0.053 & 0.875 ± 0.024 & 0.508 ± 0.019 & \textbf{\textcolor{blue}{0.985 ± 0.008}} & 0.633 ± 0.030 & 10.6 / 23 \\
+Grad. Ascent Min & \multirow{-6}{*}{Baselines} & 0.282 ± 0.033 & 0.884 ± 0.018 & 0.514 ± 0.020 & 0.979 ± 0.014 & 0.632 ± 0.027 & 11.2 / 23 \\
 \midrule
-CbAS & ICML'19 & 0.846 ± 0.032 & 0.896 ± 0.009 & 0.421 ± 0.049 & 0.921 ± 0.046 & 0.630 ± 0.039 & 15.6 / 24 \\
-MINs & ICML'19 & 0.906 ± 0.024 & 0.939 ± 0.007 & 0.464 ± 0.023 & 0.910 ± 0.051 & 0.633 ± 0.034 & 12.6 / 24 \\
-DDOM & ICML'23 & 0.908 ± 0.024 & 0.930 ± 0.005 & 0.452 ± 0.028 & 0.913 ± 0.047 & 0.616 ± 0.018 & 14.2 / 24 \\
-BONET & ICML'23 & 0.921 ± 0.031 & 0.949 ± 0.016 & 0.390 ± 0.022 & 0.798 ± 0.123 & 0.575 ± 0.039 & 14.6 / 24 \\
-GTG & NeurIPS'24 & 0.855 ± 0.044 & 0.942 ± 0.017 & 0.480 ± 0.055 & 0.910 ± 0.040 & 0.619 ± 0.029 & 13.6 / 24 \\
+CbAS & ICML'19 & 0.846 ± 0.032 & 0.896 ± 0.009 & 0.421 ± 0.049 & 0.921 ± 0.046 & 0.630 ± 0.039 & 15.6 / 23 \\
+MINs & ICML'19 & 0.906 ± 0.024 & 0.939 ± 0.007 & 0.464 ± 0.023 & 0.910 ± 0.051 & 0.633 ± 0.034 & 12.6 / 23 \\
+DDOM & ICML'23 & 0.908 ± 0.024 & 0.930 ± 0.005 & 0.452 ± 0.028 & 0.913 ± 0.047 & 0.616 ± 0.018 & 14.2 / 23 \\
+BONET & ICML'23 & 0.921 ± 0.031 & 0.949 ± 0.016 & 0.390 ± 0.022 & 0.798 ± 0.123 & 0.575 ± 0.039 & 14.6 / 23 \\
+GTG & NeurIPS'24 & 0.855 ± 0.044 & 0.942 ± 0.017 & 0.480 ± 0.055 & 0.910 ± 0.040 & 0.619 ± 0.029 & 13.6 / 23 \\
 \midrule
-COMs & ICML'21 & 0.916 ± 0.026 & 0.949 ± 0.016 & 0.460 ± 0.040 & 0.953 ± 0.038 & 0.644 ± 0.052 & 9.0 / 24 \\
-RoMA & ICML'21 & 0.430 ± 0.048 & 0.767 ± 0.031 & 0.494 ± 0.025 & 0.665 ± 0.000 & 0.553 ± 0.000 & 18.0 / 24 \\
-IOM & NeurIPS'22 & 0.889 ± 0.034 & 0.928 ± 0.008 & 0.491 ± 0.034 & 0.925 ± 0.054 & 0.628 ± 0.036 & 12.6 / 24 \\
-BDI & NeurIPS'22 & 0.963 ± 0.000 & 0.941 ± 0.000 & 0.508 ± 0.013 & 0.973 ± 0.000 & 0.658 ± 0.000 & \textbf{\textcolor{violet}{5.4 / 24}} \\
-ICT & NeurIPS'23 & 0.915 ± 0.024 & 0.947 ± 0.009 & 0.494 ± 0.026 & 0.897 ± 0.050 & 0.659 ± 0.024 & 8.8 / 24 \\
-Tri-Mentoring & NeurIPS'23 & 0.891 ± 0.011 & 0.947 ± 0.005 & 0.503 ± 0.013 & 0.956 ± 0.000 & 0.662 ± 0.012 & 7.0 / 24 \\
-PGS & AAAI'24 & 0.715 ± 0.046 & 0.954 ± 0.022 & 0.444 ± 0.020 & 0.889 ± 0.061 & 0.634 ± 0.040 & 13.4 / 24 \\
-FGM & AISTATS'24 & 0.923 ± 0.023 & 0.944 ± 0.014 & 0.481 ± 0.024 & 0.811 ± 0.079 & 0.611 ± 0.008 & 12.8 / 24 \\
-MATCH-OPT & ICML'24 & 0.933 ± 0.016 & 0.952 ± 0.008 & 0.504 ± 0.021 & 0.824 ± 0.067 & 0.655 ± 0.050 & 7.6 / 24 \\
-RaM-ListNet & ICLR'25 & 0.949 ± 0.025 & \textbf{\textcolor{violet}{0.962 ± 0.015}} & \textbf{\textcolor{violet}{0.517 ± 0.029}} & \textbf{\textcolor{violet}{0.981 ± 0.012}} & \textbf{\textcolor{violet}{0.670 ± 0.035}} & \textbf{\textcolor{blue}{2.0 / 24}} \\
+COMs & ICML'21 & 0.916 ± 0.026 & 0.949 ± 0.016 & 0.460 ± 0.040 & 0.953 ± 0.038 & 0.644 ± 0.052 & 9.0 / 23 \\
+RoMA & ICML'21 & 0.430 ± 0.048 & 0.767 ± 0.031 & 0.494 ± 0.025 & 0.665 ± 0.000 & 0.553 ± 0.000 & 18.0 / 23 \\
+IOM & NeurIPS'22 & 0.889 ± 0.034 & 0.928 ± 0.008 & 0.491 ± 0.034 & 0.925 ± 0.054 & 0.628 ± 0.036 & 12.6 / 23 \\
+BDI & NeurIPS'22 & 0.963 ± 0.000 & 0.941 ± 0.000 & 0.508 ± 0.013 & 0.973 ± 0.000 & 0.658 ± 0.000 & \textbf{\textcolor{violet}{5.4 / 23}} \\
+ICT & NeurIPS'23 & 0.915 ± 0.024 & 0.947 ± 0.009 & 0.494 ± 0.026 & 0.897 ± 0.050 & 0.659 ± 0.024 & 8.8 / 23 \\
+Tri-Mentoring & NeurIPS'23 & 0.891 ± 0.011 & 0.947 ± 0.005 & 0.503 ± 0.013 & 0.956 ± 0.000 & 0.662 ± 0.012 & 7.0 / 23 \\
+PGS & AAAI'24 & 0.715 ± 0.046 & 0.954 ± 0.022 & 0.444 ± 0.020 & 0.889 ± 0.061 & 0.634 ± 0.040 & 13.4 / 23 \\
+FGM & AISTATS'24 & 0.923 ± 0.023 & 0.944 ± 0.014 & 0.481 ± 0.024 & 0.811 ± 0.079 & 0.611 ± 0.008 & 12.8 / 23 \\
+MATCH-OPT & ICML'24 & 0.933 ± 0.016 & 0.952 ± 0.008 & 0.504 ± 0.021 & 0.824 ± 0.067 & 0.655 ± 0.050 & 7.6 / 23 \\
+RaM-ListNet & ICLR'25 & 0.949 ± 0.025 & \textbf{\textcolor{violet}{0.962 ± 0.015}} & \textbf{\textcolor{violet}{0.517 ± 0.029}} & \textbf{\textcolor{violet}{0.981 ± 0.012}} & \textbf{\textcolor{violet}{0.670 ± 0.035}} & \textbf{\textcolor{blue}{2.0 / 23}} \\
 \midrule
-UniSO-T & ICML'25 & 0.850 ± 0.062 & 0.915 ± 0.015 & 0.489 ± 0.062 & 0.947 ± 0.036 & \textbf{\textcolor{blue}{0.673 ± 0.136}} & 9.8 / 24 \\
+UniSO-T & ICML'25 & 0.850 ± 0.062 & 0.915 ± 0.015 & 0.489 ± 0.062 & 0.947 ± 0.036 & \textbf{\textcolor{blue}{0.673 ± 0.136}} & 9.8 / 23 \\
 \midrule
-\textbf{DFGO} (single) & / & 0.932 $\pm$ 0.057 & 0.932 $\pm$ 0.014 & 0.472 $\pm$ 0.033 & 0.957 $\pm$ 0.019 & 0.663 $\pm$ 0.019 & 6.800 / 24 \\
-\textbf{DFGO} (multi, all tasks, text\_conditioned) & / & \textbf{\textcolor{violet}{0.976 $\pm$ 0.009}} & \textbf{\textcolor{blue}{0.972 $\pm$ 0.010}} & \textbf{\textcolor{blue}{0.567 $\pm$ 0.041}} & 0.800 $\pm$ 0.091 & 0.649 $\pm$ 0.089 & 5.800 / 24 \\
+\textbf{DUO} (multi, all tasks, text) & / & \textbf{\textcolor{violet}{0.976 $\pm$ 0.009}} & \textbf{\textcolor{blue}{0.972 $\pm$ 0.010}} & \textbf{\textcolor{blue}{0.567 $\pm$ 0.041}} & 0.800 $\pm$ 0.091 & 0.649 $\pm$ 0.089 & \textbf{\textcolor{violet}{5.400 / 23}} \\
 \bottomrule
 \end{tabular}
 }
-\vspace{0.4em}
-\begin{minipage}{\linewidth}
-\footnotesize
-\textit{Hyper selection (best subfolder per task):} \textbf{DFGO ST (nmax)}: ant$\rightarrow$\texttt{4000x64\_k20\_eps0.05}; dkitty$\rightarrow$\texttt{1000x64\_k20\_eps0.01}; superconductor$\rightarrow$\texttt{4000x64\_k20\_eps0.05}; tfbind8$\rightarrow$\texttt{1000x64\_k50\_eps0.05}; tfbind10$\rightarrow$\texttt{1000x64\_k50\_eps0.05\_textcond} \par \textbf{DFGO multi (nmax)}: ant$\rightarrow$\texttt{w\_text8}; dkitty$\rightarrow$\texttt{w\_text8}; superconductor$\rightarrow$\texttt{w\_text8}; tfbind8$\rightarrow$\texttt{w\_text8}; tfbind10$\rightarrow$\texttt{w\_text8}
-\end{minipage}
-\label{tab:dfgo-nmax-designbench}
+\label{tab:duo-nmax-designbench}
 \end{table*}

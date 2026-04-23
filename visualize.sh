@@ -31,7 +31,10 @@
 #                   注意：mt_text 与 mt_task 对应 trained_models 下不同超参目录——
 #                   mt_text → mt_<hex>_textcond_mttextonly/；mt_task → mt_<hex>/（仅 task 标签）。
 #                   若只训练过前者，须训后者或置 SKIP_MT_TASK=1。
+#   VISUALIZE_FORCE_EVAL  置 1 时即使 eval_<tag>_seed*.log 已存在也重新跑 evaluate；默认跳过已存在的分日志。
 #   EXTRA_EVAL_FLAGS  追加到每次 evaluate.py 的参数（空格分隔字符串）
+#   LATENT_DIM          默认 32；非 32 时传给 evaluate 与 print_multitask_ckpt_hyper_dir，与 trained_models 下 mt_*_latent{d} 一致。
+#   TRAIN_TIMESTEP_BIAS_POWER / TRAIN_LOSS_MIN_SNR_GAMMA  默认 0；非零须与训练 checkpoint 路径一致（传给 evaluate 与 hyper 打印）。
 #
 # 日志：正常运行时脚本与 tqdm 等均写入 results/visualize/<slug>/visualize.log，各次 evaluate 另有
 #       eval_<tag>_seed<seed>.log；多 seed 聚合写入 aggregate_wandb.log。用法错误仍打印到终端。
@@ -103,6 +106,9 @@ SAMPLE_VIZ_STRIDE="${SAMPLE_VIZ_STRIDE:-10}"
 SAMPLE_VIZ_MAX_QUERIES="${SAMPLE_VIZ_MAX_QUERIES:-512}"
 MT_EXPECT_HEX="${MT_EXPECT_HEX:-911054c35daad7e0}"
 WANDB_RUN_GROUP_PREFIX="${WANDB_RUN_GROUP_PREFIX:-duo_viz}"
+LATENT_DIM="${LATENT_DIM:-32}"
+TRAIN_TIMESTEP_BIAS_POWER="${TRAIN_TIMESTEP_BIAS_POWER:-0.0}"
+TRAIN_LOSS_MIN_SNR_GAMMA="${TRAIN_LOSS_MIN_SNR_GAMMA:-0.0}"
 
 read_n_k_eps() {
   "$PYTHON" - "$TRAJ_JSON" "$TASK" <<'PY'
@@ -139,9 +145,23 @@ if [[ "$NUM_SEEDS" -gt 1 ]]; then
     --sample_viz_dump_jsonl "$DUMP_ROOT"
   )
 else
-  unset WANDB_DISABLED || true
+  # 单 seed：默认直接写 wandb（每个 tag 一个 run）。
+  # 若设 VISUALIZE_SINGLE_SEED_AGG=1，则也走“dump → aggregate → wandb”的路径，
+  # 生成一个包含四条曲线的聚合 run，便于在同一 group 里查找。
   export WANDB_RUN_GROUP="${WANDB_RUN_GROUP_PREFIX}_${TASK}_seed${SEED}"
-  EXTRA=(--sample_viz_wandb --sample_viz_stride "$SAMPLE_VIZ_STRIDE" --sample_viz_max_queries "$SAMPLE_VIZ_MAX_QUERIES")
+  if [[ "${VISUALIZE_SINGLE_SEED_AGG:-1}" == "1" ]]; then
+    DUMP_ROOT="${DUMP_ROOT:-$VISUALIZE_RESULTS/sample_viz_dump}"
+    mkdir -p "$DUMP_ROOT"
+    export WANDB_DISABLED=1
+    EXTRA=(
+      --sample_viz_stride "$SAMPLE_VIZ_STRIDE"
+      --sample_viz_max_queries "$SAMPLE_VIZ_MAX_QUERIES"
+      --sample_viz_dump_jsonl "$DUMP_ROOT"
+    )
+  else
+    unset WANDB_DISABLED || true
+    EXTRA=(--sample_viz_wandb --sample_viz_stride "$SAMPLE_VIZ_STRIDE" --sample_viz_max_queries "$SAMPLE_VIZ_MAX_QUERIES")
+  fi
 fi
 
 # 离线 MiniLM（与 run_multitask 一致）
@@ -165,7 +185,7 @@ echo "VISUALIZE_RESULTS=$VISUALIZE_RESULTS"
 echo "PROJECT=$PROJECT"
 echo "WANDB_RUN_GROUP=$WANDB_RUN_GROUP"
 echo "单任务轨迹（JSON）: n_traj=$N_TRAJ_ST k=$K_ST eps=$EPS_ST"
-echo "多任务轨迹: n_traj=$N_TRAJ_MT k=$K_MT eps=$EPS_MT + $TRAJ_JSON"
+echo "多任务轨迹: n_traj=$N_TRAJ_MT k=$K_MT eps=$EPS_MT + $TRAJ_JSON  LATENT_DIM=${LATENT_DIM}"
 
 # 可选：打印并校验 multitask slug 是否含期望 hex（需 torch）
 if [[ -x "$PYTHON" ]] && "$PYTHON" -c "import torch" 2>/dev/null; then
@@ -177,6 +197,9 @@ if [[ -x "$PYTHON" ]] && "$PYTHON" -c "import torch" 2>/dev/null; then
     --k "$K_MT" \
     --eps "$EPS_MT" \
     --horizon "$HORIZON" \
+    --latent_dim "$LATENT_DIM" \
+    --train_timestep_bias_power "$TRAIN_TIMESTEP_BIAS_POWER" \
+    --train_loss_min_snr_gamma "$TRAIN_LOSS_MIN_SNR_GAMMA" \
     ${TRAJ_JSON:+--traj_params_json "$TRAJ_JSON"} 2>/dev/null | tail -n 1)"
   echo "多任务 hyper 目录段（text+mttextonly 打印脚本）: ${_hyper:-<empty>}"
   if [[ -n "${_hyper:-}" ]] && [[ -n "$MT_EXPECT_HEX" ]]; then
@@ -196,10 +219,18 @@ run_eval() {
   local tag="$1"
   shift
   local _elog="$VISUALIZE_RESULTS/eval_${tag}_seed${SEED:-0}.log"
+  if [[ -f "$_elog" && "${VISUALIZE_FORCE_EVAL:-0}" != "1" ]]; then
+    echo ""
+    echo "---------- [$tag] seed=${SEED:-?} → 跳过（已有 $_elog），设 VISUALIZE_FORCE_EVAL=1 可强制重跑 ----------"
+    return 0
+  fi
   echo ""
   echo "---------- [$tag] seed=${SEED:-?} → eval 日志: $_elog ----------"
   # shellcheck disable=SC2086
   "$PYTHON" "$PROJECT/evaluate.py" \
+    --latent_dim "$LATENT_DIM" \
+    --train_timestep_bias_power "$TRAIN_TIMESTEP_BIAS_POWER" \
+    --train_loss_min_snr_gamma "$TRAIN_LOSS_MIN_SNR_GAMMA" \
     "$@" \
     "${EXTRA[@]}" \
     --sample_viz_tag "$tag" \
@@ -279,6 +310,18 @@ if [[ "$NUM_SEEDS" -gt 1 ]]; then
   echo "[aggregate] 日志: $VISUALIZE_RESULTS/aggregate_wandb.log"
 else
   run_all_four
+  if [[ "${VISUALIZE_SINGLE_SEED_AGG:-1}" == "1" ]]; then
+    unset WANDB_DISABLED || true
+    echo ""
+    echo "聚合 1 个 seed 的曲线 → wandb group=$WANDB_RUN_GROUP"
+    "$PYTHON" "$PROJECT/scripts/sample_viz_aggregate_wandb.py" \
+      --dump_dir "$DUMP_ROOT" \
+      --group "$WANDB_RUN_GROUP" \
+      --num_seeds 1 \
+      --start_seed "$SEED" \
+      >"$VISUALIZE_RESULTS/aggregate_wandb.log" 2>&1
+    echo "[aggregate] 日志: $VISUALIZE_RESULTS/aggregate_wandb.log"
+  fi
 fi
 
 echo ""
