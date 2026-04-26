@@ -1,4 +1,5 @@
 Task: D'Kitty
+Type: continuous
 Name: D'Kitty Morphology
 Description: D'Kitty robot morphology optimization
 Objective: to navigate the robot to a fixed location

@@ -16,15 +16,15 @@ DFGO 列在每种模式（单任务 / 小组 multi / 全任务 multi / text）�
 ``duo_mfull_text_*`` (full multitask text) — see
 ``best_duo_exp_full_multitask_unified``, ``duo_all_text_prefix``; ``duo_st_text_*`` 为单任务 + textcond。
 
-所有汇总表与 UniSO 输入均位于 ``results/analysis_table/``：宽表 ``max_short.*``、矩阵 ``max_extended.*``、``text_conditioned_result_analysis.*``、``nmax.tex``，以及 ``max_ablation.*``（text CFG 消融，由 ``--mode sweep_w`` 生成）、``uniso_result.tex``、``uniso_nresult.tex``、``d_best.json``（可选）。
-``text_conditioned_result_analysis``（``--mode final``）：``text_conditioned_only/all_frac1.0_sigma0.0/``（可用 ``EVAL_ALL_TASK_FRAC_SIG`` 覆盖）下**每个超参子目录一列** DFGO。默认一次生成全部；也可用 ``--mode short|full|final``（见 ``run_analyze_eval.sh``）。``--mode sweep_w`` 或 ``bash run_analyze_eval.sh -sweep-w`` 生成 ``max_ablation.{tex,csv}``（``eval_sweep_w_text`` 下 text CFG 消融表）。
-矩阵 ``max_extended``、``nmax`` 中 DUO「全任务 multitask text」列：若存在 ``results/eval_sweep_w_text/<mt_*>/`` 且 ``DUO_SWEEP_W_DISABLE`` 未置 1，则按 ``max_ablation`` **Mean rank 行各 w 列**（UniSO、GTG ST 与各 w 联合排名后的平均秩）选出最优 ``condition_guidance_w_text``，该列数据来自对应 ``eval_w*.log``。
-矩阵列为 **UniSO-T**（``uniso_result.tex`` 中 **UniSO-T Improved** 列）+ 14 列方法（含全任务 text 的 ``all`` 与 ``all_improved`` 两列）；文本多任务目录后缀见 ``MATRIX12_TEXT_SUFFIXES``。
+所有汇总表与 UniSO 输入均位于 ``results/analysis_table/``：宽表 ``max_short.*``、``text_conditioned_result_analysis.*``、``nmax.tex``，以及 ``w_ablation.*``（text CFG 消融：不同 ``w`` 一列，跨 seed 聚合）、``ce_ablation.*``（CE ablation：两列对比）、``uniso_result.tex``、``uniso_nresult.tex``、``d_best.json``（可选）。
+``text_conditioned_result_analysis``（``--mode final``）：``text_conditioned_only/all_frac1.0_sigma0.0/``（可用 ``EVAL_ALL_TASK_FRAC_SIG`` 覆盖）下**每个超参子目录一列** DFGO。默认一次生成全部；也可用 ``--mode short|final``（见 ``run_analyze_eval.sh``）。
+``max_short``、``nmax`` 中 DUO「全任务 multitask text」列：若存在 ``results/eval_sweep_w_text/<mt_*>/`` 且 ``DUO_SWEEP_W_DISABLE`` 未置 1，则按 ``w_ablation`` 的准则（UniSO、GTG ST 与各 ``w`` 联合排名后，取平均秩最小的 ``w``）选出最优 ``condition_guidance_w_text``，该列数据来自对应 ``eval_w*.log``（可固定到 CE 目录，见 ``SWEEP_W_DEFAULT_CE_DIRNAME``）。
 """
 from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
@@ -200,6 +200,13 @@ DESIGN_BENCH_TASK_ORDER: list[str] = [
     "tfbind10",
 ]
 
+# Real-world few-shot benchmark tasks (Design-Bench wrapper + oracle_predict).
+REAL_TASK_ORDER: list[str] = [
+    "lunar_lander",
+    "rover",
+    "robot_push",
+]
+
 EXPERIMENT_ORDER: list[str] = [
     "ant_multiple_runs",
     "dkitty_multiple_runs",
@@ -319,7 +326,7 @@ def duo_subgroup_multitask_prefix(task: str) -> str | None:
 def duo_full_multitask_prefix() -> str:
     """
     全任务 multitask（**分类 label**）：``multi_task/all_<DUO_TASK_FRAC_SIG>/``。
-    用于 max_short / max_extended 的 DFGO fullL、``enrich_multitask_columns`` 的 mfull。
+    用于 max_short 的 DFGO fullL、``enrich_multitask_columns`` 的 mfull。
     汇总表在 **所有任务上共用同一子目录**：见 :func:`best_duo_exp_full_multitask_unified`；
     可用 ``DUO_FULL_MULTITASK_HYPER`` 强制子目录名。
     覆盖：环境变量 ``DUO_FULL_MULTITASK_PREFIX``（含 hyper 的完整相对路径亦可）。
@@ -526,17 +533,114 @@ def max_short_traj_context() -> dict[str, Any]:
     global _MAX_SHORT_TRAJ_CTX
     if _MAX_SHORT_TRAJ_CTX is not None:
         return _MAX_SHORT_TRAJ_CTX
-    from diffuser.utils.multitask_canon import (
-        canonical_train_tasks_csv,
-        multitask_text_only_path_infix,
-        returns_cond_path_infix,
-        text_cond_path_infix,
-    )
-    from diffuser.utils.traj_params import (
-        multitask_checkpoint_hyper_dir,
-        multitask_slug_id,
-        prepare_multitask_traj,
-    )
+    # 避免引入 diffuser 包（其 __init__ 会 import torch）。这里内联关键命名逻辑，
+    # 保证仅依赖 stdlib，且与训练脚本的路径签名一致。
+
+    def canonical_train_tasks_csv(train_tasks: str) -> str:
+        parts = [t.strip() for t in train_tasks.split(",") if t.strip()]
+        if len(parts) <= 1:
+            return parts[0] if parts else ""
+        return ",".join(sorted(parts))
+
+    def multitask_text_only_path_infix(args: Any) -> str:
+        if getattr(args, "multitask_text_only", False):
+            return os.environ.get("GTG_MTTEXTONLY_PATH_INFIX", "_mttextonly")
+        return ""
+
+    def text_cond_path_infix(args: Any) -> str:
+        if getattr(args, "use_text_condition", False) or getattr(
+            args, "multitask_text_only", False
+        ):
+            return os.environ.get("GTG_TEXTCOND_PATH_INFIX", "_textcond")
+        return ""
+
+    def returns_cond_path_infix(args: Any) -> str:
+        rc = getattr(args, "returns_condition", None)
+        ir = getattr(args, "include_returns", None)
+        if rc is True and ir is True:
+            return os.environ.get("GTG_RETCOND_PATH_INFIX", "_retcond")
+        return ""
+
+    def _merge_traj_params_json(
+        path: str,
+        tasks: list[str],
+        n_traj: dict[str, int],
+        k: dict[str, int],
+        eps: dict[str, float],
+    ) -> tuple[dict[str, int], dict[str, int], dict[str, float]]:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return n_traj, k, eps
+        defs = raw.get("defaults") or {}
+        if isinstance(defs, dict):
+            for t in tasks:
+                if "n_traj" in defs:
+                    n_traj[t] = int(defs["n_traj"])
+                if "k" in defs:
+                    k[t] = int(defs["k"])
+                if "eps" in defs:
+                    eps[t] = float(defs["eps"])
+        for key, val in raw.items():
+            if key == "defaults" or key not in n_traj:
+                continue
+            if not isinstance(val, dict):
+                continue
+            if "n_traj" in val:
+                n_traj[key] = int(val["n_traj"])
+            if "k" in val:
+                k[key] = int(val["k"])
+            if "eps" in val:
+                eps[key] = float(val["eps"])
+        return n_traj, k, eps
+
+    def multitask_trajectory_signature(
+        tasks: list[str],
+        n_traj: dict[str, int],
+        k: dict[str, int],
+        eps: dict[str, float],
+        horizon: int,
+    ) -> str:
+        ts = sorted(tasks)
+        n0, k0, e0 = n_traj[ts[0]], k[ts[0]], eps[ts[0]]
+        uniform = all(
+            (n_traj[t] == n0)
+            and (k[t] == k0)
+            and (abs(eps[t] - e0) <= 1e-9)
+            for t in ts
+        )
+        if uniform:
+            return f"{n0}x{horizon}_k{k0}_eps{e0:g}"
+        parts: list[str] = []
+        for t in ts:
+            parts.append(f"{t}_n{n_traj[t]}_k{k[t]}_eps{eps[t]:g}")
+        return "ptask__" + "__".join(parts)
+
+    def multitask_slug_id(traj_signature: str) -> str:
+        h = hashlib.sha256(traj_signature.encode("utf-8")).hexdigest()[:16]
+        return f"mt_{h}"
+
+    def multitask_checkpoint_hyper_dir(
+        sig: str, ret_infix: str, text_infix: str, mttextonly_infix: str
+    ) -> str:
+        return f"{multitask_slug_id(sig)}{ret_infix}{text_infix}{mttextonly_infix}"
+
+    def prepare_multitask_traj(
+        tasks_list: list[str],
+        n_traj_val: int,
+        k_val: int,
+        eps_val: float,
+        horizon: int,
+        traj_params_json: str | None,
+    ) -> tuple[dict[str, int], dict[str, int], dict[str, float], str]:
+        n_d = {t: int(n_traj_val) for t in tasks_list}
+        k_d = {t: int(k_val) for t in tasks_list}
+        e_d = {t: float(eps_val) for t in tasks_list}
+        if traj_params_json:
+            n_d, k_d, e_d = _merge_traj_params_json(
+                traj_params_json, tasks_list, n_d, k_d, e_d
+            )
+        sig = multitask_trajectory_signature(tasks_list, n_d, k_d, e_d, horizon)
+        return n_d, k_d, e_d, sig
 
     jpath = max_short_traj_json_path()
     traj_arg = str(jpath) if jpath.is_file() else None
@@ -649,12 +753,12 @@ def merge_eval_sweep_w_text_into_duo(
     results_root: Path,
 ) -> str:
     """
-    从 ``results/eval_sweep_w_text/<mt_* 或 sweep 归档目录>/`` 的 ``eval_w*.log`` 按与 ``max_ablation`` **Mean rank 行中各 w 列**
+    从 ``results/eval_sweep_w_text/<mt_* 或 sweep 归档目录>/`` 的 ``eval_w*.log`` 按与 ``w_ablation`` **Mean rank 行中各 w 列**
     相同的准则（UniSO、GTG ST 与各 w 联合排名后，取平均秩最小的 ``w``）选出最优 ``w``，
     注入虚拟实验键 ``eval_sweep_w_text/<mt>/w_text<w>``（及 ``…_ret``，数值相同供 +returns 列使用），
     并设置 ``DUO_SWEEP_W_PREFIX``，使 ``duo_all_text_prefix`` / ``all_improved`` / nmax multi text 均指向该前缀。
 
-    可用 ``DUO_SWEEP_W_DISABLE=1`` 关闭；``SWEEP_W_MODEL_DIR`` 指定 ``mt_*`` 目录（否则选最新 ``mt_*``）。
+    可用 ``DUO_SWEEP_W_DISABLE=1`` 关闭；``SWEEP_W_MODEL_DIR`` 指定 ``mt_*`` 目录（否则优先固定 CE 目录，见 ``SWEEP_W_DEFAULT_CE_DIRNAME``）。
     返回空串（不向 caption 追加说明；注入成功后控制台仍可打印选用的 ``w``）。
     """
     _swd = _env_compat("DUO_SWEEP_W_DISABLE", "GTGDFGO_SWEEP_W_DISABLE", "")
@@ -674,7 +778,8 @@ def merge_eval_sweep_w_text_into_duo(
         if override:
             model_dir = Path(override).resolve()
         else:
-            model_dir = mod.discover_default_model_dir(sweep_root)
+            pinned_ce = (sweep_root / SWEEP_W_DEFAULT_CE_DIRNAME).resolve()
+            model_dir = pinned_ce if pinned_ce.is_dir() else mod.discover_default_model_dir(sweep_root)
     except (FileNotFoundError, OSError):
         return ""
 
@@ -998,7 +1103,7 @@ LATEX_TASK_ROWS: list[tuple[str, str, str]] = [
     ("gtopx6", "GTOPX 6", "gtopx6_multiple_runs"),
 ]
 
-# 与宽表一致的任务行（``max_ablation`` 等同）；**必须包含 Superconductor**（在 D'Kitty 与 TF Bind 8 之间）。
+# 与宽表一致的任务行（``w_ablation`` 等同）；**必须包含 Superconductor**（在 D'Kitty 与 TF Bind 8 之间）。
 MAX_TEX_TASK_ROWS: list[tuple[str, str, str]] = list(LATEX_TASK_ROWS)
 
 _LATEX_NAME_BY_TASK: dict[str, str] = {t: name for t, name, _ in LATEX_TASK_ROWS}
@@ -1573,379 +1678,13 @@ def column_mean_rank_stats_higher_nan_worst(
     return mu, sd
 
 
-# --- 12 列矩阵：单任务 / 局部 multi(label) / 全部 multi(label) / 局部 multi(text) / 全部 multi(text) × returns ---
+# --- Shared naming helpers (used by w_ablation and CE ablation) ---
 
 RETCOND_INFIX = "_retcond"
 
 
 def _single_exp_name(task: str, use_returns: bool) -> str:
     return f"{task}_multiple_runs{RETCOND_INFIX if use_returns else ''}"
-
-
-def _msub_label_exp_name(task: str, use_returns: bool) -> str:
-    base = TASK_TO_SUBGROUP_MULTITASK_EXP.get(task)
-    if not base:
-        return ""
-    return f"{base}{RETCOND_INFIX if use_returns else ''}"
-
-
-def _mfull_label_exp_name(use_returns: bool) -> str:
-    return f"{FULL_MULTITASK_EXP}{RETCOND_INFIX if use_returns else ''}"
-
-
-def _msub_text_exp_name(task: str, use_returns: bool, text_suffix: str) -> str:
-    """text_suffix 如 ``_textcond`` 或 ``_textcond_mttextonly``（与 run_multitask 中 _rs+_tc+_mto 顺序一致）。"""
-    base = TASK_TO_SUBGROUP_MULTITASK_EXP.get(task)
-    if not base:
-        return ""
-    r = RETCOND_INFIX if use_returns else ""
-    return f"{base}{r}{text_suffix}"
-
-
-def _mfull_text_exp_name(use_returns: bool, text_suffix: str) -> str:
-    r = RETCOND_INFIX if use_returns else ""
-    return f"{FULL_MULTITASK_EXP}{r}{text_suffix}"
-
-
-def _stats_cell_pm(
-    bucket: dict[str, dict[str, dict[str, Any]]], exp: str, task_key: str
-) -> str:
-    if not exp or exp not in bucket:
-        return "—"
-    st = bucket[exp].get(task_key)
-    if not st:
-        return "—"
-    return fmt_pm(st.get("max_mean"), st.get("max_std"))
-
-
-def _stats_cell_pm_latex(
-    bucket: dict[str, dict[str, dict[str, Any]]], exp: str, task_key: str
-) -> str:
-    if not exp or exp not in bucket:
-        return "--"
-    st = bucket[exp].get(task_key)
-    if not st:
-        return "--"
-    return fmt_pm_latex(st.get("max_mean"), st.get("max_std"))
-
-
-def _matrix12_text_cell(
-    bucket: dict[str, dict[str, dict[str, Any]]],
-    task_key: str,
-    use_returns: bool,
-    text_suffixes: Sequence[str],
-    *,
-    full_multitask: bool,
-    full_multitask_text_prefix: str | None = None,
-    latex: bool,
-) -> str:
-    """text：先尝试旧 ``multitask_*_textcond`` 键；再在 ``text_conditioned_only/…/<hyper>/`` 下按任务取最优 hyper。
-    全任务 multitask 时 ``full_multitask_text_prefix`` 为 ``None`` 则用 ``all_<frac_sigma>``；否则用给定基路径（如 ``all_improved_*``）。
-    若设置了 ``DUO_SWEEP_W_PREFIX``（全任务 text 来自 ``eval_sweep_w_text`` 上选出的统一 ``w``），优先使用该前缀。
-    """
-    sweep_p = _env_compat("DUO_SWEEP_W_PREFIX", "GTGDFGO_SWEEP_W_PREFIX", "")
-    if sweep_p and full_multitask:
-        bk = best_duo_exp_for_task(bucket, sweep_p, task_key, use_returns)
-        if bk and bk in bucket:
-            st = bucket[bk].get(task_key)
-            if st is not None:
-                if latex:
-                    return fmt_pm_latex(st.get("max_mean"), st.get("max_std"))
-                return fmt_pm(st.get("max_mean"), st.get("max_std"))
-    for suf in text_suffixes:
-        exp = (
-            _mfull_text_exp_name(use_returns, suf)
-            if full_multitask
-            else _msub_text_exp_name(task_key, use_returns, suf)
-        )
-        if exp and exp in bucket:
-            st = bucket[exp].get(task_key)
-            if st is not None:
-                if latex:
-                    return fmt_pm_latex(st.get("max_mean"), st.get("max_std"))
-                return fmt_pm(st.get("max_mean"), st.get("max_std"))
-    if full_multitask:
-        ap = (
-            full_multitask_text_prefix
-            if full_multitask_text_prefix is not None
-            else duo_all_text_prefix()
-        )
-        k = best_duo_exp_for_task(bucket, ap, task_key, use_returns)
-        if k and k in bucket:
-            st = bucket[k].get(task_key)
-            if st is not None:
-                if latex:
-                    return fmt_pm_latex(st.get("max_mean"), st.get("max_std"))
-                return fmt_pm(st.get("max_mean"), st.get("max_std"))
-    else:
-        sp = duo_subgroup_text_prefix(task_key)
-        if sp:
-            k = best_duo_exp_for_task(bucket, sp, task_key, use_returns)
-            if k and k in bucket:
-                st = bucket[k].get(task_key)
-                if st is not None:
-                    if latex:
-                        return fmt_pm_latex(st.get("max_mean"), st.get("max_std"))
-                    return fmt_pm(st.get("max_mean"), st.get("max_std"))
-    if latex:
-        return "--"
-    return "—"
-
-
-def matrix12_row(
-    task_key: str,
-    gtg: dict[str, dict[str, dict[str, Any]]],
-    duo: dict[str, dict[str, dict[str, Any]]],
-    text_suffixes: Sequence[str],
-    *,
-    uniso_cell: str = "—",
-    latex: bool = False,
-    mfull_unified_key: str | None = None,
-    mfull_unified_key_ret: str | None = None,
-) -> dict[str, Any]:
-    """单行：task + UniSO-T（Improved）+ 14 列 max 的 mean±std（Markdown/CSV 用 —；LaTeX 用 latex=True）。
-    ``mfull_unified_key*``：全任务 label 列共用的实验键（见 :func:`best_duo_exp_full_multitask_unified`）。"""
-
-    def F(bucket: dict[str, dict[str, dict[str, Any]]], exp: str) -> str:
-        if not latex:
-            return _stats_cell_pm(bucket, exp, task_key)
-        return _stats_cell_pm_latex(bucket, exp, task_key)
-
-    def G(
-        bucket: dict[str, dict[str, dict[str, Any]]],
-        prefix: str | None,
-        use_ret: bool,
-    ) -> str:
-        if not prefix:
-            return "--" if latex else "—"
-        fp = duo_full_multitask_prefix()
-        if prefix == fp:
-            uk = mfull_unified_key_ret if use_ret else mfull_unified_key
-            if uk:
-                return F(bucket, uk)
-        bk = best_duo_exp_for_task(bucket, prefix, task_key, use_ret)
-        return F(bucket, bk or "")
-
-    out: dict[str, Any] = {"task": task_key}
-    if latex:
-        out["c00_uniso"] = (
-            uniso_cell
-            if (uniso_cell and uniso_cell not in ("", "—"))
-            else "--"
-        )
-    else:
-        out["c00_uniso"] = (
-            uniso_cell.replace(r" $\pm$ ", " ± ")
-            if uniso_cell and uniso_cell not in ("", "—")
-            else "—"
-        )
-    out["c01_gtg_st"] = F(gtg, _single_exp_name(task_key, False))
-    out["c02_gtg_st_ret"] = F(gtg, _single_exp_name(task_key, True))
-    out["c03_gdf_st"] = G(duo, duo_single_task_prefix(task_key), False)
-    out["c04_gdf_st_ret"] = G(duo, duo_single_task_prefix(task_key), True)
-    out["c05_gdf_msub_l"] = G(
-        duo, duo_subgroup_multitask_prefix(task_key), False
-    )
-    out["c06_gdf_msub_l_ret"] = G(
-        duo, duo_subgroup_multitask_prefix(task_key), True
-    )
-    out["c07_gdf_mfull_l"] = G(duo, duo_full_multitask_prefix(), False)
-    out["c08_gdf_mfull_l_ret"] = G(duo, duo_full_multitask_prefix(), True)
-    out["c09_gdf_msub_t"] = _matrix12_text_cell(
-        duo, task_key, False, text_suffixes, full_multitask=False, latex=latex
-    )
-    out["c10_gdf_msub_t_ret"] = _matrix12_text_cell(
-        duo, task_key, True, text_suffixes, full_multitask=False, latex=latex
-    )
-    out["c11_gdf_mfull_t"] = _matrix12_text_cell(
-        duo,
-        task_key,
-        False,
-        text_suffixes,
-        full_multitask=True,
-        full_multitask_text_prefix=None,
-        latex=latex,
-    )
-    out["c12_gdf_mfull_t_ret"] = _matrix12_text_cell(
-        duo,
-        task_key,
-        True,
-        text_suffixes,
-        full_multitask=True,
-        full_multitask_text_prefix=None,
-        latex=latex,
-    )
-    out["c13_gdf_mfull_t_imp"] = _matrix12_text_cell(
-        duo,
-        task_key,
-        False,
-        text_suffixes,
-        full_multitask=True,
-        full_multitask_text_prefix=duo_all_improved_text_prefix(),
-        latex=latex,
-    )
-    out["c14_gdf_mfull_t_imp_ret"] = _matrix12_text_cell(
-        duo,
-        task_key,
-        True,
-        text_suffixes,
-        full_multitask=True,
-        full_multitask_text_prefix=duo_all_improved_text_prefix(),
-        latex=latex,
-    )
-    return out
-
-
-MATRIX12_COLUMN_KEYS: list[tuple[str, str]] = [
-    ("c00_uniso", "UniSO-T"),
-    ("c01_gtg_st", "GTG 单任务"),
-    ("c02_gtg_st_ret", "GTG 单任务+ret"),
-    ("c03_gdf_st", "DUO 单任务"),
-    ("c04_gdf_st_ret", "DUO 单任务+ret"),
-    ("c05_gdf_msub_l", "DUO 局部multi(label)"),
-    ("c06_gdf_msub_l_ret", "DUO 局部multi(label)+ret"),
-    ("c07_gdf_mfull_l", "DUO 全部multi(label)"),
-    ("c08_gdf_mfull_l_ret", "DUO 全部multi(label)+ret"),
-    ("c09_gdf_msub_t", "DUO 局部multi(text)"),
-    ("c10_gdf_msub_t_ret", "DUO 局部multi(text)+ret"),
-    ("c11_gdf_mfull_t", "DUO 全部multi(text) all"),
-    ("c12_gdf_mfull_t_ret", "DUO 全部multi(text) all+ret"),
-    ("c13_gdf_mfull_t_imp", "DUO 全部multi(text) all_improved"),
-    ("c14_gdf_mfull_t_imp_ret", "DUO 全部multi(text) all_improved+ret"),
-]
-
-
-def build_matrix12_rows(
-    gtg: dict[str, dict[str, dict[str, Any]]],
-    duo: dict[str, dict[str, dict[str, Any]]],
-    text_suffixes: Sequence[str],
-    uniso_by_task: dict[str, str],
-) -> list[dict[str, Any]]:
-    fp = duo_full_multitask_prefix()
-    task_keys_full = [t for t, _, _ in MAX_TEX_TASK_ROWS]
-    ku = best_duo_exp_full_multitask_unified(
-        duo, fp, task_keys_full, False
-    )
-    kur = best_duo_exp_full_multitask_unified(
-        duo, fp, task_keys_full, True
-    )
-    rows: list[dict[str, Any]] = []
-    for t in TASK_ORDER:
-        if t not in TASK_TO_SUBGROUP_MULTITASK_EXP:
-            continue
-        u = uniso_by_task.get(t, "")
-        ucell = u if u else "—"
-        rows.append(
-            matrix12_row(
-                t,
-                gtg,
-                duo,
-                text_suffixes,
-                uniso_cell=ucell,
-                mfull_unified_key=ku,
-                mfull_unified_key_ret=kur,
-            )
-        )
-    return rows
-
-
-def write_matrix12_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-    if not rows:
-        path.write_text("", encoding="utf-8")
-        return
-    fieldnames = ["task"] + [k for k, _ in MATRIX12_COLUMN_KEYS]
-    with path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        for row in rows:
-            w.writerow({fn: row.get(fn, "") for fn in fieldnames})
-
-
-def write_matrix12_latex(
-    path: Path,
-    caption: str,
-    label: str,
-    gtg: dict[str, dict[str, dict[str, Any]]],
-    duo: dict[str, dict[str, dict[str, Any]]],
-    text_suffixes: Sequence[str],
-    uniso_by_task: dict[str, str],
-) -> None:
-    """与 ``write_latex`` 相同版式：含 UniSO-T 列与 Mean rank 行。"""
-    lines = [
-        r"% Requires: \usepackage{booktabs}, \usepackage{graphicx}, \usepackage{xcolor}.",
-        r"% Per row: best / runner-up across UniSO-T + 14 method columns.",
-        r"\begin{table*}[t!]",
-        rf"\caption{{{caption}}}",
-        r"\vspace{0.3em}",
-        r"\centering",
-        r"\resizebox{\linewidth}{!}{",
-        r"\begin{tabular}{l|*{15}{c}}",
-        r"\toprule",
-        r"Task & \shortstack{UniSO-T} & \shortstack{GTG\\ST} & \shortstack{GTG\\ST+r} & \shortstack{DUO\\ST} & \shortstack{DUO\\ST+r} & "
-        r"\shortstack{DUO\\subL} & \shortstack{DUO\\subL+r} & \shortstack{DUO\\fullL} & \shortstack{DUO\\fullL+r} & "
-        r"\shortstack{DUO\\subT} & \shortstack{DUO\\subT+r} & \shortstack{DUO\\fullT\\,(all)} & \shortstack{DUO\\fullT\\,(all)+r} & "
-        r"\shortstack{DUO\\fullT\\,(imp)} & \shortstack{DUO\\fullT\\,(imp)+r} \\",
-        r"\midrule",
-    ]
-    task_keys_list = [t for t in TASK_ORDER if t in TASK_TO_SUBGROUP_MULTITASK_EXP]
-    n_tasks = len(task_keys_list)
-    means_m = np.full((n_tasks, len(MATRIX12_COLUMN_KEYS)), np.nan, dtype=np.float64)
-    _wl_fp = duo_full_multitask_prefix()
-    _wl_ku = best_duo_exp_full_multitask_unified(
-        duo,
-        _wl_fp,
-        [t for t, _, _ in MAX_TEX_TASK_ROWS],
-        False,
-    )
-    _wl_kur = best_duo_exp_full_multitask_unified(
-        duo,
-        _wl_fp,
-        [t for t, _, _ in MAX_TEX_TASK_ROWS],
-        True,
-    )
-    for ti, task_key in enumerate(task_keys_list):
-        u = uniso_by_task.get(task_key, "")
-        mr = matrix12_row(
-            task_key,
-            gtg,
-            duo,
-            text_suffixes,
-            uniso_cell=u if u else "—",
-            latex=True,
-            mfull_unified_key=_wl_ku,
-            mfull_unified_key_ret=_wl_kur,
-        )
-        keys = [k for k, _ in MATRIX12_COLUMN_KEYS]
-        cells = [mr[k] for k in keys]
-        cells = rank_colorize_latex_cells(cells)
-        row_name = latex_task_display_name(task_key)
-        lines.append(" & ".join([row_name] + cells) + r" \\")
-        for j, k in enumerate(keys):
-            v = parse_mean_from_text_cell(mr[k])
-            if v is None:
-                v = _parse_mean_from_latex_cell(mr[k])
-            if v is not None:
-                means_m[ti, j] = v
-    mu_r, sd_r = column_mean_rank_stats(means_m)
-    rank_cells = [fmt_mean_pm_rank(mu_r[j], sd_r[j]) for j in range(len(MATRIX12_COLUMN_KEYS))]
-    rank_cells = rank_colorize_latex_mean_rank_row(rank_cells)
-    lines.extend(
-        [
-            r"\midrule",
-            "Mean rank & " + " & ".join(rank_cells) + r" \\",
-            r"\bottomrule",
-            r"\end{tabular}",
-            r"}",
-        ]
-    )
-    lines.extend(
-        [
-            rf"\label{{{label}}}",
-            r"\end{table*}",
-            "",
-        ]
-    )
-    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def d_best_cell(
@@ -2412,14 +2151,24 @@ DUO_RESULTS = _PROJECT_ROOT / "results"
 GTG_RESULTS = _PROJECT_ROOT.parent / "GTG" / "results"
 ANALYSIS_TABLE_DIR = _PROJECT_ROOT / "results" / "analysis_table"
 OUTPUT_BASE = ANALYSIS_TABLE_DIR / "max_short"
-MATRIX12_BASE = ANALYSIS_TABLE_DIR / "max_extended"
 NMAX_TEX = ANALYSIS_TABLE_DIR / "nmax.tex"
+REAL_BASE = ANALYSIS_TABLE_DIR / "real"
 TRAJECTORY_HYPER_TEX = ANALYSIS_TABLE_DIR / "trajectory_hyperparams.tex"
 UNISO_RESULT_TEX = ANALYSIS_TABLE_DIR / "uniso_result.tex"
 UNISO_NRESULT_TEX = ANALYSIS_TABLE_DIR / "uniso_nresult.tex"
-# run_multitask：仅 --use_text_condition → …_textcond；再加 --multitask_text_only → …_textcond_mttextonly。优先匹配后者。
-MATRIX12_TEXT_SUFFIXES: tuple[str, ...] = ("_textcond_mttextonly", "_textcond")
 D_BEST_JSON = ANALYSIS_TABLE_DIR / "d_best.json"
+W_ABLATION_TEX = ANALYSIS_TABLE_DIR / "w_ablation.tex"
+W_ABLATION_CSV = ANALYSIS_TABLE_DIR / "w_ablation.csv"
+CE_ABLATION_TEX = ANALYSIS_TABLE_DIR / "ce_ablation.tex"
+CE_ABLATION_CSV = ANALYSIS_TABLE_DIR / "ce_ablation.csv"
+
+# 固定 sweep-w 的两个目录名（相对 results/eval_sweep_w_text/）
+SWEEP_W_DEFAULT_BASE_DIRNAME = (
+    "mt_911054c35daad7e0_textcond_mttextonly_tsbias0.5_lr0.0002"
+)
+SWEEP_W_DEFAULT_CE_DIRNAME = (
+    "mt_911054c35daad7e0_textcond_mttextonly_ce0.005_tsbias0.5_lr0.0002"
+)
 
 LATEX_CAPTION = (
     "Un-normalized \\texttt{max\\_ep\\_reward} (mean $\\pm$ std over runs): "
@@ -2428,12 +2177,6 @@ LATEX_CAPTION = (
     "$\\mathcal{D}$(best) uses offline train subset optima (optional overrides from \\texttt{d\\_best.json})."
 )
 LATEX_LABEL = "tab:gtg-duo-eval"
-LATEX_CAPTION_MATRIX12 = (
-    "Un-normalized \\texttt{max\\_ep\\_reward} (mean $\\pm$ std): UniSO-T with GTG and DUO columns "
-    "(single-task and subgroup vs full multitask; labels vs text; $\\pm$ returns). "
-    "Mean rank across the fifteen method columns."
-)
-LATEX_LABEL_MATRIX12 = "tab:gtg-duo-eval-m12"
 LATEX_CAPTION_NMAX = (
     "Normalized Design-Bench scores (baselines aligned with \\texttt{uniso\\_nresult.tex}); "
     "DUO reports multitask text-conditioned \\texttt{nmax\\_ep\\_reward} (mean $\\pm$ std). "
@@ -2452,8 +2195,8 @@ LATEX_CAPTION_ALL = (
 LATEX_LABEL_ALL = "tab:gtg-duo-eval-all-text"
 
 
-def _run_sweep_w_ablation() -> None:
-    """Write ``results/analysis_table/max_ablation.{tex,csv}`` from ``eval_sweep_w_text`` (see ``make_sweep_w_ablation_table.py``)."""
+def _run_w_ablation() -> None:
+    """Write ``results/analysis_table/w_ablation.{tex,csv}`` from ``eval_sweep_w_text`` (see ``make_sweep_w_ablation_table.py``)."""
     import importlib.util
 
     p = Path(__file__).resolve().parent / "make_sweep_w_ablation_table.py"
@@ -2462,17 +2205,271 @@ def _run_sweep_w_ablation() -> None:
     assert spec.loader is not None
     spec.loader.exec_module(mod)
     sweep_root = DUO_RESULTS / "eval_sweep_w_text"
-    override = os.environ.get("SWEEP_W_MODEL_DIR", "").strip()
-    if override:
-        root = Path(override).resolve()
-    else:
+    root = (sweep_root / SWEEP_W_DEFAULT_BASE_DIRNAME).resolve()
+    if not root.is_dir():
         root = mod.discover_default_model_dir(sweep_root)
-    mod.write_max_ablation(root, gtg_results=GTG_RESULTS)
+    mod.write_w_ablation(root, gtg_results=GTG_RESULTS)
+
+
+def write_ce_ablation(
+    out_tex: Path,
+    out_csv: Path,
+    base_model_dir: Path,
+    ce_model_dir: Path,
+) -> None:
+    """
+    CE ablation: compare two sweep-w directories (max only).
+
+    Each column selects its own best ``w`` using the same criterion as ``w_ablation``:
+    ranks are assigned per task jointly over (UniSO, GTG ST, all w), then averaged across tasks
+    to pick the minimal mean-rank ``w``.
+
+    Output is a simple 2-column table with mean±std and a Mean rank row (no coloring).
+    """
+    import importlib.util
+
+    mod_path = Path(__file__).resolve().parent / "make_sweep_w_ablation_table.py"
+    spec = importlib.util.spec_from_file_location("_sw_ce", mod_path)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+
+    base_model_dir = base_model_dir.resolve()
+    ce_model_dir = ce_model_dir.resolve()
+    out_tex.parent.mkdir(parents=True, exist_ok=True)
+
+    def _collect_one(model_dir: Path) -> tuple[float, dict[tuple[str, float], list[float]]]:
+        values, w_list = mod.collect_sweep_max_by_task_from_logs(model_dir)
+        if not w_list:
+            raise FileNotFoundError(f"no eval_w*.log under {model_dir}")
+        best_w = mod.sweep_best_w_match_max_ablation(model_dir, GTG_RESULTS)
+        if best_w is None:
+            best_w = w_list[0]
+        return float(best_w), values
+
+    w_base, v_base = _collect_one(base_model_dir)
+    w_ce, v_ce = _collect_one(ce_model_dir)
+
+    # rows: MAX_TEX_TASK_ROWS order; show max(mean±std) pooled over seeds at best w.
+    rows_csv: list[list[str]] = []
+    rows_csv.append(["Task", "base", "ce0.005"])
+
+    lines_tex: list[str] = []
+    lines_tex.append(r"% Requires: \usepackage{booktabs}.")
+    lines_tex.append(r"\begin{table}[t]")
+    lines_tex.append(
+        r"\caption{CE ablation on multitask text-only: max\_ep\_reward at each column's best $w$ (mean $\pm$ std over seeds).}"
+    )
+    lines_tex.append(r"\label{tab:ce-ablation}")
+    lines_tex.append(r"\centering")
+    lines_tex.append(r"\small")
+    lines_tex.append(r"\begin{tabular}{lcc}")
+    lines_tex.append(r"\toprule")
+    lines_tex.append(rf"Task & base ($w={w_base:g}$) & ce0.005 ($w={w_ce:g}$) \\")
+    lines_tex.append(r"\midrule")
+
+    means_m = np.full((len(MAX_TEX_TASK_ROWS), 2), np.nan, dtype=np.float64)
+    for i, (task_key, latex_name, _exp_name) in enumerate(MAX_TEX_TASK_ROWS):
+        xs_b = v_base.get((task_key, w_base), [])
+        xs_c = v_ce.get((task_key, w_ce), [])
+        if xs_b:
+            mu_b, sd_b = mean_std([float(x) for x in xs_b])
+            cell_b = fmt_pm_latex(mu_b, sd_b)
+            means_m[i, 0] = float(mu_b)
+        else:
+            cell_b = "--"
+        if xs_c:
+            mu_c, sd_c = mean_std([float(x) for x in xs_c])
+            cell_c = fmt_pm_latex(mu_c, sd_c)
+            means_m[i, 1] = float(mu_c)
+        else:
+            cell_c = "--"
+
+        lines_tex.append(f"{latex_name} & {cell_b} & {cell_c} \\\\")
+        rows_csv.append(
+            [
+                latex_name,
+                cell_b.replace("$", "").replace(r"\pm", "±"),
+                cell_c.replace("$", "").replace(r"\pm", "±"),
+            ]
+        )
+
+    mu_r, sd_r = column_mean_rank_stats(means_m)
+    mean_rank_cells = [fmt_mean_pm_rank(mu_r[j], sd_r[j]) for j in range(2)]
+    lines_tex.append(r"\midrule")
+    lines_tex.append("Mean rank & " + " & ".join(mean_rank_cells) + r" \\")
+    lines_tex.append(r"\bottomrule")
+    lines_tex.append(r"\end{tabular}")
+    lines_tex.append(r"\end{table}")
+    lines_tex.append("")
+
+    out_tex.write_text("\n".join(lines_tex), encoding="utf-8")
+
+    # CSV mean rank row (no LaTeX math).
+    rows_csv.append(
+        [
+            "Mean rank",
+            mean_rank_cells[0].replace("$", "").replace(r"\pm", "±"),
+            mean_rank_cells[1].replace("$", "").replace(r"\pm", "±"),
+        ]
+    )
+    with out_csv.open("w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerows(rows_csv)
+
+
+def _collect_best_real_world_nmax(
+    results_root: Path,
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """
+    Scan ``results/real_task/{zero_shot,few_shot}/**/run*_seed*/evaluate.log`` and aggregate
+    normalized metric ``nmax_ep_reward`` per task.
+
+    Returns:
+      out[mode][task] = {
+        "nmax_mean": float, "nmax_std": float, "runs": int,
+        "best_hyper": str, "best_hyper_mean": float,
+      }
+    where ``best_hyper`` is the relative folder under ``<task>_frac*_sigma*/`` (few-shot may
+    contain an extra pool folder like ``fs_k128_worst/``).
+    """
+    root = results_root / "real_task"
+    if not root.is_dir():
+        return {}
+
+    # mode -> task -> hyper_rel -> [nmax]
+    buckets: dict[str, dict[str, dict[str, list[float]]]] = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(list))
+    )
+    for evaluate_log in root.rglob("evaluate.log"):
+        if not _ALL_RUN_DIR_RE.match(evaluate_log.parent.name):
+            continue
+        # expected layout:
+        #   real_task/<mode>/<task>_frac*_sigma*/<hyper...>/run*/evaluate.log
+        # mode is the folder right under real_task/
+        try:
+            rel = evaluate_log.relative_to(root)
+        except ValueError:
+            continue
+        parts = rel.parts
+        if len(parts) < 5:
+            continue
+        mode = parts[0]
+        task_dir = parts[1]
+        task = task_dir.split("_frac", 1)[0].strip()
+        if not task:
+            continue
+        # hyper id = join(parts[2:-2]) to drop run*/evaluate.log
+        hyper_rel = "/".join(parts[2:-2]).strip() or "."
+
+        d = parse_evaluate_log(evaluate_log)
+        if task not in d:
+            # Some real-world logs might be plain (no [task] prefix). Fall back to first entry.
+            if len(d) == 1:
+                (_, v) = next(iter(d.items()))
+            else:
+                continue
+        else:
+            v = d[task]
+        nmax = float(v[1])
+        if not np.isfinite(nmax):
+            continue
+        buckets[mode][task][hyper_rel].append(nmax)
+
+    out: dict[str, dict[str, dict[str, Any]]] = {}
+    for mode, by_task in buckets.items():
+        out[mode] = {}
+        for task, by_hyper in by_task.items():
+            best_h = ""
+            best_mu = float("-inf")
+            best_sd = float("nan")
+            best_n = 0
+            for h, vals in by_hyper.items():
+                mu, sd = mean_std(vals)
+                if not np.isfinite(mu):
+                    continue
+                if mu > best_mu:
+                    best_mu, best_sd, best_n, best_h = mu, sd, len(vals), h
+            if best_h:
+                out[mode][task] = {
+                    "nmax_mean": best_mu,
+                    "nmax_std": best_sd,
+                    "runs": best_n,
+                    "best_hyper": best_h,
+                    "best_hyper_mean": best_mu,
+                }
+    return out
+
+
+def write_real_world_tables(
+    out_base: Path,
+    results_root: Path,
+    caption: str = "Real-world tasks (normalized score) for zero-shot and few-shot.",
+    label: str = "tab:duo-real-world",
+) -> None:
+    """
+    Write ``real.csv`` + ``real.tex`` under ``results/analysis_table/``.
+
+    CSV columns:
+      task, zero_shot_nmax_mean, zero_shot_nmax_std, few_shot_nmax_mean, few_shot_nmax_std,
+      zero_shot_best_hyper, few_shot_best_hyper
+    """
+    agg = _collect_best_real_world_nmax(results_root)
+    zs = agg.get("zero_shot", {})
+    fs = agg.get("few_shot", {})
+
+    tasks = [t for t in REAL_TASK_ORDER if t in zs or t in fs]
+    # append any extra tasks found
+    extra = sorted((set(zs) | set(fs)) - set(tasks))
+    tasks.extend(extra)
+
+    rows: list[dict[str, Any]] = []
+    for t in tasks:
+        z = zs.get(t)
+        f = fs.get(t)
+        rows.append(
+            {
+                "task": t,
+                "zero_shot_nmax_mean": "" if z is None else z.get("nmax_mean", ""),
+                "zero_shot_nmax_std": "" if z is None else z.get("nmax_std", ""),
+                "few_shot_nmax_mean": "" if f is None else f.get("nmax_mean", ""),
+                "few_shot_nmax_std": "" if f is None else f.get("nmax_std", ""),
+                "zero_shot_best_hyper": "" if z is None else z.get("best_hyper", ""),
+                "few_shot_best_hyper": "" if f is None else f.get("best_hyper", ""),
+                "zero_shot_runs": "" if z is None else z.get("runs", ""),
+                "few_shot_runs": "" if f is None else f.get("runs", ""),
+            }
+        )
+
+    out_base.parent.mkdir(parents=True, exist_ok=True)
+    write_csv(out_base.with_suffix(".csv"), rows)
+
+    # Minimal LaTeX table (no colorization; normalized scores may be negative depending on task wrapper).
+    lines: list[str] = []
+    lines.append(r"\begin{table}[t]")
+    lines.append(r"\centering")
+    lines.append(r"\small")
+    lines.append(rf"\caption{{{caption}}}")
+    lines.append(rf"\label{{{label}}}")
+    lines.append(r"\begin{tabular}{lcc}")
+    lines.append(r"\toprule")
+    lines.append(r"Task & Zero-shot (nmax) & Few-shot (nmax) \\")
+    lines.append(r"\midrule")
+    for r in rows:
+        t = str(r["task"])
+        t_esc = t.replace("_", r"\_")
+        zs_cell = fmt_pm_latex(r["zero_shot_nmax_mean"], r["zero_shot_nmax_std"])
+        fs_cell = fmt_pm_latex(r["few_shot_nmax_mean"], r["few_shot_nmax_std"])
+        lines.append(rf"{t_esc} & {zs_cell} & {fs_cell} \\")
+    lines.append(r"\bottomrule")
+    lines.append(r"\end{tabular}")
+    lines.append(r"\end{table}")
+    out_base.with_suffix(".tex").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main(mode: str = "all") -> None:
-    if mode == "sweep_w":
-        _run_sweep_w_ablation()
+    if mode == "w_ablation":
+        _run_w_ablation()
         return
 
     d_best_overrides: dict[str, float] = {}
@@ -2492,7 +2489,6 @@ def main(mode: str = "all") -> None:
         print(f"eval_sweep_w_text: DUO multitask text uses w={_wv} under {_swp}")
 
     do_short = mode in ("all", "short")
-    do_full = mode in ("all", "full")
     do_final = mode in ("all", "final")
 
     if do_short:
@@ -2524,14 +2520,36 @@ def main(mode: str = "all") -> None:
             caption=LATEX_CAPTION_NMAX,
             label=LATEX_LABEL_NMAX,
         )
+        write_real_world_tables(
+            REAL_BASE,
+            DUO_RESULTS,
+            caption="Real-world tasks (normalized score) for zero-shot and few-shot. "
+            "Each cell is mean $\\pm$ std over seeds for the best hyperfolder under results/real_task.",
+            label="tab:duo-real-world",
+        )
         print(f"Wrote {out_base.with_suffix('.csv')}")
         print(f"Wrote {tex_path}")
         write_latex_trajectory_hyperparams(TRAJECTORY_HYPER_TEX)
         print(f"Wrote {NMAX_TEX}")
+        print(f"Wrote {REAL_BASE.with_suffix('.tex')}")
         print(f"Wrote {TRAJECTORY_HYPER_TEX}")
         print(
             f"DUO experiments: {len(duo)}, GTG experiments: {len(gtg)}, comparison rows: {len(rows)}"
         )
+        # w_ablation + ce_ablation are small and cheap; keep in short/all.
+        try:
+            _run_w_ablation()
+        except Exception as e:
+            print(f"[warn] w_ablation skipped: {e}")
+        try:
+            write_ce_ablation(
+                CE_ABLATION_TEX,
+                CE_ABLATION_CSV,
+                DUO_RESULTS / "eval_sweep_w_text" / SWEEP_W_DEFAULT_BASE_DIRNAME,
+                DUO_RESULTS / "eval_sweep_w_text" / SWEEP_W_DEFAULT_CE_DIRNAME,
+            )
+        except Exception as e:
+            print(f"[warn] ce_ablation skipped: {e}")
 
     if do_final:
         all_base = TEXT_CONDITIONED_RESULT_ANALYSIS_BASE
@@ -2548,28 +2566,6 @@ def main(mode: str = "all") -> None:
         )
         print(f"Wrote {all_base.with_suffix('.tex')}")
 
-    if do_full:
-        mbase = MATRIX12_BASE
-        mrows = build_matrix12_rows(
-            gtg, duo, MATRIX12_TEXT_SUFFIXES, uniso_by_task
-        )
-        mbase.parent.mkdir(parents=True, exist_ok=True)
-        write_matrix12_csv(mbase.with_suffix(".csv"), mrows)
-        write_matrix12_latex(
-            mbase.with_suffix(".tex"),
-            LATEX_CAPTION_MATRIX12,
-            LATEX_LABEL_MATRIX12,
-            gtg,
-            duo,
-            MATRIX12_TEXT_SUFFIXES,
-            uniso_by_task,
-        )
-        print(f"Wrote {mbase.with_suffix('.csv')}")
-        print(f"Wrote {mbase.with_suffix('.tex')}")
-        print(
-            f"Matrix12 rows: {len(mrows)} (tasks with subgroup multitask mapping)"
-        )
-
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -2577,15 +2573,14 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--mode",
-        choices=("all", "short", "full", "final", "sweep_w"),
+        choices=("all", "short", "final", "w_ablation"),
         default="all",
         help=(
             "Which outputs to generate: "
             "short = analysis_table/max_short (wide CSV+TeX), nmax.tex, and trajectory_hyperparams.tex; "
-            "full = analysis_table/max_extended (matrix CSV+TeX); "
             "final = analysis_table/text_conditioned_result_analysis (DUO: one column per hyper under all_frac…); "
-            "sweep_w = analysis_table/max_ablation from eval_sweep_w_text (optional SWEEP_W_MODEL_DIR); "
-            "all = short + full + final (default). Text-CFG multi-w comparison is max_ablation.tex (not max.tex)."
+            "w_ablation = analysis_table/w_ablation from eval_sweep_w_text (pinned mt dir when available); "
+            "all = short + final (default)."
         ),
     )
     return p.parse_args()

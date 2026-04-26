@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 打印与 train.py / evaluate.py 中 ``RUN.prefix`` 一致的中间目录名，例如
-``mt_911054c35daad7e0_textcond_mttextonly``、可选 ``--hyper_suffix``（如 ``_ce0.2``）、可选 ``_tsbias*`` / ``_msnr*``、
+``mt_911054c35daad7e0_textcond_mttextonly``、可选 ``--hyper_suffix``（如 ``_ce0.2``）、可选 ``_tsbias*`` / ``_msnr*``、可选 ``_lr*``（显式 ``--learning_rate``）、
 最后非 32 维时的 ``_latent{d}``（顺序与 train/eval 的 multitask ``RUN.prefix`` 一致）。
 
 可用于核对 ``trained_models/multi_*`` 下与 ``train.py``/``evaluate.py`` 一致的中间目录名（如手工对照路径）。
@@ -57,7 +57,8 @@ _bootstrap_diffuser_utils_light()
 
 from diffuser.utils.multitask_canon import (
     canonical_train_tasks_csv,
-    diffusion_train_path_suffix,
+    diffusion_train_path_suffix_v2,
+    learning_rate_path_suffix,
     multitask_text_only_path_infix,
     returns_cond_path_infix,
     text_cond_path_infix,
@@ -100,6 +101,24 @@ def main() -> None:
         default=0.0,
         help="Match train.py; non-zero appends _msnr… before _latent{d}.",
     )
+    p.add_argument(
+        "--train_half_timestep_bias_frac",
+        type=float,
+        default=0.7,
+        help="Match train.py; stage split fraction (default 0.7).",
+    )
+    p.add_argument(
+        "--train_half_lr_mult",
+        type=float,
+        default=1.0,
+        help="Match train.py; stage2 LR multiplier (default 1.0 disables).",
+    )
+    p.add_argument(
+        "--learning_rate",
+        type=float,
+        default=None,
+        help="Match train.py when set; appends _lr… after _tsbias/_msnr, before _latent{d}.",
+    )
     args = p.parse_args()
 
     train_tasks = canonical_train_tasks_csv(args.train_tasks)
@@ -129,12 +148,15 @@ def main() -> None:
     hyper = multitask_checkpoint_hyper_dir(sig, _ret, _txt, _mto)
     if args.hyper_suffix:
         hyper = f"{hyper}{args.hyper_suffix}"
-    _dtrain = diffusion_train_path_suffix(
+    _dtrain = diffusion_train_path_suffix_v2(
         float(args.train_timestep_bias_power),
         float(args.train_loss_min_snr_gamma),
+        float(args.train_half_timestep_bias_frac),
+        float(args.train_half_lr_mult),
     )
     if _dtrain:
         hyper = f"{hyper}{_dtrain}"
+    hyper = f"{hyper}{learning_rate_path_suffix(args.learning_rate)}"
     _ld = int(args.latent_dim)
     if _ld != 32:
         hyper = f"{hyper}_latent{_ld}"

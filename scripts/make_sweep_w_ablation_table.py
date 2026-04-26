@@ -7,14 +7,15 @@
 
 兼容旧布局：``<mt_*>/run<N>_seed<SEED>/``（无平铺 ``seed*`` 时仍扫描）、以及 ``run_<时间戳>/seed*/``。
 
-输出：``results/analysis_table/max_ablation.tex``、``max_ablation.csv``。
+输出：``results/analysis_table/w_ablation.tex``、``w_ablation.csv``。
 
 用法::
 
     python scripts/make_sweep_w_ablation_table.py
     python scripts/make_sweep_w_ablation_table.py --model-dir results/eval_sweep_w_text/mt_xxx_textcond_mttextonly
 
-默认在 ``results/eval_sweep_w_text/`` 下选取 **最近修改的** ``mt_*`` 目录；若无则选含 ``seed*/eval_w*.log`` 的最新实验目录；
+默认优先使用固定目录 ``mt_911054c35daad7e0_textcond_mttextonly_tsbias0.5_lr0.0002``（若存在）；
+否则在 ``results/eval_sweep_w_text/`` 下选取 **最近修改的** ``mt_*`` 目录；若无则选含 ``seed*/eval_w*.log`` 的最新实验目录；
 再否则回退到最新 ``run_*`` 旧目录。
 """
 from __future__ import annotations
@@ -31,6 +32,9 @@ from typing import Any, Sequence
 import numpy as np
 
 _ROOT = Path(__file__).resolve().parent.parent
+_DEFAULT_W_ABLATION_DIRNAME = (
+    "mt_911054c35daad7e0_textcond_mttextonly_tsbias0.5_lr0.0002"
+)
 
 
 def _load_analyze():
@@ -292,6 +296,9 @@ def discover_default_model_dir(sweep_root: Path) -> Path:
     """优先 ``mt_*``；其次含 ``seed*/eval_w*.log`` 的 sweep 归档目录；否则 ``run_<时间戳>`` 旧目录。"""
     if not sweep_root.is_dir():
         raise FileNotFoundError(f"未找到: {sweep_root}")
+    pinned = (sweep_root / _DEFAULT_W_ABLATION_DIRNAME).resolve()
+    if pinned.is_dir():
+        return pinned
     mt_dirs = sorted(
         [p for p in sweep_root.iterdir() if p.is_dir() and p.name.startswith("mt_")],
         key=lambda p: p.stat().st_mtime,
@@ -334,14 +341,14 @@ def discover_default_model_dir(sweep_root: Path) -> Path:
     )
 
 
-def write_max_ablation(
+def write_w_ablation(
     model_dir: Path,
     out_tex: Path | None = None,
     out_csv: Path | None = None,
     gtg_results: Path | None = None,
 ) -> None:
-    out_tex = out_tex or (ae.ANALYSIS_TABLE_DIR / "max_ablation.tex")
-    out_csv = out_csv or (ae.ANALYSIS_TABLE_DIR / "max_ablation.csv")
+    out_tex = out_tex or (ae.ANALYSIS_TABLE_DIR / "w_ablation.tex")
+    out_csv = out_csv or (ae.ANALYSIS_TABLE_DIR / "w_ablation.csv")
     gtg_results = gtg_results or (_ROOT.parent / "GTG" / "results")
 
     model_dir = model_dir.resolve()
@@ -379,7 +386,7 @@ def write_max_ablation(
 
     rows_tex: list[str] = [
         r"% Requires: \usepackage{booktabs}, \usepackage{graphicx}, \usepackage{xcolor}.",
-        r"% max_ablation: pooled over all seed* (and legacy run*_seed* / run_*/seed*) under model dir; see scripts/make_sweep_w_ablation_table.py",
+        r"% w_ablation: pooled over all seed* (and legacy run*_seed* / run_*/seed*) under model dir; see scripts/make_sweep_w_ablation_table.py",
         r"\begin{table*}[t!]",
         rf"\caption{{Text CFG ablation (\texttt{{condition\_guidance\_w\_text}}): mean $\pm$ std of \texttt{{max\_ep\_reward}} pooled over all \texttt{{seed*}} runs under \texttt{{{rel_tex}}}. "
         r"Baselines: $\mathcal{D}$(best), UniSO-T Improved, GTG ST.}}",
@@ -435,7 +442,7 @@ def write_max_ablation(
             r"\bottomrule",
             r"\end{tabular}",
             r"}",
-            rf"\label{{tab:max-ablation-sweep-w}}",
+            rf"\label{{tab:w-ablation-sweep-w}}",
             r"\end{table*}",
             "",
         ]
@@ -455,7 +462,7 @@ def write_max_ablation(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="max_ablation：sweep_w 跨 seed 聚合")
+    ap = argparse.ArgumentParser(description="w_ablation：sweep_w 跨 seed 聚合")
     ap.add_argument(
         "--sweep-root",
         type=Path,
@@ -481,7 +488,7 @@ def main() -> None:
     else:
         root = discover_default_model_dir(args.sweep_root.resolve())
 
-    write_max_ablation(root, gtg_results=args.gtg_results)
+    write_w_ablation(root, gtg_results=args.gtg_results)
 
 
 if __name__ == "__main__":

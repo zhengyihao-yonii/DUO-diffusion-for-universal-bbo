@@ -1,4 +1,5 @@
 Task: GTOPX 6
+Type: continuous
 Name: Rosetta
 Description: Simulation of multi-gravity-assisted space missions to Comet 67P/Churyumov-Gerasimenko
 Objective: to minimize the total velocity change required throughout the mission

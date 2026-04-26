@@ -35,6 +35,7 @@ from dataset_utils import TASKNAME2DIM, MultiDatasetLoader, save_dataset_info, l
 from diffuser.utils.vae_layout import (
     distance_matrix_cache_filename,
     generated_vae_info_filename,
+    multitask_generated_dim_latent_suffix,
     per_task_latent_train_filename,
     raw_train_pkl_path_from_latent_path,
     vae_state_pt_filename,
@@ -68,6 +69,7 @@ from diffuser.datasets.real_world_fewshot import (
 )
 from diffuser.utils.soo_gtopx import TASKNAME_TO_VAR_NUM, load_gtopx_offline_arrays, is_gtopx_task
 from diffuser.utils.construct_runtime import pairwise_l2_distance_matrix
+from diffuser.utils.multitask_canon import canonical_train_tasks_csv, multitask_path_token
 
 
 def _generated_task_dir(task_name: str, frac: float, sigma: float) -> str:
@@ -287,10 +289,11 @@ def construct_trajectories(
         else None
     )
 
-    # 与 train/evaluate 中 generated_datasets 路径一致；USE_RETURNS 只改 checkpoint，不改此目录
+    # 与 train/evaluate / train_vae 一致：latent≠32 时用 ``_dim{fixed}_latent{lat}`` 与 VAE 权重目录对齐
     if is_multitask:
-        tasks_str = "_".join(tasks_list)
-        output_dir_early = f"./generated_datasets/multi_{tasks_str}_frac{frac}_sigma{sigma}"
+        _multi_tok = multitask_path_token(canonical_train_tasks_csv(",".join(tasks_list)))
+        _gds_suf = multitask_generated_dim_latent_suffix(fixed_dim, _latent)
+        output_dir_early = f"./generated_datasets/multi_{_multi_tok}_frac{frac}_sigma{sigma}{_gds_suf}"
     else:
         output_dir_early = f"./generated_datasets/{tasks_list[0]}_frac{frac}_sigma{sigma}"
 
@@ -540,8 +543,9 @@ def construct_trajectories(
     
     # 多任务：multi_* 仅放 mixed_*.p 与 vae_info.p；各任务距离矩阵与轨迹在 {task}_frac_sigma/ 下。
     if is_multitask:
-        tasks_str = "_".join(tasks_list)
-        multi_dir = f"./generated_datasets/multi_{tasks_str}_frac{frac}_sigma{sigma}"
+        _multi_tok = multitask_path_token(canonical_train_tasks_csv(",".join(tasks_list)))
+        _gds_suf = multitask_generated_dim_latent_suffix(fixed_dim, _latent)
+        multi_dir = f"./generated_datasets/multi_{_multi_tok}_frac{frac}_sigma{sigma}{_gds_suf}"
         output_dir = multi_dir
         os.makedirs(multi_dir, exist_ok=True)
     else:
@@ -778,6 +782,12 @@ def construct_trajectories(
         mixed_output_path = os.path.join(
             multi_dir, multitask_mixed_basename(mt_sig, _latent)
         )
+        _mw = int(mixed_our_data.shape[-1])
+        if _mw != int(_latent):
+            raise RuntimeError(
+                f"混合轨迹 observation 宽度 {_mw} 与目标 latent_dim={_latent} 不一致；"
+                f"请检查联合 VAE 的 train_vae_main / reduce_dimension。"
+            )
         pkl.dump(mixed_trajectory_obj, open(mixed_output_path, "wb"))
         print(f"混合轨迹文件已保存至: {mixed_output_path}")
         print(f"混合轨迹数量: {mixed_our_data.shape[0]}")

@@ -231,8 +231,8 @@ if ! [[ "$NUM_SEEDS" =~ ^[1-9][0-9]*$ ]]; then
   echo "错误: NUM_SEEDS 须为正整数，当前: ${NUM_SEEDS}" >&2
   exit 1
 fi
-# Few-shot 扩散微调：默认 40 epoch（train.py 对 --real_task_text_only_finetune 未写 --train_epochs 时亦为 40）；预训练级 200 请 export TRAIN_EPOCHS=200
-TRAIN_EPOCHS="${TRAIN_EPOCHS:-40}"
+# Few-shot 扩散微调默认 epoch；与 train.py 一致。
+TRAIN_EPOCHS="${TRAIN_EPOCHS:-500}"
 LATENT_DIM="${LATENT_DIM:-32}"
 TRAIN_TIMESTEP_BIAS_POWER="${TRAIN_TIMESTEP_BIAS_POWER:-0.0}"
 TRAIN_LOSS_MIN_SNR_GAMMA="${TRAIN_LOSS_MIN_SNR_GAMMA:-0.0}"
@@ -524,7 +524,7 @@ _run_few_shot_one() {
 
   echo "=========================================="
   echo "[Few-shot] TASK=$t  PRETRAINED_MT_HEX=$PRETRAINED_MT_HEX  n_traj=$N_TRAJ k=$K eps=$EPS horizon=$HORIZON"
-  echo "  TRAIN_EPOCHS=$TRAIN_EPOCHS（扩散微调；与预训练 200 epoch 区分，可用 TRAIN_EPOCHS=200 加长）"
+  echo "  TRAIN_EPOCHS=$TRAIN_EPOCHS"
   echo "  TRAIN_TIMESTEP_BIAS_POWER=$TRAIN_TIMESTEP_BIAS_POWER  TRAIN_LOSS_MIN_SNR_GAMMA=$TRAIN_LOSS_MIN_SNR_GAMMA"
   echo "  NUM_SEEDS=$NUM_SEEDS  START_SEED=$start_seed  （seed: $start_seed .. $((start_seed + NUM_SEEDS - 1))）"
   echo "  PRETRAINED_VAE_INFO=$PRETRAINED_VAE_INFO"

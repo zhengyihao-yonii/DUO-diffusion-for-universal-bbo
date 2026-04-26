@@ -1,4 +1,5 @@
 Task: RobotPush
+Type: continuous
 Name: RobotPush
 Description: Control the robot to push items to a designated location
 Objective: to minimize he distance between a predefined target location and two objects

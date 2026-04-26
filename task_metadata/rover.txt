@@ -1,4 +1,5 @@
 Task: Rover
+Type: continuous
 Name: Rover
 Description: 2D trajectories optimization for a rover
 Objective: to design a reasonable trajectory to minimize the cost

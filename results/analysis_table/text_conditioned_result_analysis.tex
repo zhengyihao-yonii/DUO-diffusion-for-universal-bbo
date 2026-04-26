@@ -1,0 +1,27 @@
+% Requires: \usepackage{booktabs}, \usepackage{graphicx}, \usepackage{xcolor}.
+% Blocks: Task+D(best) | UniSO-T | GTG ST/ST+r | DUO (text_conditioned_only/all_frac…).
+\begin{table*}[t!]
+\caption{Full multitask text-conditioned evaluation: one column per hyperparameter subfolder under \texttt{text\_conditioned\_only/all\_frac1.0\_sigma0.0/}. UniSO-T (Improved), GTG ST / ST+r, and DUO. Mean rank uses higher reward as better.}
+\vspace{0.3em}
+\centering
+\resizebox{\linewidth}{!}{
+\begin{tabular}{l|c|c|cc|cc}
+\toprule
+Task & $\mathcal{D}$(best) & \shortstack{UniSO-T} & \shortstack{GTG\\ST} & \shortstack{GTG\\ST+r} & \shortstack{\texttt{w1.2\_1000x64\_k20\_eps0.05}} & \shortstack{\texttt{w1.2\_1000x64\_k20\_eps0.05\_ret}} \\
+\midrule
+Ant & 165.326 & 455.658 $\pm$ 39.188 & 452.330 $\pm$ 61.502 & 454.594 $\pm$ 29.590 & \textbf{\textcolor{violet}{563.533 $\pm$ 12.455}} & \textbf{\textcolor{blue}{569.851 $\pm$ 10.826}} \\
+D'Kitty & 199.363 & 222.007 $\pm$ 33.677 & 264.857 $\pm$ 17.571 & 167.231 $\pm$ 79.140 & \textbf{\textcolor{blue}{286.435 $\pm$ 33.333}} & \textbf{\textcolor{violet}{274.574 $\pm$ 28.276}} \\
+Superconductor & 74.000 & \textbf{\textcolor{violet}{82.642 $\pm$ 3.467}} & \textbf{\textcolor{blue}{89.802 $\pm$ 6.763}} & -- & -- & -- \\
+TF Bind 8 & 0.439 & 0.857 $\pm$ 0.069 & \textbf{\textcolor{blue}{0.934 $\pm$ 0.030}} & \textbf{\textcolor{violet}{0.905 $\pm$ 0.065}} & 0.653 $\pm$ 0.212 & 0.520 $\pm$ 0.050 \\
+TF Bind 10 & 0.005 & \textbf{\textcolor{blue}{0.944 $\pm$ 0.794}} & \textbf{\textcolor{violet}{0.632 $\pm$ 0.106}} & 0.577 $\pm$ 0.049 & 0.356 $\pm$ 0.128 & 0.228 $\pm$ 0.270 \\
+GTOPX 2 & -196.663 & -90.106 $\pm$ 8.223 & \textbf{\textcolor{blue}{-72.163 $\pm$ 8.495}} & \textbf{\textcolor{violet}{-84.446 $\pm$ 26.171}} & -123.223 $\pm$ 31.257 & -103.394 $\pm$ 38.764 \\
+GTOPX 3 & -152.364 & \textbf{\textcolor{blue}{-44.427 $\pm$ 13.456}} & \textbf{\textcolor{violet}{-53.866 $\pm$ 9.877}} & -54.650 $\pm$ 15.913 & -83.490 $\pm$ 54.468 & -82.446 $\pm$ 30.000 \\
+GTOPX 4 & -216.709 & -74.779 $\pm$ 11.032 & \textbf{\textcolor{blue}{-72.749 $\pm$ 6.632}} & \textbf{\textcolor{violet}{-73.852 $\pm$ 13.080}} & -146.776 $\pm$ 93.141 & -117.249 $\pm$ 72.111 \\
+GTOPX 6 & -111.666 & \textbf{\textcolor{blue}{-48.244 $\pm$ 5.766}} & \textbf{\textcolor{violet}{-55.834 $\pm$ 9.655}} & -58.879 $\pm$ 7.985 & -71.947 $\pm$ 4.645 & -100.326 $\pm$ 25.384 \\
+\midrule
+Mean rank & / & \textbf{\textcolor{violet}{2.333 $\pm$ 1.118}} & \textbf{\textcolor{blue}{2.000 $\pm$ 1.323}} & 3.000 $\pm$ 1.069 & 3.750 $\pm$ 1.488 & 3.750 $\pm$ 1.488 \\
+\bottomrule
+\end{tabular}
+}
+\label{tab:gtg-duo-eval-all-text}
+\end{table*}

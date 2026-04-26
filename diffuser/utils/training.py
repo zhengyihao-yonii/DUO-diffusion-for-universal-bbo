@@ -25,6 +25,69 @@ def _safe_wandb_log(metrics):
         pass
 
 
+def _env_float(key: str, default: float) -> float:
+    raw = os.environ.get(key, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _env_str(key: str, default: str = "") -> str:
+    v = os.environ.get(key, "").strip()
+    return v if v else default
+
+
+def _set_optimizer_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
+    for g in optimizer.param_groups:
+        g["lr"] = float(lr)
+
+
+def _lr_warmup_cosine(
+    *,
+    base_lr: float,
+    step: int,
+    total_steps: int,
+    warmup_frac: float,
+    min_ratio: float,
+) -> float:
+    """
+    Warmup + cosine decay.
+
+    - step: 0-based global step
+    - total_steps: total number of steps for the schedule
+    - warmup_frac: fraction of steps for linear warmup (0..1)
+    - min_ratio: minimum lr ratio at the end (0..1), so min_lr = base_lr * min_ratio
+    """
+    if total_steps <= 0:
+        return float(base_lr)
+    s = max(0, min(int(step), int(total_steps)))
+    t = int(total_steps)
+    wf = float(warmup_frac)
+    wf = 0.0 if wf < 0.0 else (1.0 if wf > 1.0 else wf)
+    w_steps = int(round(wf * t))
+    min_r = float(min_ratio)
+    if min_r < 0.0:
+        min_r = 0.0
+    if min_r > 1.0:
+        min_r = 1.0
+    min_lr = float(base_lr) * min_r
+
+    if w_steps > 0 and s < w_steps:
+        # Linear warmup from 0 -> base_lr
+        return float(base_lr) * (float(s + 1) / float(w_steps))
+
+    # Cosine decay from base_lr -> min_lr
+    import math
+
+    denom = max(1, t - w_steps)
+    prog = float(s - w_steps) / float(denom)  # 0..1
+    cos = 0.5 * (1.0 + math.cos(math.pi * prog))
+    return float(min_lr + (float(base_lr) - float(min_lr)) * cos)
+
+
 def cycle(dl):
     """无限重复遍历 ``dl``。若 ``dl`` 因 ``drop_last=True`` 且样本数不足等原因长度为 0，
     则内层 ``for`` 永不执行，旧实现会在 ``while True`` 中空转占满 CPU 且永不 yield。"""
@@ -139,6 +202,15 @@ class Trainer(object):
         
         self.renderer = renderer
         self.optimizer = torch.optim.Adam(diffusion_model.parameters(), lr=train_lr)
+        self._base_train_lr = float(train_lr)
+        self._half_lr_switched = False
+        self._lr_mult_factor = 1.0
+
+        # Optional LR schedule (default constant to preserve historical behavior).
+        # Use DUO_TRAIN_LR_SCHEDULE=warmup_cosine to enable.
+        self._lr_schedule = _env_str("DUO_TRAIN_LR_SCHEDULE", "constant").lower()
+        self._lr_warmup_frac = _env_float("DUO_TRAIN_LR_WARMUP_FRAC", 0.05)
+        self._lr_min_ratio = _env_float("DUO_TRAIN_LR_MIN_RATIO", 0.1)
         
         # 只有当proxy_model不为None时，才创建proxy_optimizer
         if self.has_proxy:
@@ -201,6 +273,13 @@ class Trainer(object):
             y = y.to(self.device)
             loss, infos = self.proxy_model.loss(x, y)
             loss.backward()
+
+            # Optional grad clipping (disabled by default): set DUO_GRAD_CLIP_NORM, e.g. 1.0
+            _clip = _env_float("DUO_GRAD_CLIP_NORM", 2.0)
+            if _clip > 0.0:
+                torch.nn.utils.clip_grad_norm_(
+                    self.proxy_model.parameters(), max_norm=_clip
+                )
             
             self.proxy_optimizer.step()
             self.proxy_optimizer.zero_grad()
@@ -227,9 +306,50 @@ class Trainer(object):
             for i in range(self.gradient_accumulate_every):
                 batch = next(self.dataloader)
                 batch = batch_to_device(batch, device=self.device)
+                # Drive optional two-stage schedule (tbias & LR switch) without changing signatures.
+                if hasattr(self.model, "set_train_schedule_step"):
+                    self.model.set_train_schedule_step(
+                        int(self.step),
+                        int(getattr(self, "_total_train_steps", 0)) or None,
+                    )
                 loss, infos = self.model.loss(*batch)
                 loss = loss / self.gradient_accumulate_every
                 loss.backward()
+
+            # Optional: if model requests a late-stage LR multiplier, apply once when crossing the split.
+            if (not self._half_lr_switched) and hasattr(self.model, "_train_half_ts_bias"):
+                hp = float(getattr(self.model, "_train_half_ts_bias", 0.0))
+                if hp > 0.0:
+                    tot = int(getattr(self, "_total_train_steps", 0))
+                    if tot > 0:
+                        frac = float(getattr(self.model, "_train_half_ts_frac", 0.7))
+                        split = int(frac * float(tot))
+                        if int(self.step) >= split:
+                            mult = float(getattr(self.model, "_train_half_lr_mult", 0.5))
+                            self._lr_mult_factor = float(mult)
+                            self._half_lr_switched = True
+
+            # Optional: warmup+cosine LR schedule (big->small). Applied after gradient accumulation.
+            if self._lr_schedule in ("warmup_cosine", "warmup-cosine", "cosine"):
+                tot = int(getattr(self, "_total_train_steps", 0)) or int(n_train_steps)
+                lr = _lr_warmup_cosine(
+                    base_lr=self._base_train_lr,
+                    step=int(self.step),
+                    total_steps=int(tot),
+                    warmup_frac=float(self._lr_warmup_frac),
+                    min_ratio=float(self._lr_min_ratio),
+                )
+                lr = float(lr) * float(self._lr_mult_factor)
+                _set_optimizer_lr(self.optimizer, lr)
+            else:
+                # Keep historical constant LR, but still honor optional late-stage multiplier.
+                lr = float(self._base_train_lr) * float(self._lr_mult_factor)
+                _set_optimizer_lr(self.optimizer, lr)
+
+            # Optional grad clipping (disabled by default): set DUO_GRAD_CLIP_NORM, e.g. 1.0
+            _clip = _env_float("DUO_GRAD_CLIP_NORM", 2.0)
+            if _clip > 0.0:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=_clip)
 
             self.optimizer.step()
             self.optimizer.zero_grad()
@@ -240,6 +360,7 @@ class Trainer(object):
                 metrics = {k:v.detach().item() for k, v in infos.items()}
                 metrics['steps'] = self.step
                 metrics['loss'] = loss.detach().item()
+                metrics['lr'] = float(self.optimizer.param_groups[0].get("lr", self._base_train_lr))
                 logger.log_metrics_summary(metrics, default_stats='mean')
                 _safe_wandb_log(metrics)
 

@@ -47,6 +47,12 @@ if __name__ == '__main__':
         default=32,
         help="VAE 隐空间维度；须与 construct_trajectories 一致；非 32 时 checkpoint 目录含 _latent{d}",
     )
+    parser.add_argument(
+        "--fixed_dim",
+        type=int,
+        default=128,
+        help="VAE 输入统一维数（与 construct / train_vae 一致）；非 32 隐空间时 generated_datasets 路径含 _dim128_latent{d}",
+    )
 
     # Task × text 联合 CFG 权重（可选；不指定则沿用 config 中默认值）
     parser.add_argument(
@@ -113,8 +119,7 @@ if __name__ == '__main__':
         "--train_epochs",
         type=int,
         default=None,
-        help="扩散训练 epoch 数；n_train_steps = train_epochs * n_steps_per_epoch。"
-        " 未指定时：从头训练默认 200；--real_task_text_only_finetune 微调默认 40（更短，与预训练区分）。",
+        help="扩散训练 epoch 数；n_train_steps = train_epochs * n_steps_per_epoch。",
     )
     parser.add_argument(
         "--real_task_text_only_finetune",
@@ -185,8 +190,28 @@ if __name__ == '__main__':
         default=0.0,
         help=">0：对 epsilon 目标启用 min-SNR 逐样本损失加权（可试 5）；0=关闭（默认）。",
     )
+    parser.add_argument(
+        "--train_half_timestep_bias_frac",
+        type=float,
+        default=0.7,
+        help="两阶段分界点（前段比例，0~1），默认 0.7。",
+    )
+    parser.add_argument(
+        "--train_half_lr_mult",
+        type=float,
+        default=1.0,
+        help="两阶段后段 LR 乘子（与 _halftbiasX 中的 X 对齐）；默认 1.0（关闭）。",
+    )
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="扩散 Adam 学习率；不传则用锚点 config 的 learning_rate。传参后 RUN.prefix 含 _lr… 以免混用 checkpoint。",
+    )
 
     args = parser.parse_args(_cli_args)
+    if getattr(args, "learning_rate", None) is not None and float(args.learning_rate) <= 0.0:
+        raise SystemExit("--learning_rate must be positive")
 
     # 兼容旧版API - 当指定task时，优先使用task参数覆盖train_tasks和eval_task
     if args.task:
@@ -196,7 +221,8 @@ if __name__ == '__main__':
     # 处理任务列表，判断是单任务还是多任务
     from diffuser.utils.multitask_canon import (
         canonical_train_tasks_csv,
-        diffusion_train_path_suffix,
+        diffusion_train_path_suffix_v2,
+        learning_rate_path_suffix,
         multitask_path_token,
         multitask_text_only_path_infix,
         returns_cond_path_infix,
@@ -215,8 +241,7 @@ if __name__ == '__main__':
         args, "fewshot_text_only_finetune", False
     )
     if args.train_epochs is None:
-        # 微调：默认更少优化步数；从头训练保持与历史脚本一致的 200 epoch
-        args.train_epochs = 40 if real_task_ft else 200
+        args.train_epochs = 500
     if real_task_ft:
         args.multitask_text_only = True
         args.use_text_condition = True
@@ -286,8 +311,18 @@ if __name__ == '__main__':
             args.traj_params_json,
         )
         _ld = int(args.latent_dim)
-        # dirname 指向 multi_*；32 维为 mixed_mt_<hash>.p，否则 mixed_mt_<hash>_latent{d}.p
-        args.data_path = f"generated_datasets/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{multitask_mixed_basename(sig, _ld)}"
+        from diffuser.utils.vae_layout import multitask_generated_candidate_rel_dirs
+
+        _fd = int(getattr(args, "fixed_dim", 128))
+        # dirname：latent≠32 时为 multi_*_dim{fd}_latent{ld}（与 train_vae / 用户现有目录一致）
+        _rel_root = multitask_generated_candidate_rel_dirs(
+            train_tasks_csv=args.train_tasks,
+            frac=float(args.frac),
+            sigma=float(args.sigma),
+            fixed_dim=_fd,
+            latent_dim=_ld,
+        )[0]
+        args.data_path = f"{_rel_root}/{multitask_mixed_basename(sig, _ld)}"
         args.multitask_traj_signature = sig
         args.traj_n_traj_dict = n_d
         args.traj_k_dict = k_d
@@ -295,12 +330,15 @@ if __name__ == '__main__':
         _hyper = multitask_checkpoint_hyper_dir(sig, _ret, _txt, _mto)
         if args.run_suffix:
             _hyper = f"{_hyper}{args.run_suffix}"
-        _dtrain = diffusion_train_path_suffix(
+        _dtrain = diffusion_train_path_suffix_v2(
             float(getattr(args, "train_timestep_bias_power", 0.0)),
             float(getattr(args, "train_loss_min_snr_gamma", 0.0)),
+            float(getattr(args, "train_half_timestep_bias_frac", 0.7)),
+            float(getattr(args, "train_half_lr_mult", 1.0)),
         )
         if _dtrain:
             _hyper = f"{_hyper}{_dtrain}"
+        _hyper = f"{_hyper}{learning_rate_path_suffix(vars(args).get('learning_rate'))}"
         if _ld != 32:
             _hyper = f"{_hyper}_latent{_ld}"
         RUN.prefix = f"trained_models/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{_hyper}/seed{args.seed}/"
@@ -320,11 +358,14 @@ if __name__ == '__main__':
         )
         _few = "_fewshot_ft" if real_task_ft else ""
         _lat_tag = f"_latent{_ld}" if _ld != 32 else ""
-        _dtrain = diffusion_train_path_suffix(
+        _dtrain = diffusion_train_path_suffix_v2(
             float(getattr(args, "train_timestep_bias_power", 0.0)),
             float(getattr(args, "train_loss_min_snr_gamma", 0.0)),
+            float(getattr(args, "train_half_timestep_bias_frac", 0.7)),
+            float(getattr(args, "train_half_lr_mult", 1.0)),
         )
-        RUN.prefix = f"trained_models/{task_name}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}{_few}{_ret}{_txt}{_mto}{_dtrain}{_lat_tag}/seed{args.seed}/"
+        _lr_suf = learning_rate_path_suffix(vars(args).get("learning_rate"))
+        RUN.prefix = f"trained_models/{task_name}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}{_few}{_ret}{_txt}{_mto}{_dtrain}{_lr_suf}{_lat_tag}/seed{args.seed}/"
     
     logger.print(RUN.prefix, color='green')
     jaynes.config("local")

@@ -1,4 +1,5 @@
 Task: GTOPX 4
+Type: continuous
 Name: Messenger (full)
 Description: Interplanetary missions to Mercury, with resonant flybys of the planet
 Objective: to minimize the total velocity change incurred throughout the mission

@@ -1,4 +1,5 @@
 Task: LunarLander
+Type: continuous
 Name: LunarLander
 Description: Learn the parameters of a controller for a lunar lander
 Objective: to maximize the mean terminal reward across a consistent batch of 50 randomly generated landscape

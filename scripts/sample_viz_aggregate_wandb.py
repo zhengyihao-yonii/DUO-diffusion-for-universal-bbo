@@ -41,7 +41,16 @@ def aggregate_tag(dump_dir: Path, tag: str, seeds: list[int]) -> list[dict]:
     out: list[dict] = []
     for step in sorted(common):
         chunk = [m[step] for m in by_step]
-        keys = ("mean_y", "max_y", "mean_y_norm", "max_y_norm", "t_index", "denoise_progress")
+        keys = (
+            "mean_y",
+            "max_y",
+            "max8_mean",
+            "mean_y_norm",
+            "max_y_norm",
+            "max8_mean_norm",
+            "t_index",
+            "denoise_progress",
+        )
         rec: dict = {"viz_step": int(step)}
         for k in keys:
             vals = [c[k] for c in chunk]
@@ -87,8 +96,10 @@ def main() -> None:
                     "sample_viz_step": s,
                     f"sample_viz/{tag}/mean_y": r["mean_y"],
                     f"sample_viz/{tag}/max_y": r["max_y"],
+                    f"sample_viz/{tag}/max8_mean": r["max8_mean"],
                     f"sample_viz/{tag}/mean_y_norm": r["mean_y_norm"],
                     f"sample_viz/{tag}/max_y_norm": r["max_y_norm"],
+                    f"sample_viz/{tag}/max8_mean_norm": r["max8_mean_norm"],
                     f"sample_viz/{tag}/t_index": int(round(r["t_index"])),
                     f"sample_viz/{tag}/denoise_progress": r["denoise_progress"],
                 },

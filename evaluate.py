@@ -180,6 +180,24 @@ if __name__ == '__main__':
         help="须与训练一致：非零时 RUN.prefix 含 _msnr…（与 train.py 对齐）。",
     )
     parser.add_argument(
+        "--train_half_timestep_bias_frac",
+        type=float,
+        default=0.7,
+        help="须与训练一致：两阶段分界点（前段比例），默认 0.7。",
+    )
+    parser.add_argument(
+        "--train_half_lr_mult",
+        type=float,
+        default=1.0,
+        help="须与训练一致：两阶段后段 LR 乘子；默认 1.0（关闭）。",
+    )
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="须与训练一致：显式传参时 RUN.prefix 含 _lr…（与 train.py 对齐）。",
+    )
+    parser.add_argument(
         "--latent_observation_dim",
         type=int,
         default=None,
@@ -224,7 +242,8 @@ if __name__ == '__main__':
         args.eval_task = args.task
     from diffuser.utils.multitask_canon import (
         canonical_train_tasks_csv,
-        diffusion_train_path_suffix,
+        diffusion_train_path_suffix_v2,
+        learning_rate_path_suffix,
         multitask_path_token,
         multitask_text_only_path_infix,
         returns_cond_path_infix,
@@ -326,7 +345,17 @@ if __name__ == '__main__':
             args.traj_params_json,
         )
         _ld = int(args.latent_dim)
-        args.data_path = f"generated_datasets/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{multitask_mixed_basename(sig, _ld)}"
+        from diffuser.utils.vae_layout import multitask_generated_candidate_rel_dirs
+
+        _fd = int(getattr(args, "fixed_dim", 128))
+        _rel_root = multitask_generated_candidate_rel_dirs(
+            train_tasks_csv=args.train_tasks,
+            frac=float(args.frac),
+            sigma=float(args.sigma),
+            fixed_dim=_fd,
+            latent_dim=_ld,
+        )[0]
+        args.data_path = f"{_rel_root}/{multitask_mixed_basename(sig, _ld)}"
         args.multitask_traj_signature = sig
         args.traj_n_traj_dict = n_d
         args.traj_k_dict = k_d
@@ -334,12 +363,15 @@ if __name__ == '__main__':
         _hyper = multitask_checkpoint_hyper_dir(sig, _ret, _txt, _mto)
         if args.run_suffix:
             _hyper = f"{_hyper}{args.run_suffix}"
-        _dtrain = diffusion_train_path_suffix(
+        _dtrain = diffusion_train_path_suffix_v2(
             float(getattr(args, "train_timestep_bias_power", 0.0)),
             float(getattr(args, "train_loss_min_snr_gamma", 0.0)),
+            float(getattr(args, "train_half_timestep_bias_frac", 0.7)),
+            float(getattr(args, "train_half_lr_mult", 1.0)),
         )
         if _dtrain:
             _hyper = f"{_hyper}{_dtrain}"
+        _hyper = f"{_hyper}{learning_rate_path_suffix(vars(args).get('learning_rate'))}"
         if _ld != 32:
             _hyper = f"{_hyper}_latent{_ld}"
         RUN.prefix = f"trained_models/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{_hyper}/seed{args.seed}/"
@@ -365,13 +397,16 @@ if __name__ == '__main__':
             )
         )
         _lat_tag = f"_latent{_ld}" if _ld != 32 else ""
-        _dtrain = diffusion_train_path_suffix(
+        _dtrain = diffusion_train_path_suffix_v2(
             float(getattr(args, "train_timestep_bias_power", 0.0)),
             float(getattr(args, "train_loss_min_snr_gamma", 0.0)),
+            float(getattr(args, "train_half_timestep_bias_frac", 0.7)),
+            float(getattr(args, "train_half_lr_mult", 1.0)),
         )
+        _lr_suf = learning_rate_path_suffix(vars(args).get("learning_rate"))
         RUN.prefix = (
             f"trained_models/{args.train_tasks}_frac{args.frac}_sigma{args.sigma}/"
-            f"{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}{_zsuf}{_ret}{_txt}{_mto}{_dtrain}{_lat_tag}/seed{args.seed}/"
+            f"{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}{_zsuf}{_ret}{_txt}{_mto}{_dtrain}{_lr_suf}{_lat_tag}/seed{args.seed}/"
         )
     
     logger.print(RUN.prefix, color='green')

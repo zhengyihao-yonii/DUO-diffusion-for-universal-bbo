@@ -1,4 +1,5 @@
 Task: GTOPX 3
+Type: continuous
 Name: Messenger (reduced)
 Description: Simulation of interplanetary missions to Mercury
 Objective: to minimize the total velocity change over the course of the mission

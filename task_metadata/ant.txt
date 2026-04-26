@@ -1,4 +1,5 @@
 Task: Ant
+Type: continuous
 Name: Ant Morphology
 Description: a quadruped robot morphology optimization
 Objective: to run as fast as possible

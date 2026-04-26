@@ -31,7 +31,79 @@ from diffuser.datasets.real_world_fewshot import (
 )
 from diffuser.utils.proxy_filter import resolve_proxy_filter_for_eval
 from diffuser.utils.real_world_oracle import oracle_predict
-from diffuser.utils.vae_layout import resolve_generated_vae_info_path
+from diffuser.utils.vae_layout import (
+    generated_vae_info_filename,
+    multitask_generated_candidate_rel_dirs,
+    resolve_generated_vae_info_path,
+    resolve_multitask_generated_root_for_vae,
+)
+
+
+def _generated_datasets_vae_base(
+    *,
+    is_multitask: bool,
+    train_tasks_list: list[str],
+    eval_task: str,
+    frac: float,
+    sigma: float,
+    fixed_dim: int = 128,
+    latent_dim: int = 32,
+) -> str:
+    """
+    与 ``construct_trajectories`` / ``data_path`` / ``train_vae`` 一致。
+    多任务：优先 ``multi_*_dim{fixed}_latent{lat}``（latent≠32），再回退 ``multi_*_frac_sigma``。
+    """
+    from diffuser.utils.multitask_canon import canonical_train_tasks_csv
+
+    if not is_multitask:
+        return f"./generated_datasets/{eval_task}_frac{frac}_sigma{sigma}"
+    csv = canonical_train_tasks_csv(",".join(train_tasks_list))
+    return resolve_multitask_generated_root_for_vae(
+        train_tasks_csv=csv,
+        frac=float(frac),
+        sigma=float(sigma),
+        fixed_dim=int(fixed_dim),
+        latent_dim=int(latent_dim),
+    )
+
+
+def _resolve_multitask_data_dir_for_mixed(
+    *,
+    train_tasks_list: list[str],
+    config_data_path: str,
+    sig: str | None,
+    latent_dim: int,
+    fixed_dim: int,
+    frac: float,
+    sigma: float,
+) -> str:
+    """
+    解析含 mixed_mt_*.p 的目录：优先 ``Config.data_path`` 父目录，
+    再尝试 ``_dim{fixed}_latent{lat}`` 后缀目录（与用户现有 generated_datasets 布局兼容）。
+    """
+    from diffuser.utils.multitask_canon import canonical_train_tasks_csv
+    from diffuser.utils.traj_params import resolve_multitask_mixed_path
+
+    primary = os.path.dirname(config_data_path)
+    csv = canonical_train_tasks_csv(",".join(train_tasks_list))
+    order: list[str] = [os.path.normpath(primary)]
+    for rel in multitask_generated_candidate_rel_dirs(
+        train_tasks_csv=csv,
+        frac=float(frac),
+        sigma=float(sigma),
+        fixed_dim=int(fixed_dim),
+        latent_dim=int(latent_dim),
+    ):
+        d = os.path.normpath("./" + rel)
+        if d not in order:
+            order.append(d)
+    for d in order:
+        try:
+            resolve_multitask_mixed_path(d, sig, int(latent_dim))
+            return d
+        except FileNotFoundError:
+            continue
+    return primary
 
 
 def _real_world_d_best_fewshot_params(eval_task: str, Config, is_multitask: bool) -> tuple[int | None, str, int]:
@@ -177,10 +249,10 @@ def _oracle_viz_stats_from_transition_x(
     func: DesignBenchFunctionWrapper,
     max_queries: int,
     rng: np.random.Generator,
-) -> Tuple[float, float, float, float]:
+) -> Tuple[float, float, float, float, float, float]:
     """
     将当前扩散状态 x（归一化轨迹）解码为设计空间，取 context 之后时间步上的点，
-    调用 Oracle 得到一批 y，返回 mean/max（原始与归一化）。
+    调用 Oracle 得到一批 y，返回 mean/max/max8_mean（原始与归一化）。
     """
     samples = x[..., :observation_dim]
     ds_dev = samples.device
@@ -223,12 +295,24 @@ def _oracle_viz_stats_from_transition_x(
 
     y, y_norm = _predict_y_arrays_from_queries_np(queries, eval_task, func)
     if y.size == 0:
-        return (float("nan"),) * 4
+        return (float("nan"),) * 6
+
+    def _max8_mean(a: np.ndarray) -> float:
+        arr = np.asarray(a, dtype=np.float64).reshape(-1)
+        arr = arr[np.isfinite(arr)]
+        if arr.size == 0:
+            return float("nan")
+        k = 8 if arr.size >= 8 else int(arr.size)
+        topk = np.sort(arr)[-k:]
+        return float(np.mean(topk))
+
     return (
         float(np.mean(y)),
         float(np.max(y)),
         float(np.mean(y_norm)),
         float(np.max(y_norm)),
+        _max8_mean(y),
+        _max8_mean(y_norm),
     )
 
 
@@ -449,15 +533,16 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
     # 轨迹数据路径：多任务使用混合 pkl（与 train 一致）
     if rw_zs_no_ctx:
         _ld_zs = int(getattr(Config, "latent_dim", 32))
-        if is_multitask:
-            train_tasks_str = "_".join(train_tasks_list)
-            _vae_base_early = (
-                f"./generated_datasets/multi_{train_tasks_str}_frac{Config.frac}_sigma{Config.sigma}"
-            )
-        else:
-            _vae_base_early = (
-                f"./generated_datasets/{eval_task}_frac{Config.frac}_sigma{Config.sigma}"
-            )
+        _fd_zs = int(getattr(Config, "fixed_dim", 128))
+        _vae_base_early = _generated_datasets_vae_base(
+            is_multitask=is_multitask,
+            train_tasks_list=train_tasks_list,
+            eval_task=eval_task,
+            frac=float(Config.frac),
+            sigma=float(Config.sigma),
+            fixed_dim=_fd_zs,
+            latent_dim=_ld_zs,
+        )
         vae_info_early = resolve_generated_vae_info_path(_vae_base_early, _ld_zs)
         latent_obs = int(deps.get("latent_observation_dim") or 32)
         if vae_info_early and os.path.isfile(vae_info_early):
@@ -476,15 +561,25 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
             color="cyan",
         )
     elif is_multitask:
-        data_dir = os.path.dirname(Config.data_path)
         from diffuser.utils.traj_params import (
             ensure_multitask_mixed_trajectories,
+            multitask_mixed_basename,
             resolve_multitask_mixed_path,
         )
 
         _sig = getattr(Config, "multitask_traj_signature", None)
         _skip_auto = bool(deps.get("skip_auto_construct_trajectories", False))
         _latent = int(getattr(Config, "latent_dim", 32))
+        _fd_mt = int(getattr(Config, "fixed_dim", 128))
+        data_dir = _resolve_multitask_data_dir_for_mixed(
+            train_tasks_list=list(train_tasks_list),
+            config_data_path=str(Config.data_path),
+            sig=_sig,
+            latent_dim=_latent,
+            fixed_dim=_fd_mt,
+            frac=float(Config.frac),
+            sigma=float(Config.sigma),
+        )
         try:
             ensure_multitask_mixed_trajectories(
                 train_tasks_list=list(train_tasks_list),
@@ -496,7 +591,7 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
                 eps=float(Config.eps),
                 horizon=int(Config.horizon),
                 traj_params_json=deps.get("traj_params_json"),
-                fixed_dim=int(getattr(Config, "fixed_dim", 128)),
+                fixed_dim=_fd_mt,
                 skip_auto=_skip_auto,
                 latent_dim=_latent,
             )
@@ -515,6 +610,17 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
             task_text_embeds=getattr(Config, "_task_text_embeds_np", None),
             include_task_idx=use_task_branch,
         )
+        _ld_expect = int(getattr(Config, "latent_dim", 32))
+        if int(dataset.observation_dim) != _ld_expect:
+            _expect_name = (
+                multitask_mixed_basename(str(_sig), _ld_expect) if _sig else "mixed_*.p"
+            )
+            raise RuntimeError(
+                f"[{eval_task}] 混合轨迹 PKL 中 observation 宽度={dataset.observation_dim}，"
+                f"与 Config.latent_dim={_ld_expect} 不一致。"
+                f"前者由磁盘 mixed 文件决定，后者为 CLI 超参；二者必须相同。"
+                f"期望文件名示例: {_expect_name}；若曾误将 32 维 mixed 保存为该名，请删后重建 construct_trajectories.py --latent_dim {_ld_expect}。"
+            )
     else:
         if not os.path.isfile(Config.data_path):
             _rw = is_real_world_fewshot_task(eval_task)
@@ -647,13 +753,16 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
     vae_input_output_dim = getattr(Config, 'fixed_dim', 128)
 
     _ld_vae = int(getattr(Config, "latent_dim", 32))
-    if is_multitask:
-        train_tasks_str = '_'.join(train_tasks_list)
-        _vae_base = (
-            f"./generated_datasets/multi_{train_tasks_str}_frac{Config.frac}_sigma{Config.sigma}"
-        )
-    else:
-        _vae_base = f"./generated_datasets/{eval_task}_frac{Config.frac}_sigma{Config.sigma}"
+    _fd_vae = int(getattr(Config, "fixed_dim", 128))
+    _vae_base = _generated_datasets_vae_base(
+        is_multitask=is_multitask,
+        train_tasks_list=train_tasks_list,
+        eval_task=eval_task,
+        frac=float(Config.frac),
+        sigma=float(Config.sigma),
+        fixed_dim=_fd_vae,
+        latent_dim=_ld_vae,
+    )
     vae_info_path = resolve_generated_vae_info_path(_vae_base, _ld_vae)
 
     scaler = None
@@ -682,6 +791,12 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
         except Exception as e:
             print(f"加载 VAE 出错: {e}")
             vae = None
+    elif not vae_info_path or not os.path.exists(vae_info_path):
+        print(
+            f"[{eval_task}] 未找到 VAE 元数据: 尝试路径前缀 {_vae_base!r}，"
+            f"latent_dim={_ld_vae}（期望 {generated_vae_info_filename(_ld_vae)}）",
+            flush=True,
+        )
 
     if Config.diffusion == 'models.GaussianInvDynDiffusion':
         transition_dim = observation_dim
@@ -863,7 +978,7 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
         )
 
         def _sample_viz_cb(timestep_index, step_ordinal, total_steps, x):
-            m, mx, nm, nmx = _oracle_viz_stats_from_transition_x(
+            m, mx, nm, nmx, m8, nm8 = _oracle_viz_stats_from_transition_x(
                 x,
                 trainer=trainer,
                 dataset=trainer.dataset,
@@ -887,8 +1002,10 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
                         "sample_viz_step": _step_i,
                         f"sample_viz/{_sv_tag}/mean_y": m,
                         f"sample_viz/{_sv_tag}/max_y": mx,
+                        f"sample_viz/{_sv_tag}/max8_mean": m8,
                         f"sample_viz/{_sv_tag}/mean_y_norm": nm,
                         f"sample_viz/{_sv_tag}/max_y_norm": nmx,
+                        f"sample_viz/{_sv_tag}/max8_mean_norm": nm8,
                         f"sample_viz/{_sv_tag}/t_index": int(timestep_index),
                         f"sample_viz/{_sv_tag}/denoise_progress": _prog,
                     },
@@ -902,8 +1019,10 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
                     "viz_step": _step_i,
                     "mean_y": m,
                     "max_y": mx,
+                    "max8_mean": m8,
                     "mean_y_norm": nm,
                     "max_y_norm": nmx,
+                    "max8_mean_norm": nm8,
                     "t_index": int(timestep_index),
                     "denoise_progress": _prog,
                 }
@@ -1048,10 +1167,26 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
         if vae is not None:
             queries_norm = trainer.proxy_dataset.normalizer.normalize(queries_cpu.to('cpu'))
         else:
+            if int(observation_dim) != int(original_observation_dim):
+                raise RuntimeError(
+                    f"[{eval_task}] proxy 需要物理维 {original_observation_dim}，"
+                    f"但轨迹/PKL 给出的扩散状态维 observation_dim={observation_dim}（每步向量宽度），"
+                    f"且未加载 VAE 解码。Config.latent_dim={int(getattr(Config, 'latent_dim', 32))} 仅为超参标签；"
+                    f"若 observation_dim 与之不符，说明 mixed PKL 与 latent_dim 不匹配。"
+                    f"请确认 {generated_vae_info_filename(int(getattr(Config, 'latent_dim', 32)))} 存在于 generated_datasets/multi_<canonical>_frac…/ 且 vae_path 可读。"
+                )
             queries_unnorm = trainer.dataset.normalizer.unnormalize(queries_cpu)
-            queries_norm = trainer.proxy_dataset.normalizer.normalize(
-                torch.tensor(queries_unnorm, device='cpu')
-            )
+            if torch.is_tensor(queries_unnorm):
+                _qin = queries_unnorm.detach().clone().to(
+                    dtype=torch.float32, device="cpu"
+                )
+            else:
+                _qin = torch.tensor(
+                    np.asarray(queries_unnorm),
+                    dtype=torch.float32,
+                    device="cpu",
+                )
+            queries_norm = trainer.proxy_dataset.normalizer.normalize(_qin)
         queries_norm = queries_norm.to(trainer.device)
         queries_proxy_score = trainer.proxy_model(queries_norm).flatten()
         queries = queries[torch.argsort(queries_proxy_score)[-num_queries:]].cpu()

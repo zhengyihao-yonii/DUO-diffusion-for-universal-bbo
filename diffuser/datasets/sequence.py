@@ -424,8 +424,10 @@ class PointRegretDataset(torch.utils.data.Dataset):
                     self.task_text_embeds[0], dtype=np.float32
                 )
             return conditions
-        if not self.include_task_idx:
-            return conditions
+        # NOTE: Even in multitask_text_only mode (include_task_idx=False), we still attach a
+        # per-sample task_idx so downstream losses (e.g. discrete CE for tfbind) can identify
+        # whether the current sample is a discrete task. The model side ignores task_idx when
+        # task_condition=False, so this does not change mttextonly conditioning behavior.
         conditions["task_idx"] = np.array([self.task_idx])
         if self.task_text_embeds is not None and self.task_idx >= 0:
             conditions["text_embed"] = np.asarray(
@@ -457,8 +459,8 @@ class PointRegretDataset(torch.utils.data.Dataset):
             if isinstance(tid_scalar, torch.Tensor):
                 tid_scalar = tid_scalar.item()
             tid = int(tid_scalar)
-            if self.include_task_idx:
-                conditions["task_idx"] = np.array([tid])
+            # Always attach task_idx for multitask pkl (see get_conditions note above).
+            conditions["task_idx"] = np.array([tid])
             if self.task_text_embeds is not None:
                 conditions["text_embed"] = np.asarray(
                     self.task_text_embeds[tid], dtype=np.float32

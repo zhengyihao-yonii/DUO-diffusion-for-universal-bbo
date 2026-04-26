@@ -73,7 +73,7 @@ class Config(ParamsProto):
     # 训练参数
     n_steps_per_epoch = 100
     loss_type = 'l2'
-    n_train_steps = 30000  # 适中的训练步数，平衡不同任务需求
+    n_train_steps = 50000
     batch_size = 128
     learning_rate = 1e-4
     gradient_accumulate_every = 2

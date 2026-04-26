@@ -12,7 +12,7 @@
 #   bash run_singletask.sh dkitty 3 4000 20 0.01
 #   bash run_singletask.sh dkitty 3 4000 20 0.01 64 1.0 0.0
 #
-# 与多任务 mt_*_textcond_mttextonly 对齐扩散步数：默认 TRAIN_EPOCHS=200 → n_train_steps = 200 × n_steps_per_epoch（各任务 config 内多为 100）= 20000。
+# 默认 TRAIN_EPOCHS=500 → n_train_steps=50000（n_steps_per_epoch=100）。
 # 与 examples/traj_params_per_task_example2.json 中某任务行对齐时，请把位置参数 n_traj/k/eps 设为该任务在 JSON 里的值（单任务不使用 --traj_params_json）。
 # 示例（单任务 + 文本元信息，checkpoint 目录带 _textcond，与 --multitask_text_only 的多任务区别为仅 _textcond、无 _mttextonly）:
 #   USE_TEXT_CONDITION=1 bash run_singletask.sh ant 1 1000 20 0.05 64 1.0 0.0
@@ -32,7 +32,7 @@
 #                    $RESULTS/.gtg_pipeline_batch 中记录的「上一轮完整流水线」批次号。
 #   USE_RETURNS  设为 1 时，train/evaluate 追加 --returns_condition --include_returns（显式标量 return 条件）
 #   TRAIN_EPOCHS  扩散训练 epoch 数，传给 train.py --train_epochs（n_train_steps = TRAIN_EPOCHS * config 内 n_steps_per_epoch）。
-#                 默认 200；可 export TRAIN_EPOCHS=N 覆盖。与全任务多任务 text 训练对齐时请保持 TRAIN_EPOCHS 一致（如 200 → 20000 steps）。
+#                 默认 500；可 export TRAIN_EPOCHS=N 覆盖。与多任务 text 训练对齐时请保持 TRAIN_EPOCHS 一致。
 #   USE_TEXT_CONDITION  设为 1 时 train/evaluate 追加 --use_text_condition（单任务 + task_metadata 文本条件；勿加 --multitask_text_only，该开关仅多任务或 real_task 微调）。
 #                 结果超参目录名默认再追加 SINGLE_TASK_TEXTCOND_SUFFIX（默认 _textcond），避免与无文本实验混目录。
 #   TEXT_ENCODER_MODEL  可选，sentence-transformers 模型目录或 Hub 名；未设置时若存在 ../models--sentence-transformers--all-MiniLM-L6-v2/... 快照则自动使用（与 run_multitask.sh 一致）。
@@ -44,6 +44,7 @@
 #   TRAIN_TIMESTEP_BIAS_POWER   默认 0.0（关闭）。>0 时 train.py --train_timestep_bias_power，训练离散 t 偏斜小 t（如 0.5）。
 #   TRAIN_LOSS_MIN_SNR_GAMMA    默认 0.0（关闭）。>0 时 train.py --train_loss_min_snr_gamma，min-SNR 损失加权（如 5）。
 #                 非零时 RESULTS 超参目录与 trained_models 中段会追加 _tsbias… / _msnr…（与 train.py 一致）。
+#   TRAIN_LEARNING_RATE  可选；非空时 train/evaluate 传 --learning_rate；超参段追加 _lr…（与 train.py 一致）。
 #
 # 目录命名：同一次 bash 内为 run{N}_seed{s},{s+1},...（仅 seed 变）；N 仅在「又一次完整 bash（非 EVAL_ONLY）」
 #          结束后 +1，并写入 .gtg_pipeline_batch。无该文件时会根据已有 run*_seed* 推断最大批次。
@@ -100,6 +101,9 @@ SIGMA="${8:-0.0}"
 LATENT_DIM="${LATENT_DIM:-32}"
 TRAIN_TIMESTEP_BIAS_POWER="${TRAIN_TIMESTEP_BIAS_POWER:-0.0}"
 TRAIN_LOSS_MIN_SNR_GAMMA="${TRAIN_LOSS_MIN_SNR_GAMMA:-0.0}"
+TRAIN_LEARNING_RATE="${TRAIN_LEARNING_RATE:-}"
+TRAIN_HALF_TBIAS_FRAC="${TRAIN_HALF_TBIAS_FRAC:-0.7}"
+TRAIN_HALF_LR_MULT="${TRAIN_HALF_LR_MULT:-1.0}"
 
 PYTHON="${PYTHON:-/home/xk/anaconda3/envs/gtg/bin/python}"
 PROJECT="${PROJECT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
@@ -108,6 +112,14 @@ _DIFF_TRAIN_SUF="$(
     'import sys; from diffuser.utils.multitask_canon import diffusion_train_path_suffix; print(diffusion_train_path_suffix(float(sys.argv[1]), float(sys.argv[2])))' \
     "${TRAIN_TIMESTEP_BIAS_POWER}" "${TRAIN_LOSS_MIN_SNR_GAMMA}"
 )"
+_LR_SUF=""
+if [[ -n "${TRAIN_LEARNING_RATE}" ]]; then
+  _LR_SUF="$(
+    cd "$PROJECT" && PYTHONPATH="$PROJECT${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -c \
+      'import sys; from diffuser.utils.multitask_canon import learning_rate_path_suffix; print(learning_rate_path_suffix(float(sys.argv[1])))' \
+      "${TRAIN_LEARNING_RATE}"
+  )"
+fi
 # 与 results/single_task/** 及 analyze_eval_results 约定一致：tasks_frac → hyper（含 n_traj x horizon）
 _ST_FRAC_SIG="${task_name}_frac${FRAC}_sigma${SIGMA}"
 _ST_HYPER="${n_traj}x${HORIZON}_k${k}_eps${eps}"
@@ -117,7 +129,7 @@ fi
 if [[ "${USE_TEXT_CONDITION:-0}" == "1" ]]; then
   _ST_HYPER="${_ST_HYPER}${SINGLE_TASK_TEXTCOND_SUFFIX:-_textcond}"
 fi
-_ST_HYPER="${_ST_HYPER}${_DIFF_TRAIN_SUF}"
+_ST_HYPER="${_ST_HYPER}${_DIFF_TRAIN_SUF}${_LR_SUF}"
 if [[ "${LATENT_DIM}" != "32" ]]; then
   _ST_HYPER="${_ST_HYPER}_latent${LATENT_DIM}"
 fi
@@ -172,8 +184,10 @@ fi
 
 echo "=== DUO 单任务: $task_name | num_runs=$num_runs | start_seed=$START_SEED (seed: $START_SEED .. $((START_SEED + num_runs - 1))) ==="
 echo "  n_traj=$n_traj k=$k eps=$eps horizon=$HORIZON frac=$FRAC sigma=$SIGMA  LATENT_DIM=${LATENT_DIM}"
-echo "  USE_TEXT_CONDITION=${USE_TEXT_CONDITION:-0}  TRAIN_EPOCHS=${TRAIN_EPOCHS:-200}（对齐多任务时请与 mt 训练一致）"
+echo "  USE_TEXT_CONDITION=${USE_TEXT_CONDITION:-0}  TRAIN_EPOCHS=${TRAIN_EPOCHS:-500}（对齐多任务时请与 mt 训练一致）"
 echo "  TRAIN_TIMESTEP_BIAS_POWER=${TRAIN_TIMESTEP_BIAS_POWER}  TRAIN_LOSS_MIN_SNR_GAMMA=${TRAIN_LOSS_MIN_SNR_GAMMA}"
+echo "  TRAIN_LEARNING_RATE=${TRAIN_LEARNING_RATE:-（未设置，使用 config 默认 learning_rate）}"
+echo "  TRAIN_HALF_TBIAS_FRAC=${TRAIN_HALF_TBIAS_FRAC}  TRAIN_HALF_LR_MULT=${TRAIN_HALF_LR_MULT}"
 echo "  EVAL_ONLY=${EVAL_ONLY:-0}  BATCH_RUN=${BATCH_RUN}"
 echo "  PROJECT=$PROJECT"
 echo "  RESULTS=$base_dir"
@@ -218,7 +232,7 @@ if [[ "${USE_RETURNS:-0}" == "1" ]]; then
   echo "[USE_RETURNS] 启用 returns_condition + include_returns"
 fi
 
-TRAIN_EPOCHS="${TRAIN_EPOCHS:-200}"
+TRAIN_EPOCHS="${TRAIN_EPOCHS:-500}"
 if ! [[ "$TRAIN_EPOCHS" =~ ^[1-9][0-9]*$ ]]; then
   echo "错误: TRAIN_EPOCHS 须为正整数，当前: ${TRAIN_EPOCHS}" >&2
   exit 1
@@ -272,6 +286,12 @@ if [[ -n "${EVAL_EXTRA_CMD:-}" ]]; then
   read -r -a _eval_cmd_extra_arr <<< "$EVAL_EXTRA_CMD"
 fi
 
+LR_EXTRA=()
+if [[ -n "${TRAIN_LEARNING_RATE}" ]]; then
+  LR_EXTRA=(--learning_rate "${TRAIN_LEARNING_RATE}")
+fi
+HALF_TBIAS_EXTRA=(--train_half_timestep_bias_frac "${TRAIN_HALF_TBIAS_FRAC}" --train_half_lr_mult "${TRAIN_HALF_LR_MULT}")
+
 for ((run = 0; run < num_runs; run++)); do
   seed=$((START_SEED + run))
   run_dir="$base_dir/run${BATCH_RUN}_seed${seed}"
@@ -293,6 +313,8 @@ for ((run = 0; run < num_runs; run++)); do
       --latent_dim "$LATENT_DIM" \
       --train_timestep_bias_power "$TRAIN_TIMESTEP_BIAS_POWER" \
       --train_loss_min_snr_gamma "$TRAIN_LOSS_MIN_SNR_GAMMA" \
+      "${HALF_TBIAS_EXTRA[@]}" \
+      "${LR_EXTRA[@]}" \
       "${RETURNS_EXTRA[@]}" \
       "${_TE_EXTRA[@]}" \
       "${TEXT_TRAIN_EXTRA[@]}" \
@@ -316,6 +338,8 @@ for ((run = 0; run < num_runs; run++)); do
     --latent_dim "$LATENT_DIM" \
     --train_timestep_bias_power "$TRAIN_TIMESTEP_BIAS_POWER" \
     --train_loss_min_snr_gamma "$TRAIN_LOSS_MIN_SNR_GAMMA" \
+    "${HALF_TBIAS_EXTRA[@]}" \
+    "${LR_EXTRA[@]}" \
     "${RETURNS_EXTRA[@]}" \
     "${TEXT_EVAL_EXTRA[@]}" \
     "${_eval_cmd_extra_arr[@]}" \

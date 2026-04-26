@@ -250,7 +250,10 @@ run_all_four() {
       --n_traj "$N_TRAJ_MT" --k "$K_MT" --eps "$EPS_MT" \
       ${TRAJ_JSON:+--traj_params_json "$TRAJ_JSON"} \
       --use_text_condition --multitask_text_only \
-      --condition_guidance_w_text 8.0
+      --condition_guidance_w_text 8.0 \
+      --train_timestep_bias_power 0.5 \
+      --learning_rate 0.0002 \
+      --run_suffix _ce0.005
   fi
 
   # ② 多任务 + task 标签（无 text / 无 mttextonly）（mt_task）

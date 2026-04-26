@@ -1,4 +1,5 @@
 Task: GTOPX 2
+Type: continuous
 Name: Cassini 2
 Description: Complex interplanetary missions to Saturn
 Objective: to achieve a rendezvous with Saturn, aiming to minimize the total velocity change

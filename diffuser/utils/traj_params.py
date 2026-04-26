@@ -219,13 +219,23 @@ def resolve_multitask_mixed_path(
     """
     优先短文件名 ``mixed_<slug_id>.p``（或带 ``_latent{d}`` 的变体）；其次旧版 ``mixed_<完整sig>.p``；
     再 ``mixed_trajectories_train.p``。
+
+    当 ``latent_dim != 32`` 时 **不再** 回退到 ``mixed_mt_<hex>.p``（历史 32 维文件名），
+    否则 evaluate 会静默读到 32 维轨迹却声称 latent64，导致与 checkpoint / proxy 维数错位。
     """
     import os
 
+    ld = int(latent_dim)
     if sig:
-        p_lat = os.path.join(data_dir, multitask_mixed_basename(sig, latent_dim))
+        p_lat = os.path.join(data_dir, multitask_mixed_basename(sig, ld))
         if os.path.isfile(p_lat):
             return p_lat
+        if ld != 32:
+            raise FileNotFoundError(
+                f"未找到 latent_dim={ld} 的多任务混合轨迹：{p_lat}。"
+                f"（已禁用回退到 {multitask_mixed_basename(sig, 32)}，避免维数静默错位。）"
+                f"请运行 construct_trajectories.py 并指定 --latent_dim {ld}，或检查 generated_datasets 目录。"
+            )
         p_short = os.path.join(data_dir, multitask_mixed_basename(sig, 32))
         if os.path.isfile(p_short):
             return p_short
@@ -237,7 +247,7 @@ def resolve_multitask_mixed_path(
         return leg
     if sig:
         raise FileNotFoundError(
-            f"未找到多任务混合轨迹：{os.path.join(data_dir, multitask_mixed_basename(sig, latent_dim))}、"
+            f"未找到多任务混合轨迹：{os.path.join(data_dir, multitask_mixed_basename(sig, ld))}、"
             f"{os.path.join(data_dir, multitask_mixed_basename(sig, 32))}、"
             f"{os.path.join(data_dir, f'mixed_{sig}.p')} 或 {leg}"
         )
@@ -253,12 +263,17 @@ def multitask_mixed_paths_exist(
     data_dir: str, sig: str | None, latent_dim: int = 32
 ) -> bool:
     """是否与 :func:`resolve_multitask_mixed_path` 一致的「已存在」判定（不抛错）。"""
+    import os
+
+    ld = int(latent_dim)
     if not sig:
         leg = os.path.join(data_dir, "mixed_trajectories_train.p")
         return os.path.isfile(leg)
-    p_lat = os.path.join(data_dir, multitask_mixed_basename(sig, latent_dim))
+    p_lat = os.path.join(data_dir, multitask_mixed_basename(sig, ld))
     if os.path.isfile(p_lat):
         return True
+    if ld != 32:
+        return False
     p_short = os.path.join(data_dir, multitask_mixed_basename(sig, 32))
     if os.path.isfile(p_short):
         return True
@@ -299,14 +314,24 @@ def ensure_multitask_mixed_trajectories(
         tasks_sorted, n_traj, k, eps, horizon, traj_params_json
     )
     train_tasks_str = multitask_path_token(csv)
-    rel_dir = os.path.join(
-        "generated_datasets", f"multi_{train_tasks_str}_frac{frac}_sigma{sigma}"
-    )
     root = _duo_repo_root()
-    data_dir = str(root / rel_dir)
+    from diffuser.utils.vae_layout import multitask_generated_candidate_rel_dirs
 
-    if multitask_mixed_paths_exist(data_dir, sig, latent_dim):
-        return
+    rel_candidates = multitask_generated_candidate_rel_dirs(
+        train_tasks_csv=csv,
+        frac=float(frac),
+        sigma=float(sigma),
+        fixed_dim=int(fixed_dim),
+        latent_dim=int(latent_dim),
+    )
+    data_dirs = [str(root / r) for r in rel_candidates]
+
+    for data_dir in data_dirs:
+        if multitask_mixed_paths_exist(data_dir, sig, latent_dim):
+            return
+
+    data_dir = data_dirs[0]
+    rel_dir = rel_candidates[0]
 
     if skip_auto:
         resolve_multitask_mixed_path(data_dir, sig, latent_dim)
@@ -338,5 +363,7 @@ def ensure_multitask_mixed_trajectories(
     finally:
         os.chdir(_prev)
 
-    if not multitask_mixed_paths_exist(data_dir, sig, latent_dim):
-        resolve_multitask_mixed_path(data_dir, sig, latent_dim)
+    for dd in data_dirs:
+        if multitask_mixed_paths_exist(dd, sig, latent_dim):
+            return
+    resolve_multitask_mixed_path(data_dir, sig, latent_dim)

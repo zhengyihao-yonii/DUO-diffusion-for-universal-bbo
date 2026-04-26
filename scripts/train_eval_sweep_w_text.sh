@@ -1,29 +1,18 @@
 #!/usr/bin/env bash
-# 多任务 + 文本条件：按 seed 训练（可多次），再对每个 seed 扫 condition_guidance_w_text（text CFG）。
+# Multitask + text-conditioned training per seed, then sweep condition_guidance_w_text (text CFG) per seed.
 #
-# 随机种子（与 run_multitask 类似，三选一，优先级从上到下）:
-#   1) SEEDS="0 1 2" 或 SEEDS="0,1,2"  — 显式列表
-#   2) NUM_SEEDS（或 NUM_RUNS）+ START_SEED — 连续 seed: START_SEED..START_SEED+NUM_SEEDS-1
-#   3) 仅 SEED — 单次；未设 SEED 时用 START_SEED（默认 0）。例：NUM_SEEDS=1 START_SEED=1 只写 START_SEED 即可
+# Seeds (priority order):
+#   1) SEEDS="0 1 2" or SEEDS="0,1,2"
+#   2) NUM_SEEDS (or NUM_RUNS) + START_SEED (range)
+#   3) SEED (single) or START_SEED (default 0)
 #
-# 示例:
-#   SEEDS="0 1 2" ./scripts/train_eval_sweep_w_text.sh
-#   NUM_SEEDS=3 START_SEED=0 ./scripts/train_eval_sweep_w_text.sh
-#   NUM_RUNS=3 START_SEED=1 ./scripts/train_eval_sweep_w_text.sh
+# Logs: results/eval_sweep_w_text/<SWEEP_ARCHIVE_SLUG>/seed<SEED>/
+# SWEEP_ARCHIVE_SLUG is aligned with train.py/evaluate.py hyper dir when possible.
 #
-# 日志目录：归档 train.log / eval_w*.log / sweep.log；默认与 trained_models/multi_* 下 RUN.prefix 中段一致。
-#   results/eval_sweep_w_text/<SWEEP_ARCHIVE_SLUG>/seed<SEED>/
-# SWEEP_ARCHIVE_SLUG 默认由 scripts/print_multitask_ckpt_hyper_dir.py 输出（mt_<hex>_textcond_mttextonly + RUN_SUFFIX + _latent{d}），
-#   与 train.py / evaluate.py 的 multitask 超参目录名一致；若 Python 失败则回退为任务名 + 标量超参的长 slug。
-#   同一组参数多次运行仍写入同一目录，便于补跑部分 w（eval 日志 >> 追加）。
-# 每次运行在本目录下追加 run_meta_<时间戳>.env。
-# LATENT_DIM  默认 32；须与 train/eval 的 --latent_dim 一致。可用环境变量 LATENT_DIM=64 或命令行：
-#   ./scripts/train_eval_sweep_w_text.sh --latent_dim 64
-#   （命令行优先于环境变量中的 LATENT_DIM）
-#
-# TRAIN_TIMESTEP_BIAS_POWER / TRAIN_LOSS_MIN_SNR_GAMMA  默认 0.0；非零时传给 train.py（小 t 偏斜 / min-SNR）。
-#
-# PROXY_FILTER  可选 0/1；若 export 则 train/evaluate 追加 --proxy_filter（不设则默认 1）。
+# LATENT_DIM defaults to 32; can be overridden via env or CLI --latent_dim.
+# TRAIN_TIMESTEP_BIAS_POWER / TRAIN_LOSS_MIN_SNR_GAMMA default to 0.0 (disabled).
+# TRAIN_LEARNING_RATE optional; when set, passes --learning_rate and appends _lr... to paths.
+# PROXY_FILTER optional 0/1; when set, passes --proxy_filter.
 #
 set -euo pipefail
 
@@ -32,7 +21,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}"
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 
-# ---------- 解析命令行（须在 LATENT_DIM 默认值之前）----------
+# ---------- CLI parsing (before LATENT_DIM default) ----------
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --latent_dim=*)
@@ -41,7 +30,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --latent_dim)
       if [[ -z "${2:-}" ]]; then
-        echo "错误: --latent_dim 需要整数参数" >&2
+        echo "ERROR: --latent_dim requires an integer argument" >&2
         exit 1
       fi
       LATENT_DIM="$2"
@@ -52,7 +41,7 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     *)
-      echo "未知参数: $1（支持: --latent_dim <int>、--latent_dim=<int>、-h）" >&2
+      echo "Unknown arg: $1 (supported: --latent_dim <int>, --latent_dim=<int>, -h)" >&2
       exit 1
       ;;
   esac
@@ -78,7 +67,7 @@ canonical_train_tasks_token() {
   echo "${sorted//$'\n'/_}"
 }
 
-# ========= 可按需修改 =========
+# ========= Config =========
 TRAIN_TASKS="${TRAIN_TASKS:-ant,dkitty,gtopx2,gtopx3,gtopx4,gtopx6,superconductor,tfbind10,tfbind8}"
 FRAC="${FRAC:-1.0}"
 SIGMA="${SIGMA:-0.0}"
@@ -86,17 +75,20 @@ N_TRAJ="${N_TRAJ:-1000}"
 K="${K:-50}"
 EPS="${EPS:-0.05}"
 HORIZON="${HORIZON:-64}"
-# SEED 空=未显式指定；NUM_SEEDS==1 时单次 seed 用 START_SEED（与下面 SEED_LIST 一致）
+# Seed selection (see header docs).
 SEED="${SEED:-}"
 START_SEED="${START_SEED:-0}"
 NUM_SEEDS="${NUM_SEEDS:-${NUM_RUNS:-1}}"
-TRAIN_EPOCHS="${TRAIN_EPOCHS:-200}"
+TRAIN_EPOCHS="${TRAIN_EPOCHS:-500}"
 TEXT_ENCODER="${TEXT_ENCODER:-sentence-transformers/all-MiniLM-L6-v2}"
 
 TRAJ_PARAMS_JSON="${TRAJ_PARAMS_JSON:-}"
 LATENT_DIM="${LATENT_DIM:-32}"
 TRAIN_TIMESTEP_BIAS_POWER="${TRAIN_TIMESTEP_BIAS_POWER:-0.0}"
 TRAIN_LOSS_MIN_SNR_GAMMA="${TRAIN_LOSS_MIN_SNR_GAMMA:-0.0}"
+TRAIN_LEARNING_RATE="${TRAIN_LEARNING_RATE:-}"
+TRAIN_HALF_TBIAS_FRAC="${TRAIN_HALF_TBIAS_FRAC:-0.7}"
+TRAIN_HALF_LR_MULT="${TRAIN_HALF_LR_MULT:-1.0}"
 
 if [[ -n "${W_VALUES_OVERRIDE:-}" ]]; then
   read -ra W_VALUES <<< "${W_VALUES_OVERRIDE}"
@@ -115,26 +107,29 @@ if [[ -n "${PROXY_FILTER:-}" ]]; then
   PROXY_FILTER_EXTRA=(--proxy_filter "${PROXY_FILTER}")
 fi
 
-# 离散任务辅助 CE（tfbind8/10）：只需设置环境变量 DUO_DISCRETE_CE_LAMBDA（以及可选 DUO_DISCRETE_CE_TASK_NAMES）。
-# 为避免覆盖默认实验，自动将该 lambda 追加到 hyper 目录名与 RUN.prefix（train/evaluate 的 --run_suffix）。
+LR_EXTRA=()
+if [[ -n "${TRAIN_LEARNING_RATE}" ]]; then
+  LR_EXTRA=(--learning_rate "${TRAIN_LEARNING_RATE}")
+fi
+
+# Optional discrete CE (tfbind8/10): set DUO_DISCRETE_CE_LAMBDA (and optionally DUO_DISCRETE_CE_TASK_NAMES).
+# When RUN_SUFFIX is empty, we auto-append _ce... to keep outputs separated.
 RUN_SUFFIX="${RUN_SUFFIX:-}"
 if [[ -z "${RUN_SUFFIX}" && -n "${DUO_DISCRETE_CE_LAMBDA:-}" ]]; then
-  # 只有 lambda > 0 才加后缀；lambda=0 时保持与历史实验同一路径（不新增目录）
+  # Only append suffix when lambda > 0 (lambda=0 keeps historical path).
   _lam_raw="${DUO_DISCRETE_CE_LAMBDA// /}"
-  if python3 - <<PY >/dev/null 2>&1
-import sys
+  # Use python3 -c to avoid heredoc/fi parsing pitfalls in some shells.
+  if python3 -c "import sys
 try:
-    v = float("${_lam_raw}")
+    v = float('${_lam_raw}')
 except Exception:
     sys.exit(1)
-sys.exit(0 if v > 0.0 else 2)
-PY
-  then
+sys.exit(0 if v > 0.0 else 2)" >/dev/null 2>&1; then
     RUN_SUFFIX="_ce${_lam_raw}"
   fi
 fi
 
-# ---------- 解析 SEED 列表 ----------
+# ---------- Build SEED list ----------
 SEED_LIST=()
 if [[ -n "${SEEDS:-}" ]]; then
   _sn="${SEEDS//,/ }"
@@ -153,7 +148,7 @@ else
 fi
 
 if [[ ${#SEED_LIST[@]} -eq 0 ]]; then
-  echo "错误: 无法得到 seed 列表（请检查 SEEDS / NUM_SEEDS / SEED）" >&2
+  echo "ERROR: unable to build seed list (check SEEDS / NUM_SEEDS / SEED)" >&2
   exit 1
 fi
 
@@ -174,7 +169,12 @@ _print_hyper_args=(
   --latent_dim "${LATENT_DIM}"
   --train_timestep_bias_power "${TRAIN_TIMESTEP_BIAS_POWER}"
   --train_loss_min_snr_gamma "${TRAIN_LOSS_MIN_SNR_GAMMA}"
+  --train_half_timestep_bias_frac "${TRAIN_HALF_TBIAS_FRAC}"
+  --train_half_lr_mult "${TRAIN_HALF_LR_MULT}"
 )
+if [[ ${#LR_EXTRA[@]} -gt 0 ]]; then
+  _print_hyper_args+=("${LR_EXTRA[@]}")
+fi
 if [[ -n "${TRAJ_PARAMS_JSON}" ]]; then
   _print_hyper_args+=(--traj_params_json "${TRAJ_PARAMS_JSON}")
 fi
@@ -182,7 +182,7 @@ if _py_hyper="$("${_print_hyper_args[@]}" 2>/dev/null)" && [[ -n "${_py_hyper}" 
   SWEEP_ARCHIVE_SLUG="${_py_hyper}"
 fi
 if [[ -z "${SWEEP_ARCHIVE_SLUG}" ]]; then
-  echo "[train_eval_sweep_w_text] 警告: print_multitask_ckpt_hyper_dir 失败，使用回退 slug（与 checkpoint 中段可能不一致）" >&2
+  echo "[train_eval_sweep_w_text] WARN: print_multitask_ckpt_hyper_dir failed; using fallback slug (may not match checkpoint dir)" >&2
   _eps_slug="${EPS//./p}"
   _tpj_slug=""
   if [[ -n "${TRAJ_PARAMS_JSON}" ]]; then
@@ -208,6 +208,9 @@ RUN_ID="$(date +%Y%m%d_%H%M%S)"
   echo "LATENT_DIM=${LATENT_DIM}"
   echo "TRAIN_TIMESTEP_BIAS_POWER=${TRAIN_TIMESTEP_BIAS_POWER}"
   echo "TRAIN_LOSS_MIN_SNR_GAMMA=${TRAIN_LOSS_MIN_SNR_GAMMA}"
+  echo "TRAIN_LEARNING_RATE=${TRAIN_LEARNING_RATE:-}"
+  echo "TRAIN_HALF_TBIAS_FRAC=${TRAIN_HALF_TBIAS_FRAC}"
+  echo "TRAIN_HALF_LR_MULT=${TRAIN_HALF_LR_MULT}"
   echo "PROXY_FILTER=${PROXY_FILTER:-}"
   echo "DUO_DISCRETE_CE_LAMBDA=${DUO_DISCRETE_CE_LAMBDA:-}"
   echo "DUO_DISCRETE_CE_TASK_NAMES=${DUO_DISCRETE_CE_TASK_NAMES:-}"
@@ -232,7 +235,7 @@ for SEED in "${SEED_LIST[@]}"; do
     fi
   }
 
-  _log "本目录: ${LOG_ROOT}（本 seed 的训练/评估日志；归档根: ${MODEL_ROOT}）"
+  _log "Log dir: ${LOG_ROOT} (seed logs; archive root: ${MODEL_ROOT})"
 
   _TRAIN_EXTRA=(
     python train.py
@@ -258,6 +261,9 @@ for SEED in "${SEED_LIST[@]}"; do
   _TRAIN_EXTRA+=(--latent_dim "${LATENT_DIM}")
   _TRAIN_EXTRA+=(--train_timestep_bias_power "${TRAIN_TIMESTEP_BIAS_POWER}")
   _TRAIN_EXTRA+=(--train_loss_min_snr_gamma "${TRAIN_LOSS_MIN_SNR_GAMMA}")
+  _TRAIN_EXTRA+=(--train_half_timestep_bias_frac "${TRAIN_HALF_TBIAS_FRAC}")
+  _TRAIN_EXTRA+=(--train_half_lr_mult "${TRAIN_HALF_LR_MULT}")
+  _TRAIN_EXTRA+=("${LR_EXTRA[@]}")
   _TRAIN_EXTRA+=("${PROXY_FILTER_EXTRA[@]}")
 
   _EVAL_BASE=(
@@ -283,35 +289,38 @@ for SEED in "${SEED_LIST[@]}"; do
   _EVAL_BASE+=(--latent_dim "${LATENT_DIM}")
   _EVAL_BASE+=(--train_timestep_bias_power "${TRAIN_TIMESTEP_BIAS_POWER}")
   _EVAL_BASE+=(--train_loss_min_snr_gamma "${TRAIN_LOSS_MIN_SNR_GAMMA}")
+  _EVAL_BASE+=(--train_half_timestep_bias_frac "${TRAIN_HALF_TBIAS_FRAC}")
+  _EVAL_BASE+=(--train_half_lr_mult "${TRAIN_HALF_LR_MULT}")
+  _EVAL_BASE+=("${LR_EXTRA[@]}")
   _EVAL_BASE+=("${PROXY_FILTER_EXTRA[@]}")
 
   if [[ "${SKIP_TRAIN}" != "1" ]]; then
-    _log "=== [1/2] Training seed=${SEED}（${LOG_ROOT}/train.log）==="
+    _log "=== [1/2] Training seed=${SEED} (${LOG_ROOT}/train.log) ==="
     _train_ec=0
     "${_TRAIN_EXTRA[@]}" >> "${LOG_ROOT}/train.log" 2>&1 || _train_ec=$?
     if [[ "${_train_ec}" -ne 0 ]]; then
-      _log "错误: train 退出码 ${_train_ec}，见 ${LOG_ROOT}/train.log；中止本脚本"
+      _log "ERROR: train exit_code=${_train_ec}; see ${LOG_ROOT}/train.log; abort"
       exit "${_train_ec}"
     fi
   else
-    _log "=== [1/2] SKIP_TRAIN=1，跳过训练 seed=${SEED} ==="
+    _log "=== [1/2] SKIP_TRAIN=1; skip training seed=${SEED} ==="
   fi
 
   if [[ "${SKIP_EVAL}" != "1" ]]; then
-    _log "=== [2/2] Evaluation sweep w_text（${LOG_ROOT}/eval_w*.log）==="
+    _log "=== [2/2] Evaluation sweep w_text (${LOG_ROOT}/eval_w*.log) ==="
     for W in "${W_VALUES[@]}"; do
       _wfile="${W//./p}"
-      _log "--- w_text=${W} → ${LOG_ROOT}/eval_w${_wfile}.log ---"
-      # 捕获退出码：避免 set -e 在 evaluate 非零时直接退出，导致 sweep.log 无 Done、终端无提示
+      _log "--- w_text=${W} -> ${LOG_ROOT}/eval_w${_wfile}.log ---"
+      # capture exit code: avoid set -e exiting on evaluate non-zero
       _ev=0
       "${_EVAL_BASE[@]}" --condition_guidance_w_text "${W}" >> "${LOG_ROOT}/eval_w${_wfile}.log" 2>&1 || _ev=$?
       if [[ "${_ev}" -ne 0 ]]; then
-        _log "警告: evaluate w=${W} 退出码 ${_ev}，详见 ${LOG_ROOT}/eval_w${_wfile}.log（继续后续 w）"
+        _log "WARN: evaluate w=${W} exit_code=${_ev}; see ${LOG_ROOT}/eval_w${_wfile}.log (continue)"
       fi
     done
   fi
   if [[ "${SKIP_EVAL}" == "1" ]]; then
-    _log "=== [2/2] SKIP_EVAL=1，跳过评估 seed=${SEED} ==="
+    _log "=== [2/2] SKIP_EVAL=1; skip eval seed=${SEED} ==="
   fi
 
   _log "Done seed=${SEED}. Project root: ${PROJECT_ROOT}"

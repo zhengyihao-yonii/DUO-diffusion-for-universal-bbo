@@ -1,4 +1,5 @@
 Task: TF Bind 8
+Type: discrete
 Name: TF Bind 8
 Description: DNA sequence optimization
 Objective: to find the length-8 DNA sequence with maximum binding affinity with SIX6_REF_R1 transcription factor

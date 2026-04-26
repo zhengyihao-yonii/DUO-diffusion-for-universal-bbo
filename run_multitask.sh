@@ -57,12 +57,12 @@
 #                    为 0 时不传 --traj_params_json（与旧版一致；环境里 export 了 TRAJ_PARAMS_JSON 也不生效）。
 #                    **与是否使用文本条件无关**：文本由 TRAIN_EXTRA / USE_TEXT_CONDITION 决定；若只要 JSON 轨迹+无文本，请勿设 TRAIN_EXTRA 中的 --use_text_condition。
 #   TRAJ_PARAMS_JSON  仅在 USE_TRAJ_PARAMS_JSON=1 时必填；启用时 RESULTS 超参段为短 slug（mt_<hex>），与 mixed_mt_<hex>.p 同源；完整参数见 multitask_slug_manifest.json。
-#   TRAIN_EPOCHS  扩散训练 epoch 数，传给 train.py --train_epochs（n_train_steps = TRAIN_EPOCHS * config 内 n_steps_per_epoch）。
-#                 默认 200；可 export TRAIN_EPOCHS=N 覆盖。
+#   TRAIN_EPOCHS  传给 train.py --train_epochs；默认 500（n_steps_per_epoch=100 时 n_train_steps=50000）。
 #   LATENT_DIM    默认 32；非 32 时 construct/train/evaluate 传 --latent_dim，且 RESULTS 超参目录与 trained_models 的 mt_*_latent{d} 对齐。
 #   TRAIN_TIMESTEP_BIAS_POWER   默认 0.0。>0 时 train 传 --train_timestep_bias_power（小 t 偏斜采样）。
 #   TRAIN_LOSS_MIN_SNR_GAMMA    默认 0.0。>0 时 train 传 --train_loss_min_snr_gamma（min-SNR 损失加权）。
 #                 非零时 RESULTS 与 trained_models 超参段追加 _tsbias… / _msnr…（与 train.py RUN.prefix 一致）。
+#   TRAIN_LEARNING_RATE  可选；非空时 train/evaluate 传 --learning_rate；超参段追加 _lr…（与 train.py 一致）。
 #   TEXT_ENCODER_MODEL  可选，离线 sentence-transformers 目录的绝对路径（须含 config.json）。
 #                    未设置时，若存在下面「相对 PROJECT」的默认快照目录，则自动解析并仅在启用
 #                    文本条件时向 train/evaluate 追加 --text_encoder_model。
@@ -137,15 +137,26 @@ HORIZON="${6:-64}"
 FRAC="${7:-1.0}"
 SIGMA="${8:-0.0}"
 
-TRAIN_EPOCHS="${TRAIN_EPOCHS:-200}"
+TRAIN_EPOCHS="${TRAIN_EPOCHS:-500}"
 LATENT_DIM="${LATENT_DIM:-32}"
 TRAIN_TIMESTEP_BIAS_POWER="${TRAIN_TIMESTEP_BIAS_POWER:-0.0}"
 TRAIN_LOSS_MIN_SNR_GAMMA="${TRAIN_LOSS_MIN_SNR_GAMMA:-0.0}"
+TRAIN_LEARNING_RATE="${TRAIN_LEARNING_RATE:-}"
+TRAIN_HALF_TBIAS_FRAC="${TRAIN_HALF_TBIAS_FRAC:-0.7}"
+TRAIN_HALF_LR_MULT="${TRAIN_HALF_LR_MULT:-1.0}"
 _DIFF_TRAIN_SUF="$(
   cd "$PROJECT" && PYTHONPATH="$PROJECT${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -c \
     'import sys; from diffuser.utils.multitask_canon import diffusion_train_path_suffix; print(diffusion_train_path_suffix(float(sys.argv[1]), float(sys.argv[2])))' \
     "${TRAIN_TIMESTEP_BIAS_POWER}" "${TRAIN_LOSS_MIN_SNR_GAMMA}"
 )"
+_LR_SUF=""
+if [[ -n "${TRAIN_LEARNING_RATE}" ]]; then
+  _LR_SUF="$(
+    cd "$PROJECT" && PYTHONPATH="$PROJECT${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -c \
+      'import sys; from diffuser.utils.multitask_canon import learning_rate_path_suffix; print(learning_rate_path_suffix(float(sys.argv[1])))' \
+      "${TRAIN_LEARNING_RATE}"
+  )"
+fi
 
 USE_TRAJ_PARAMS_JSON="${USE_TRAJ_PARAMS_JSON:-0}"
 _TRAJ_SIG=""
@@ -209,7 +220,7 @@ fi
 if [[ "${USE_RETURNS:-0}" == "1" ]]; then
   _MT_HYPER="${_MT_HYPER}${RESULTS_SUFFIX:-_ret}"
 fi
-_MT_HYPER="${_MT_HYPER}${_DIFF_TRAIN_SUF}"
+_MT_HYPER="${_MT_HYPER}${_DIFF_TRAIN_SUF}${_LR_SUF}"
 if [[ "${LATENT_DIM}" != "32" ]]; then
   _MT_HYPER="${_MT_HYPER}_latent${LATENT_DIM}"
 fi
@@ -352,8 +363,10 @@ if [[ "$USE_TRAJ_PARAMS_JSON" == "1" ]]; then
   echo "  traj_sig（完整逻辑签名，见 multitask_slug_manifest.json）: ${_TRAJ_SIG}"
   echo "  slug_id（短目录名 mt_<hex>，与 train checkpoint / RESULTS 超参段一致）: ${_SLUG_ID}"
 fi
-echo "  TRAIN_EPOCHS: $TRAIN_EPOCHS（默认 200，可用环境变量覆盖）  LATENT_DIM=${LATENT_DIM}"
+echo "  TRAIN_EPOCHS: $TRAIN_EPOCHS（默认 500，可用环境变量覆盖）  LATENT_DIM=${LATENT_DIM}"
 echo "  TRAIN_TIMESTEP_BIAS_POWER=${TRAIN_TIMESTEP_BIAS_POWER}  TRAIN_LOSS_MIN_SNR_GAMMA=${TRAIN_LOSS_MIN_SNR_GAMMA}"
+echo "  TRAIN_LEARNING_RATE=${TRAIN_LEARNING_RATE:-（未设置，使用 config 默认 learning_rate）}"
+echo "  TRAIN_HALF_TBIAS_FRAC=${TRAIN_HALF_TBIAS_FRAC}  TRAIN_HALF_LR_MULT=${TRAIN_HALF_LR_MULT}"
 echo "  TRAIN_EXTRA: ${TRAIN_EXTRA:-<未设置>}"
 if [[ "$USE_TRAJ_PARAMS_JSON" == "1" ]] \
   && [[ "${TRAIN_EXTRA:-}" == *"--use_text_condition"* || "${TRAIN_EXTRA:-}" == *"--multitask_text_only"* ]]; then
@@ -400,16 +413,26 @@ else
     >"$CONSTRUCT_LOG" 2>&1
 
   echo "日志: $CONSTRUCT_LOG"
-  _MULTI_DATA_DIR="$PROJECT/generated_datasets/multi_${_MULTITASK_TOKEN}_frac${FRAC}_sigma${SIGMA}"
-  if [[ -f "$_MULTI_DATA_DIR/multitask_slug_manifest.json" ]]; then
-    cp -f "$_MULTI_DATA_DIR/multitask_slug_manifest.json" "$RESULTS/" || true
-    echo "[slug] 已复制 multitask_slug_manifest.json -> $RESULTS/"
+  # construct 在 latent≠32 时写入 ``multi_*_dim${FIXED_DIM}_latent${LATENT_DIM}``（与 train_vae 目录对齐）
+  _GDS_LAT_SUFFIX=""
+  if [[ "${LATENT_DIM:-32}" != "32" ]]; then
+    _FD="${FIXED_DIM:-128}"
+    _GDS_LAT_SUFFIX="_dim${_FD}_latent${LATENT_DIM}"
   fi
+  _MULTI_DATA_DIR="$PROJECT/generated_datasets/multi_${_MULTITASK_TOKEN}_frac${FRAC}_sigma${SIGMA}${_GDS_LAT_SUFFIX}"
+  _MULTI_DATA_DIR_FALLBACK="$PROJECT/generated_datasets/multi_${_MULTITASK_TOKEN}_frac${FRAC}_sigma${SIGMA}"
+  for _slug_src in "$_MULTI_DATA_DIR" "$_MULTI_DATA_DIR_FALLBACK"; do
+    if [[ -f "$_slug_src/multitask_slug_manifest.json" ]]; then
+      cp -f "$_slug_src/multitask_slug_manifest.json" "$RESULTS/" || true
+      echo "[slug] 已复制 multitask_slug_manifest.json -> $RESULTS/ （来源 $_slug_src）"
+      break
+    fi
+  done
   if [[ "${LATENT_DIM}" != "32" && -f "$_MULTI_DATA_DIR/multitask_slug_manifest_latent${LATENT_DIM}.json" ]]; then
     cp -f "$_MULTI_DATA_DIR/multitask_slug_manifest_latent${LATENT_DIM}.json" "$RESULTS/" || true
     echo "[slug] 已复制 multitask_slug_manifest_latent${LATENT_DIM}.json -> $RESULTS/"
   fi
-  unset _MULTI_DATA_DIR
+  unset _MULTI_DATA_DIR _MULTI_DATA_DIR_FALLBACK _GDS_LAT_SUFFIX _FD _slug_src
 fi
 
 if [[ "${USE_RETURNS:-0}" == "1" ]]; then
@@ -462,6 +485,12 @@ if [[ -n "${PROXY_FILTER:-}" ]]; then
   PROXY_FILTER_EXTRA=(--proxy_filter "${PROXY_FILTER}")
 fi
 
+LR_EXTRA=()
+if [[ -n "${TRAIN_LEARNING_RATE}" ]]; then
+  LR_EXTRA=(--learning_rate "${TRAIN_LEARNING_RATE}")
+fi
+HALF_TBIAS_EXTRA=(--train_half_timestep_bias_frac "${TRAIN_HALF_TBIAS_FRAC}" --train_half_lr_mult "${TRAIN_HALF_LR_MULT}")
+
 for ((run = 0; run < NUM_RUNS; run++)); do
   SEED=$((START_SEED + run))
   RUN_DIR="$RESULTS/run${BATCH_RUN}_seed${SEED}"
@@ -484,6 +513,8 @@ for ((run = 0; run < NUM_RUNS; run++)); do
       --latent_dim "$LATENT_DIM" \
       --train_timestep_bias_power "$TRAIN_TIMESTEP_BIAS_POWER" \
       --train_loss_min_snr_gamma "$TRAIN_LOSS_MIN_SNR_GAMMA" \
+      "${HALF_TBIAS_EXTRA[@]}" \
+      "${LR_EXTRA[@]}" \
       "${_TPJ[@]}" \
       "${_TE_EXTRA[@]}" \
       "${_train_extra_arr[@]}" \
@@ -512,6 +543,8 @@ for ((run = 0; run < NUM_RUNS; run++)); do
     --latent_dim "$LATENT_DIM" \
     --train_timestep_bias_power "$TRAIN_TIMESTEP_BIAS_POWER" \
     --train_loss_min_snr_gamma "$TRAIN_LOSS_MIN_SNR_GAMMA" \
+    "${HALF_TBIAS_EXTRA[@]}" \
+    "${LR_EXTRA[@]}" \
     "${_TPJ[@]}" \
     "${EVAL_EXTRA[@]}" \
     "${_eval_cmd_extra_arr[@]}" \

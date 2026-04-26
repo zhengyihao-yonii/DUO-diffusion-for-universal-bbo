@@ -31,6 +31,89 @@ from diffuser.utils.proxy_filter import proxy_filter_enabled_for_train
 apply_torch_cpu_threads_from_env()
 
 
+def _wandb_float_tag(value: float) -> str:
+    """Compact non-negative float for run names (no dots)."""
+    return f"{float(value):.6g}".replace(".", "p").replace("-", "m")
+
+
+def _env_truthy(key: str) -> bool:
+    v = os.environ.get(key, "").strip().lower()
+    return v in ("1", "true", "yes")
+
+
+def _wandb_training_recipe_slug(cfg) -> str:
+    """
+    Human-distinguishable tags for Weights & Biases run name
+    (training recipe: latent, loss shaping, text modes, CE, logging env knobs).
+    """
+    parts: list[str] = []
+    z = int(getattr(cfg, "latent_dim", 32))
+    if z != 32:
+        parts.append(f"z{z}")
+
+    tbp = float(getattr(cfg, "train_timestep_bias_power", 0.0))
+    if tbp != 0.0:
+        parts.append(f"ts{_wandb_float_tag(tbp)}")
+
+    ms = float(getattr(cfg, "train_loss_min_snr_gamma", 0.0))
+    if ms != 0.0:
+        parts.append(f"snr{_wandb_float_tag(ms)}")
+
+    hlr = float(getattr(cfg, "train_half_lr_mult", 1.0))
+    if hlr != 1.0:
+        parts.append(f"halftbias{_wandb_float_tag(hlr)}")
+
+    if getattr(cfg, "use_text_condition", False):
+        parts.append("txt")
+    if getattr(cfg, "multitask_text_only", False):
+        parts.append("mttxt")
+    if getattr(cfg, "real_task_text_only_finetune", False) or getattr(
+        cfg, "fewshot_text_only_finetune", False
+    ):
+        parts.append("rtft")
+
+    _mt = bool(getattr(cfg, "is_multitask", False))
+    _mto = bool(getattr(cfg, "multitask_text_only", False))
+    _rft = bool(
+        getattr(cfg, "real_task_text_only_finetune", False)
+        or getattr(cfg, "fewshot_text_only_finetune", False)
+    )
+    if _mt and not _mto and not _rft:
+        parts.append("mt_taskidx")
+
+    if int(getattr(cfg, "proxy_filter", 1)) == 0:
+        parts.append("nopx")
+
+    if getattr(cfg, "returns_condition", False):
+        parts.append("ret")
+
+    rs = (getattr(cfg, "run_suffix", "") or "").strip()
+    if rs:
+        safe = rs.lstrip("_").replace("/", "_").replace(" ", "")
+        if safe:
+            parts.append(safe)
+
+    if _env_truthy("DUO_LOG_PER_T_LOSS"):
+        parts.append("logt")
+        try:
+            nb = int(os.environ.get("DUO_LOG_PER_T_LOSS_BINS", "20"))
+        except ValueError:
+            nb = 20
+        if nb != 20:
+            parts.append(f"tb{nb}")
+
+    raw_lam = os.environ.get("DUO_DISCRETE_CE_LAMBDA", "").strip()
+    if raw_lam and "_ce" not in rs:
+        try:
+            lam = float(raw_lam)
+        except ValueError:
+            lam = 0.0
+        if lam > 0.0:
+            parts.append(f"dce{_wandb_float_tag(lam)}")
+
+    return "_".join(parts)
+
+
 def _maybe_build_task_text_embeddings(Config):
     """If use_text_condition, build [K, D] numpy table from task_metadata/*.txt (cached)."""
     if not getattr(Config, "use_text_condition", False):
@@ -178,6 +261,10 @@ def main(**deps):
     RUN._update(deps)
     print(deps)
 
+    # 默认按离散 t 分桶记录扩散 MSE（diffusion._per_t_bin_weighted_mse_metrics）；可用环境变量关闭或改 bins
+    os.environ.setdefault("DUO_LOG_PER_T_LOSS", "1")
+    os.environ.setdefault("DUO_LOG_PER_T_LOSS_BINS", "20")
+
     if 'train_tasks' in deps and ',' in str(deps.get('train_tasks', '')):
         deps['train_tasks'] = canonical_train_tasks_csv(deps['train_tasks'])
 
@@ -298,7 +385,11 @@ def main(**deps):
         run_name = f"multitask_{'_'.join(Config.train_tasks_list)}_{_s}_seed{Config.seed}"
     else:
         run_name = f"{Config.train_tasks_list[0]}_{Config.n_traj}x{Config.horizon}_k{Config.k}_eps{Config.eps}_seed{Config.seed}"
-    
+
+    _recipe = _wandb_training_recipe_slug(Config)
+    if _recipe:
+        run_name = f"{run_name}_{_recipe}"
+
     if wandb is not None:
         import os as _os
 
@@ -529,6 +620,10 @@ def main(**deps):
             train_loss_min_snr_gamma=float(
                 getattr(Config, "train_loss_min_snr_gamma", 0.0)
             ),
+            train_half_timestep_bias_frac=float(
+                getattr(Config, "train_half_timestep_bias_frac", 0.7)
+            ),
+            train_half_lr_mult=float(getattr(Config, "train_half_lr_mult", 1.0)),
         )
         
         # 单任务模式下，为GaussianInvDynDiffusion模型添加proxy_model_config
@@ -611,6 +706,10 @@ def main(**deps):
             train_loss_min_snr_gamma=float(
                 getattr(Config, "train_loss_min_snr_gamma", 0.0)
             ),
+            train_half_timestep_bias_frac=float(
+                getattr(Config, "train_half_timestep_bias_frac", 0.7)
+            ),
+            train_half_lr_mult=float(getattr(Config, "train_half_lr_mult", 1.0)),
         )
 
     _ld_path = getattr(Config, "load_diffusion_checkpoint", None)
@@ -767,6 +866,8 @@ def main(**deps):
 
     # 创建训练器（load_diffusion_checkpoint → Trainer.load_from_path：加载 model/ema/step，优化器仍从新 Adam 起，在预训练权重上继续更新）
     trainer = trainer_config(diffusion, proxy_model, dataset, proxy_dataset, renderer)
+    # Provide total training steps for optional two-stage schedule.
+    setattr(trainer, "_total_train_steps", int(getattr(Config, "n_train_steps", 0)))
     trainer.vae = vae  # 添加VAE属性到训练器
     if _ld_path:
         logger.print(

@@ -67,6 +67,22 @@ def multitask_path_token(train_tasks: str) -> str:
     return "_".join(csv.split(","))
 
 
+def learning_rate_path_suffix(learning_rate: float | None) -> str:
+    """
+    显式覆盖扩散 ``learning_rate`` 时在 ``RUN.prefix`` 中段追加片段，与默认 config LR 训练目录区分；
+    ``None``（未传 CLI）时返回空串（与历史路径一致）。
+
+    形如 ``_lr0.0002``，插在 ``_tsbias*`` / ``_msnr*`` 之后、``_latent{d}`` 之前（与 ``train.py`` 一致）。
+    """
+    if learning_rate is None:
+        return ""
+    v = float(learning_rate)
+    if v <= 0.0:
+        raise ValueError("learning_rate must be positive")
+    s = f"{v:.8g}"
+    return f"_lr{s}"
+
+
 def diffusion_train_path_suffix(
     train_timestep_bias_power: float,
     train_loss_min_snr_gamma: float,
@@ -88,6 +104,40 @@ def diffusion_train_path_suffix(
 
     _append("tsbias", train_timestep_bias_power)
     _append("msnr", train_loss_min_snr_gamma)
+    if not parts:
+        return ""
+    return "_" + "_".join(parts)
+
+
+def diffusion_train_path_suffix_v2(
+    train_timestep_bias_power: float,
+    train_loss_min_snr_gamma: float,
+    train_half_timestep_bias_frac: float = 0.7,
+    train_half_lr_mult: float = 1.0,
+) -> str:
+    """
+    Extended diffusion training suffix.
+
+    Adds optional two-stage schedule (enabled when train_half_lr_mult != 1.0 and train_timestep_bias_power > 0):
+      - First (train_half_timestep_bias_frac) portion: timestep bias = 0
+      - Last portion: timestep bias = train_timestep_bias_power, and LR is multiplied by train_half_lr_mult
+
+    Defaults are chosen to be stable and compact in paths; only non-default knobs are appended.
+    """
+    base = diffusion_train_path_suffix(train_timestep_bias_power, train_loss_min_snr_gamma)
+    parts: list[str] = []
+    if base:
+        parts.append(base.lstrip("_"))
+
+    hm = float(train_half_lr_mult)
+    if abs(hm - 1.0) > 1e-12 and float(train_timestep_bias_power) > 0.0:
+        # User convention: _halftbias0.5 means stage2 LR multiplier = 0.5
+        parts.append(f"halftbias{hm:.6g}")
+        # Keep frac out of suffix by default; only record when user changes it.
+        hf = float(train_half_timestep_bias_frac)
+        if abs(hf - 0.7) > 1e-12:
+            parts.append(f"hfrac{hf:.6g}")
+
     if not parts:
         return ""
     return "_" + "_".join(parts)

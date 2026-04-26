@@ -350,6 +350,8 @@ class GaussianDiffusion(nn.Module):
         train_tasks_list: Optional[Tuple[str, ...]] = None,
         train_timestep_bias_power: float = 0.0,
         train_loss_min_snr_gamma: float = 0.0,
+        train_half_timestep_bias_frac: float = 0.7,
+        train_half_lr_mult: float = 1.0,
     ):
         super().__init__()
         self.horizon = horizon
@@ -407,6 +409,31 @@ class GaussianDiffusion(nn.Module):
         # 可选训练策略（默认 0 关闭，不改变原 loss / 均匀 t 采样路径）
         self._train_ts_bias = float(train_timestep_bias_power)
         self._train_min_snr_gamma = float(train_loss_min_snr_gamma)
+        # Two-stage schedule (optional): stage1 uses tbias=0, stage2 uses this power.
+        self._train_half_ts_frac = float(train_half_timestep_bias_frac)
+        self._train_half_lr_mult = float(train_half_lr_mult)
+        # Trainer will set these for scheduling.
+        self._duo_train_total_steps: Optional[int] = None
+        self._duo_train_step: Optional[int] = None
+
+    def set_train_schedule_step(self, step: int, total_steps: Optional[int] = None) -> None:
+        """Called by Trainer to drive optional two-stage schedule."""
+        self._duo_train_step = int(step)
+        if total_steps is not None:
+            self._duo_train_total_steps = int(total_steps)
+
+    def current_train_timestep_bias(self) -> float:
+        """Effective timestep-bias power at the current training step."""
+        if self._train_half_lr_mult >= 1.0 or self._train_ts_bias <= 0.0:
+            return float(self._train_ts_bias)
+        s = self._duo_train_step
+        tot = self._duo_train_total_steps
+        if s is None or tot is None or tot <= 0:
+            return float(self._train_ts_bias)
+        split = int(float(self._train_half_ts_frac) * float(tot))
+        if s < split:
+            return 0.0
+        return float(self._train_ts_bias)
 
     def get_loss_weights(self, action_weight, discount, weights_dict):
         '''
@@ -761,9 +788,10 @@ class GaussianDiffusion(nn.Module):
 
     def loss(self, x, cond, returns=None):
         batch_size = len(x)
-        if self._train_ts_bias > 0.0:
+        _bias = float(self.current_train_timestep_bias())
+        if _bias > 0.0:
             t = _sample_timesteps_biased_small(
-                batch_size, self.n_timesteps, self._train_ts_bias, x.device
+                batch_size, self.n_timesteps, _bias, x.device
             )
         else:
             t = torch.randint(0, self.n_timesteps, (batch_size,), device=x.device).long()
@@ -787,6 +815,8 @@ class GaussianInvDynDiffusion(nn.Module):
         train_tasks_list: Optional[Tuple[str, ...]] = None,
         train_timestep_bias_power: float = 0.0,
         train_loss_min_snr_gamma: float = 0.0,
+        train_half_timestep_bias_frac: float = 0.7,
+        train_half_lr_mult: float = 1.0,
     ):
         super().__init__()
         self.horizon = horizon
@@ -854,6 +884,27 @@ class GaussianInvDynDiffusion(nn.Module):
         self.loss_fn = Losses['state_l2'](loss_weights)
         self._train_ts_bias = float(train_timestep_bias_power)
         self._train_min_snr_gamma = float(train_loss_min_snr_gamma)
+        self._train_half_ts_frac = float(train_half_timestep_bias_frac)
+        self._train_half_lr_mult = float(train_half_lr_mult)
+        self._duo_train_total_steps: Optional[int] = None
+        self._duo_train_step: Optional[int] = None
+
+    def set_train_schedule_step(self, step: int, total_steps: Optional[int] = None) -> None:
+        self._duo_train_step = int(step)
+        if total_steps is not None:
+            self._duo_train_total_steps = int(total_steps)
+
+    def current_train_timestep_bias(self) -> float:
+        if self._train_half_lr_mult >= 1.0 or self._train_ts_bias <= 0.0:
+            return float(self._train_ts_bias)
+        s = self._duo_train_step
+        tot = self._duo_train_total_steps
+        if s is None or tot is None or tot <= 0:
+            return float(self._train_ts_bias)
+        split = int(float(self._train_half_ts_frac) * float(tot))
+        if s < split:
+            return 0.0
+        return float(self._train_ts_bias)
 
     def get_loss_weights(self, discount):
         '''
@@ -1090,9 +1141,10 @@ class GaussianInvDynDiffusion(nn.Module):
                 info = {'a0_loss': loss}
         else:
             batch_size = len(x)
-            if self._train_ts_bias > 0.0:
+            _bias = float(self.current_train_timestep_bias())
+            if _bias > 0.0:
                 t = _sample_timesteps_biased_small(
-                    batch_size, self.n_timesteps, self._train_ts_bias, x.device
+                    batch_size, self.n_timesteps, _bias, x.device
                 )
             else:
                 t = torch.randint(0, self.n_timesteps, (batch_size,), device=x.device).long()

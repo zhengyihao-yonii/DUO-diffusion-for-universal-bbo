@@ -54,6 +54,79 @@ def distance_matrix_cache_filename(latent_dim: int) -> str:
     return f"distance_vae_latent{int(latent_dim)}.p"
 
 
+def multitask_generated_dim_latent_suffix(fixed_dim: int, latent_dim: int) -> str:
+    """
+    多任务 ``generated_datasets`` 目录后缀，与 ``train_vae.py`` 中
+    ``trained_models/vae/multi_*_dim{fixed}_latent{lat}`` 对齐，便于把
+    ``vae_info_latent*.p`` / mixed 与不同隐空间宽度区分。
+
+    ``latent_dim == 32`` 时返回空串，保持历史 ``multi_<tok>_frac_sigma`` 路径。
+    """
+    if int(latent_dim) == 32:
+        return ""
+    return f"_dim{int(fixed_dim)}_latent{int(latent_dim)}"
+
+
+def multitask_generated_candidate_rel_dirs(
+    *,
+    train_tasks_csv: str,
+    frac: float,
+    sigma: float,
+    fixed_dim: int,
+    latent_dim: int,
+) -> list[str]:
+    """
+    相对 DUO 根目录的候选 ``generated_datasets/multi_*`` 路径（先带 ``_dim*_latent*``，后短路径）。
+    用于加载 VAE / mixed：优先匹配用户已有的 ``..._dim128_latent64`` 目录。
+    """
+    from diffuser.utils.multitask_canon import canonical_train_tasks_csv, multitask_path_token
+
+    tok = multitask_path_token(canonical_train_tasks_csv(train_tasks_csv))
+    suf = multitask_generated_dim_latent_suffix(fixed_dim, latent_dim)
+    out: list[str] = []
+    if suf:
+        out.append(
+            f"generated_datasets/multi_{tok}_frac{frac}_sigma{sigma}{suf}"
+        )
+    out.append(f"generated_datasets/multi_{tok}_frac{frac}_sigma{sigma}")
+    return out
+
+
+def resolve_multitask_generated_root_for_vae(
+    *,
+    train_tasks_csv: str,
+    frac: float,
+    sigma: float,
+    fixed_dim: int,
+    latent_dim: int,
+) -> str:
+    """
+    解析应包含 ``generated_vae_info_filename(latent_dim)`` 的目录。
+    优先返回已存在元数据文件的目录；否则返回首选候选（便于报错信息指向一致路径）。
+    """
+    import os
+
+    ld = int(latent_dim)
+    rels = multitask_generated_candidate_rel_dirs(
+        train_tasks_csv=train_tasks_csv,
+        frac=frac,
+        sigma=sigma,
+        fixed_dim=fixed_dim,
+        latent_dim=ld,
+    )
+    candidates = [
+        os.path.normpath("./" + r) if not r.startswith("./") else r for r in rels
+    ]
+    for base in candidates:
+        vip = resolve_generated_vae_info_path(base, ld)
+        if vip is not None and os.path.isfile(vip):
+            return base
+    for base in candidates:
+        if os.path.isdir(base):
+            return base
+    return candidates[0]
+
+
 def resolve_generated_vae_info_path(base_dir: str, latent_dim: int) -> str | None:
     """
     在 ``base_dir`` 下解析可读的 vae 元信息路径：优先 ``generated_vae_info_filename(d)``，

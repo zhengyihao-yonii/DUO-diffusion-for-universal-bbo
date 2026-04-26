@@ -1,4 +1,5 @@
 Task: Superconductor
+Type: continuous
 Name: Superconductor
 Description: critical temperature maximization
 Objective: to design the chemical formula for a superconducting material that has a high critical temperature
