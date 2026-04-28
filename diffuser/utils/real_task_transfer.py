@@ -65,33 +65,47 @@ def resolve_multitask_pretrained_run_dir(
     )
 
 
-def resolve_diffusion_state_pt(ckpt_dir: str, config: Any | None = None) -> str | None:
+def _state_step_from_ckpt_path(path: str) -> int:
+    m = re.search(r"state_(\d+)\.pt$", path)
+    return int(m.group(1)) if m else -1
+
+
+def resolve_diffusion_state_pt(
+    ckpt_dir: str,
+    config: Any | None = None,
+    *,
+    ckpt_train_steps: int | None = None,
+    train_epochs: int | None = None,
+) -> str | None:
     """
-    与 ``scripts/evaluate._resolve_diffusion_checkpoint_path`` 一致：返回单个 ``.pt`` 文件路径。
-    ``config`` 可为具有 ``n_train_steps`` / ``save_checkpoints`` 的对象或 ``None``。
+    与 ``scripts/evaluate`` 扩散 checkpoint 解析一致：返回单个 ``.pt`` 路径。
+
+    优先级：``ckpt_train_steps``（显式步数）→ ``train_epochs`` × ``n_steps_per_epoch``
+    （与 ``scripts/train.py`` 中 ``n_train_steps = train_epochs * n_steps_per_epoch`` 对齐）→
+    目录下 ``state_*.pt`` 中步数最大者 → ``state.pt``。
     """
     if not os.path.isdir(ckpt_dir):
         return None
+    if ckpt_train_steps is not None:
+        p = os.path.join(ckpt_dir, f"state_{int(ckpt_train_steps)}.pt")
+        return p if os.path.isfile(p) else None
+    if train_epochs is not None:
+        te = int(train_epochs)
+        if te > 0:
+            spe = 100
+            if config is not None:
+                spe = int(getattr(config, "n_steps_per_epoch", 100) or 100)
+            target = te * spe
+            if target > 0:
+                p = os.path.join(ckpt_dir, f"state_{target}.pt")
+                if os.path.isfile(p):
+                    return p
+    matches = glob.glob(os.path.join(ckpt_dir, "state_*.pt"))
+    if matches:
+        return max(matches, key=_state_step_from_ckpt_path)
     st = os.path.join(ckpt_dir, "state.pt")
     if os.path.isfile(st):
         return st
-    save_ck = True
-    n_train = 0
-    if config is not None:
-        save_ck = bool(getattr(config, "save_checkpoints", True))
-        n_train = int(getattr(config, "n_train_steps", 0) or 0)
-    if save_ck and n_train > 0:
-        p = os.path.join(ckpt_dir, f"state_{n_train}.pt")
-        if os.path.isfile(p):
-            return p
-    matches = glob.glob(os.path.join(ckpt_dir, "state_*.pt"))
-    if matches:
-
-        def _step(path: str) -> int:
-            m = re.search(r"state_(\d+)\.pt$", path)
-            return int(m.group(1)) if m else -1
-
-        return max(matches, key=_step)
     return None
 
 

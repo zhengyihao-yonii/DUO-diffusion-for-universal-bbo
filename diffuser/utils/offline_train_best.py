@@ -17,7 +17,50 @@ from diffuser.utils.soo_gtopx import is_gtopx_task, load_gtopx_offline_arrays
 from diffuser.datasets.real_world_fewshot import (
     is_real_world_fewshot_task,
     load_real_world_raw,
+    load_real_world_y_min_max_full,
 )
+
+
+def offline_full_dataset_y_bounds(
+    task_name: str,
+    *,
+    frac: float,
+    sigma: float,
+    seed: int,
+) -> tuple[float, float]:
+    """
+    真实任务：``fewshot_data`` 下合并全部 JSON 的 y 的 ``(min, max)``（与 nmax 全库归一化一致）。
+
+    非真实任务：与 ``offline_training_best_y`` 所用离线子集上 ``y`` 的 min/max 一致（Design-Bench 子集）。
+    """
+    if is_real_world_fewshot_task(task_name):
+        return load_real_world_y_min_max_full(task_name)
+    task = design_bench.make(
+        TASKNAME2TASK[task_name],
+        dataset_kwargs=dict(
+            max_samples=int(TASKNAME2MAX_SAMPLES[task_name] * frac),
+            distribution=None,
+            min_percentile=0,
+        ),
+    )
+    if task_name.startswith("tfbind"):
+        task.map_to_logits()
+    y = np.asarray(task.y, dtype=np.float64).ravel()
+    return float(np.min(y)), float(np.max(y))
+
+
+def offline_full_dataset_best_y(
+    task_name: str,
+    *,
+    frac: float,
+    sigma: float,
+    seed: int,
+) -> float:
+    """全离线库上 best y（越大越好）；真实任务即 ``fewshot_data`` 合并后 ``max(y)``。"""
+    lo, hi = offline_full_dataset_y_bounds(
+        task_name, frac=frac, sigma=sigma, seed=seed
+    )
+    return float(hi)
 
 
 def offline_training_best_y(

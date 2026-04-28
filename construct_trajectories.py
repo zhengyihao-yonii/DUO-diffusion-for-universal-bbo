@@ -395,7 +395,9 @@ def construct_trajectories(
                 self.seed = seed
         
         vae_args = VAEArgs()
-        
+        # 与 mixed_{mt_*.p} 同签名：VAE 目录含 mt 串，换 n_traj/k/eps 时新目录、无权重则重训
+        vae_args.multitask_traj_signature = str(mt_sig)
+
         # 记录任务维度信息
         task_dims_info = {}
         for task_name in tasks_list:
@@ -734,6 +736,7 @@ def construct_trajectories(
             "fixed_dim": fixed_dim,
             "tasks": tasks_list,
             "task_dims_info": task_dims_info,
+            "multitask_traj_signature": str(mt_sig),
         }
         vae_info_path = os.path.join(multi_dir, generated_vae_info_filename(_latent))
         pkl.dump(vae_info, open(vae_info_path, "wb"))

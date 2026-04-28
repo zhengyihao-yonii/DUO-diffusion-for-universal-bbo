@@ -17,8 +17,9 @@ DFGO 列在每种模式（单任务 / 小组 multi / 全任务 multi / text）�
 ``best_duo_exp_full_multitask_unified``, ``duo_all_text_prefix``; ``duo_st_text_*`` 为单任务 + textcond。
 
 所有汇总表与 UniSO 输入均位于 ``results/analysis_table/``：宽表 ``max_short.*``、``text_conditioned_result_analysis.*``、``nmax.tex``，以及 ``w_ablation.*``（text CFG 消融：不同 ``w`` 一列，跨 seed 聚合）、``ce_ablation.*``（CE ablation：两列对比）、``uniso_result.tex``、``uniso_nresult.tex``、``d_best.json``（可选）。
+``max_real_task`` / ``nmax_real_task``：真实任务上 DUO 与论文 UniSO-T Table~7 对比（含 D(best) 列与按行着色排名）。
 ``text_conditioned_result_analysis``（``--mode final``）：``text_conditioned_only/all_frac1.0_sigma0.0/``（可用 ``EVAL_ALL_TASK_FRAC_SIG`` 覆盖）下**每个超参子目录一列** DFGO。默认一次生成全部；也可用 ``--mode short|final``（见 ``run_analyze_eval.sh``）。
-``max_short``、``nmax`` 中 DUO「全任务 multitask text」列：若存在 ``results/eval_sweep_w_text/<mt_*>/`` 且 ``DUO_SWEEP_W_DISABLE`` 未置 1，则按 ``w_ablation`` 的准则（UniSO、GTG ST 与各 ``w`` 联合排名后，取平均秩最小的 ``w``）选出最优 ``condition_guidance_w_text``，该列数据来自对应 ``eval_w*.log``（可固定到 CE 目录，见 ``SWEEP_W_DEFAULT_CE_DIRNAME``）。
+``max_short``、``nmax`` 中 DUO「全任务 multitask text」列：默认从 ``results/epoch1400/<mt_*>/seed*/eval_w*.log`` 读取（与 checkpoint-sweep 的 ``eval_w8p0_<E>epochs.log`` 一致，旧目录 ``epoch1500`` 会回退）；还可按环境变量 ``DUO_EVAL_LOG_EPOCHS`` 选择特定 ``_<E>epochs`` 后缀。
 """
 from __future__ import annotations
 
@@ -206,6 +207,34 @@ REAL_TASK_ORDER: list[str] = [
     "rover",
     "robot_push",
 ]
+
+# Improved UniSO-T real-world paper numbers (RobotPush / Rover / LunarLander); DUO D(best) from ``fewshot_data``.
+# ``zero_shot``: Table 6, Improved UniSO-T w/ metadata (zero-shot).
+# ``few_shot``: Table 3, Improved UniSO-T few-shot.
+UNISO_IMPROVED_T_REAL_TASK_PAPER: dict[str, dict[str, Any]] = {
+    "robot_push": {
+        "zero_shot": (3.171, 0.984),
+        "few_shot": (7.067, 0.169),
+    },
+    "rover": {
+        "zero_shot": (-8.888, 2.119),
+        "few_shot": (-8.239, 1.270),
+    },
+    "lunar_lander": {
+        "zero_shot": (31.186, 27.971),
+        "few_shot": (248.573, 45.386),
+    },
+}
+
+RE_REAL_WORLD_FEWSHOT_POOL = re.compile(
+    r"\[([a-zA-Z0-9_]+)\]\s+real_world_fewshot_pool:\s*k=(\S+)\s+mode=(\S+)\s+seed=(\S+)"
+)
+
+REAL_TASK_LATEX_NAME: dict[str, str] = {
+    "lunar_lander": "LunarLander",
+    "rover": "Rover",
+    "robot_push": "RobotPush",
+}
 
 EXPERIMENT_ORDER: list[str] = [
     "ant_multiple_runs",
@@ -747,15 +776,27 @@ def _latex_tt(s: str) -> str:
 
 _MT_SLUG_HEX_RE = re.compile(r"^mt_([0-9a-f]{16})")
 
+# 多任务 sweep 日志默认目录：results/epoch1400/（与 train 输出一致）；无则回退 epoch1500
+DEFAULT_ANALYSIS_RESULTS_EPOCH_DIR = "epoch1400"
+LEGACY_ANALYSIS_RESULTS_EPOCH_DIR = "epoch1500"
+
+
+def _duo_sweep_results_subdir_path(results_root: Path) -> Path:
+    """Prefer results/epoch1400; if missing, use legacy epoch1500 (directory name only)."""
+    p = results_root / DEFAULT_ANALYSIS_RESULTS_EPOCH_DIR
+    if p.is_dir():
+        return p
+    return results_root / LEGACY_ANALYSIS_RESULTS_EPOCH_DIR
+
 
 def merge_eval_sweep_w_text_into_duo(
     duo: dict[str, dict[str, dict[str, Any]]],
     results_root: Path,
 ) -> str:
     """
-    从 ``results/eval_sweep_w_text/<mt_* 或 sweep 归档目录>/`` 的 ``eval_w*.log`` 按与 ``w_ablation`` **Mean rank 行中各 w 列**
+    从 ``results/epoch1400/<mt_*>/``（若不存在则 ``epoch1500/``）的 ``eval_w*.log``（或 ``eval_w*_<E>epochs.log``）按与 ``w_ablation`` **Mean rank 行中各 w 列**
     相同的准则（UniSO、GTG ST 与各 w 联合排名后，取平均秩最小的 ``w``）选出最优 ``w``，
-    注入虚拟实验键 ``eval_sweep_w_text/<mt>/w_text<w>``（及 ``…_ret``，数值相同供 +returns 列使用），
+    注入虚拟实验键 ``<sweep_subdir>/<mt>/w_text<w>``（及 ``…_ret``，数值相同供 +returns 列使用），
     并设置 ``DUO_SWEEP_W_PREFIX``，使 ``duo_all_text_prefix`` / ``all_improved`` / nmax multi text 均指向该前缀。
 
     可用 ``DUO_SWEEP_W_DISABLE=1`` 关闭；``SWEEP_W_MODEL_DIR`` 指定 ``mt_*`` 目录（否则优先固定 CE 目录，见 ``SWEEP_W_DEFAULT_CE_DIRNAME``）。
@@ -772,7 +813,7 @@ def merge_eval_sweep_w_text_into_duo(
     assert spec.loader is not None
     spec.loader.exec_module(mod)
 
-    sweep_root = results_root / "eval_sweep_w_text"
+    sweep_root = _duo_sweep_results_subdir_path(results_root)
     override = os.environ.get("SWEEP_W_MODEL_DIR", "").strip()
     try:
         if override:
@@ -797,7 +838,7 @@ def merge_eval_sweep_w_text_into_duo(
         return ""
 
     mt = model_dir.name
-    base = f"eval_sweep_w_text/{mt}"
+    base = f"{model_dir.parent.name}/{mt}"
     os.environ["DUO_SWEEP_W_PREFIX"] = base
     os.environ["GTGDFGO_SWEEP_W_PREFIX"] = base
     os.environ["DUO_SWEEP_W_VALUE"] = str(best_w)
@@ -1121,6 +1162,43 @@ def parse_dataset_best_raw(text: str, task_key: str) -> float | None:
         lo, hi = _safe_float(m.group(2)), _safe_float(m.group(3))
         return max(lo, hi)
     return None
+
+
+def parse_dataset_min_max_raw(text: str, task_key: str) -> tuple[float, float] | None:
+    """Dataset min/max from the same log line as ``parse_dataset_best_raw`` (for nmax oracle)."""
+    for m in TASK_DATASET_LINE.finditer(text):
+        if m.group(1) != task_key:
+            continue
+        lo, hi = _safe_float(m.group(2)), _safe_float(m.group(3))
+        return (lo, hi)
+    return None
+
+
+def raw_y_to_nmax(y: float, lo: float, hi: float) -> float | None:
+    """Map raw reward y to normalized score using dataset bounds from evaluate.log."""
+    if not (np.isfinite(y) and np.isfinite(lo) and np.isfinite(hi)):
+        return None
+    span = float(hi) - float(lo)
+    if abs(span) < 1e-20:
+        return None
+    v = (float(y) - float(lo)) / span
+    return v if np.isfinite(v) else None
+
+
+def raw_mean_std_to_nmax(
+    mean: float, std: float, lo: float, hi: float
+) -> tuple[float, float]:
+    """
+    Affine map paper raw mean±std into DUO's nmax scale using the same (lo, hi) as ``nmax_ep_reward``.
+
+    std scales as std / |hi-lo| (treat mean as a location statistic).
+    """
+    span = float(hi) - float(lo)
+    if not np.isfinite(span) or abs(span) < 1e-20:
+        return float("nan"), float("nan")
+    nm = (float(mean) - float(lo)) / span
+    ns = float(std) / abs(span)
+    return nm, ns
 
 
 def parse_offline_train_best_y(text: str, task_key: str) -> float | None:
@@ -2153,6 +2231,8 @@ ANALYSIS_TABLE_DIR = _PROJECT_ROOT / "results" / "analysis_table"
 OUTPUT_BASE = ANALYSIS_TABLE_DIR / "max_short"
 NMAX_TEX = ANALYSIS_TABLE_DIR / "nmax.tex"
 REAL_BASE = ANALYSIS_TABLE_DIR / "real"
+MAX_REAL_TASK_BASE = ANALYSIS_TABLE_DIR / "max_real_task"
+NMAX_REAL_TASK_BASE = ANALYSIS_TABLE_DIR / "nmax_real_task"
 TRAJECTORY_HYPER_TEX = ANALYSIS_TABLE_DIR / "trajectory_hyperparams.tex"
 UNISO_RESULT_TEX = ANALYSIS_TABLE_DIR / "uniso_result.tex"
 UNISO_NRESULT_TEX = ANALYSIS_TABLE_DIR / "uniso_nresult.tex"
@@ -2162,13 +2242,29 @@ W_ABLATION_CSV = ANALYSIS_TABLE_DIR / "w_ablation.csv"
 CE_ABLATION_TEX = ANALYSIS_TABLE_DIR / "ce_ablation.tex"
 CE_ABLATION_CSV = ANALYSIS_TABLE_DIR / "ce_ablation.csv"
 
-# 固定 sweep-w 的两个目录名（相对 results/eval_sweep_w_text/）
+# 固定 multitask text 目录名（相对 results/epoch1400/，无则回退 epoch1500/）
 SWEEP_W_DEFAULT_BASE_DIRNAME = (
     "mt_911054c35daad7e0_textcond_mttextonly_tsbias0.5_lr0.0002"
 )
 SWEEP_W_DEFAULT_CE_DIRNAME = (
     "mt_911054c35daad7e0_textcond_mttextonly_ce0.005_tsbias0.5_lr0.0002"
 )
+
+# Analysis tables (nmax/max_short) should use checkpoint-eval logs at a fixed epoch
+# when available, e.g. eval_w8p0_1400epochs.log. Set to empty to disable filtering.
+_analysis_epoch = os.environ.get("DUO_ANALYSIS_EVAL_EPOCHS", "").strip()
+if not _analysis_epoch:
+    _analysis_epoch = "1400"
+os.environ.setdefault("DUO_EVAL_LOG_EPOCHS", _analysis_epoch)
+
+# Default: point multitask-text column to results/epoch1400/<mt_*> (fallback: epoch1500)
+_swp_default = (DUO_RESULTS / DEFAULT_ANALYSIS_RESULTS_EPOCH_DIR / SWEEP_W_DEFAULT_CE_DIRNAME).resolve()
+if not _swp_default.is_dir():
+    _swp_default = (
+        DUO_RESULTS / LEGACY_ANALYSIS_RESULTS_EPOCH_DIR / SWEEP_W_DEFAULT_CE_DIRNAME
+    ).resolve()
+if _swp_default.is_dir():
+    os.environ.setdefault("SWEEP_W_MODEL_DIR", str(_swp_default))
 
 LATEX_CAPTION = (
     "Un-normalized \\texttt{max\\_ep\\_reward} (mean $\\pm$ std over runs): "
@@ -2196,7 +2292,7 @@ LATEX_LABEL_ALL = "tab:gtg-duo-eval-all-text"
 
 
 def _run_w_ablation() -> None:
-    """Write ``results/analysis_table/w_ablation.{tex,csv}`` from ``eval_sweep_w_text`` (see ``make_sweep_w_ablation_table.py``)."""
+    """Write ``results/analysis_table/w_ablation.{tex,csv}`` from results sweep dir (see ``make_sweep_w_ablation_table.py``)."""
     import importlib.util
 
     p = Path(__file__).resolve().parent / "make_sweep_w_ablation_table.py"
@@ -2204,8 +2300,8 @@ def _run_w_ablation() -> None:
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(mod)
-    sweep_root = DUO_RESULTS / "eval_sweep_w_text"
-    root = (sweep_root / SWEEP_W_DEFAULT_BASE_DIRNAME).resolve()
+    sweep_root = _duo_sweep_results_subdir_path(DUO_RESULTS)
+    root = (sweep_root / SWEEP_W_DEFAULT_CE_DIRNAME).resolve()
     if not root.is_dir():
         root = mod.discover_default_model_dir(sweep_root)
     mod.write_w_ablation(root, gtg_results=GTG_RESULTS)
@@ -2327,8 +2423,9 @@ def _collect_best_real_world_nmax(
 
     Returns:
       out[mode][task] = {
-        "nmax_mean": float, "nmax_std": float, "runs": int,
-        "best_hyper": str, "best_hyper_mean": float,
+        "nmax_mean": float, "nmax_std": float,
+        "max_mean": float, "max_std": float,
+        "runs": int, "best_hyper": str, "best_hyper_mean": float,
       }
     where ``best_hyper`` is the relative folder under ``<task>_frac*_sigma*/`` (few-shot may
     contain an extra pool folder like ``fs_k128_worst/``).
@@ -2337,8 +2434,8 @@ def _collect_best_real_world_nmax(
     if not root.is_dir():
         return {}
 
-    # mode -> task -> hyper_rel -> [nmax]
-    buckets: dict[str, dict[str, dict[str, list[float]]]] = defaultdict(
+    # mode -> task -> hyper_rel -> [(nmax, max_ep_reward), ...]
+    buckets: dict[str, dict[str, dict[str, list[tuple[float, float]]]]] = defaultdict(
         lambda: defaultdict(lambda: defaultdict(list))
     )
     for evaluate_log in root.rglob("evaluate.log"):
@@ -2374,7 +2471,10 @@ def _collect_best_real_world_nmax(
         nmax = float(v[1])
         if not np.isfinite(nmax):
             continue
-        buckets[mode][task][hyper_rel].append(nmax)
+        mx = float(v[0])
+        if not np.isfinite(mx):
+            mx = float("nan")
+        buckets[mode][task][hyper_rel].append((nmax, mx))
 
     out: dict[str, dict[str, dict[str, Any]]] = {}
     for mode, by_task in buckets.items():
@@ -2384,16 +2484,24 @@ def _collect_best_real_world_nmax(
             best_mu = float("-inf")
             best_sd = float("nan")
             best_n = 0
-            for h, vals in by_hyper.items():
-                mu, sd = mean_std(vals)
+            for h, pairs in by_hyper.items():
+                nmaxs = [p[0] for p in pairs]
+                mu, sd = mean_std(nmaxs)
                 if not np.isfinite(mu):
                     continue
                 if mu > best_mu:
-                    best_mu, best_sd, best_n, best_h = mu, sd, len(vals), h
+                    best_mu, best_sd, best_n, best_h = mu, sd, len(pairs), h
+                    maxs = [p[1] for p in pairs if np.isfinite(p[1])]
+                    if maxs:
+                        max_mu, max_sd = mean_std(maxs)
+                    else:
+                        max_mu, max_sd = float("nan"), float("nan")
             if best_h:
                 out[mode][task] = {
                     "nmax_mean": best_mu,
                     "nmax_std": best_sd,
+                    "max_mean": max_mu,
+                    "max_std": max_sd,
                     "runs": best_n,
                     "best_hyper": best_h,
                     "best_hyper_mean": best_mu,
@@ -2467,6 +2575,418 @@ def write_real_world_tables(
     out_base.with_suffix(".tex").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _real_task_root(results_root: Path) -> Path:
+    return results_root / "real_task"
+
+
+def _find_real_task_eval_log(
+    real_root: Path, mode: str, task: str, best_hyper: str
+) -> Path | None:
+    """Locate one ``evaluate.log`` for the given mode/task/best_hyper (same layout as aggregation)."""
+    if not real_root.is_dir():
+        return None
+    for evaluate_log in sorted(real_root.rglob("evaluate.log")):
+        if not _ALL_RUN_DIR_RE.match(evaluate_log.parent.name):
+            continue
+        try:
+            rel = evaluate_log.relative_to(real_root)
+        except ValueError:
+            continue
+        parts = rel.parts
+        if len(parts) < 5:
+            continue
+        if parts[0] != mode:
+            continue
+        task_dir = parts[1]
+        if not task_dir.startswith(f"{task}_"):
+            continue
+        hyper_rel = "/".join(parts[2:-2]).strip() or "."
+        if hyper_rel == best_hyper:
+            return evaluate_log
+    return None
+
+
+def _read_evaluate_log_text(log: Path) -> str:
+    return strip_ansi(log.read_text(encoding="utf-8", errors="replace"))
+
+
+def _parse_real_world_fewshot_pool(text: str, task: str) -> tuple[int | None, str, int] | None:
+    """Parse ``real_world_fewshot_pool`` line from ``scripts/evaluate.py`` (post-fix logs)."""
+    for m in RE_REAL_WORLD_FEWSHOT_POOL.finditer(text):
+        if m.group(1) != task:
+            continue
+        k_raw = m.group(2).strip()
+        mode_s = m.group(3).strip()
+        try:
+            seed_i = int(float(m.group(4).strip()))
+        except ValueError:
+            continue
+        if k_raw.lower() in ("none", "null"):
+            fk: int | None = None
+        else:
+            try:
+                fk = int(float(k_raw))
+            except ValueError:
+                fk = None
+        return (fk, mode_s, seed_i)
+    return None
+
+
+def _real_world_y_bounds_full(task: str) -> tuple[float, float] | None:
+    """``(y_min, y_max)`` over merged ``fewshot_data`` JSON (all points)."""
+    try:
+        from diffuser.datasets.real_world_fewshot import load_real_world_y_min_max_full
+
+        return load_real_world_y_min_max_full(task)
+    except (FileNotFoundError, KeyError, ValueError, OSError):
+        return None
+
+
+def _dbest_all_from_fewshot_full(task: str) -> float | None:
+    """``max(y)`` on full merged ``fewshot_data`` JSON (same as evaluate ``offline_dataset_best_y_all``)."""
+    try:
+        from diffuser.datasets.real_world_fewshot import load_real_world_raw
+
+        _, y = load_real_world_raw(
+            task, fewshot_k=None, fewshot_mode="all", fewshot_seed=0
+        )
+        yv = np.asarray(y, dtype=np.float64).ravel()
+        v = float(np.max(yv))
+        return v if np.isfinite(v) else None
+    except (FileNotFoundError, KeyError, ValueError, OSError):
+        return None
+
+
+def _dbest_fs_raw_from_eval_fewshot_log(
+    real_root: Path, task: str, fs_best_hyper: str | None
+) -> float | None:
+    """
+    Few-shot **training pool** best y: ``offline_training_best_y`` with pool ``(k, mode, seed)``.
+
+    Pool parameters are read from ``evaluate.log`` (``real_world_fewshot_pool``); if absent,
+    falls back to ``offline_train_best_y`` line only (legacy logs).
+    """
+    if not fs_best_hyper:
+        return None
+    log = _find_real_task_eval_log(real_root, "few_shot", task, fs_best_hyper)
+    if log is None:
+        return None
+    text = _read_evaluate_log_text(log)
+    pool = _parse_real_world_fewshot_pool(text, task)
+    if pool is not None:
+        fk, fm, fseed = pool
+        try:
+            from diffuser.datasets.real_world_fewshot import load_real_world_raw
+
+            _, y = load_real_world_raw(
+                task,
+                fewshot_k=fk,
+                fewshot_mode=str(fm),  # type: ignore[arg-type]
+                fewshot_seed=int(fseed),
+            )
+            yv = np.asarray(y, dtype=np.float64).ravel()
+            v = float(np.max(yv))
+            if np.isfinite(v):
+                return v
+        except (FileNotFoundError, KeyError, ValueError, OSError):
+            pass
+    return parse_offline_train_best_y(text, task)
+
+
+def _dbest_fs_nmax_from_fewshot_data(
+    real_root: Path, task: str, fs_best_hyper: str | None
+) -> float | None:
+    """``Dbest(few-shot)`` in nmax scale: pool best y normalized by **full** ``fewshot_data`` y bounds."""
+    bounds = _real_world_y_bounds_full(task)
+    if bounds is None:
+        return None
+    y_lo, y_hi = bounds
+    y_fs = _dbest_fs_raw_from_eval_fewshot_log(real_root, task, fs_best_hyper)
+    if y_fs is None or not np.isfinite(float(y_fs)):
+        return None
+    return raw_y_to_nmax(float(y_fs), float(y_lo), float(y_hi))
+
+
+def _fmt_scalar_latex(v: float | None) -> str:
+    if v is None or not np.isfinite(float(v)):
+        return "--"
+    return f"{float(v):.{DECIMALS}f}"
+
+
+def _duo_stat_pm_latex(st: dict[str, Any] | None, key_mean: str, key_std: str) -> str:
+    if st is None:
+        return "--"
+    m, s = st.get(key_mean), st.get(key_std)
+    if m is None:
+        return "--"
+    try:
+        mf = float(m)
+    except (TypeError, ValueError):
+        return "--"
+    if not np.isfinite(mf):
+        return "--"
+    return fmt_pm_latex(m, s)
+
+
+def _mean_from_rank_cell(cell: str) -> float:
+    v = parse_mean_from_text_cell(cell)
+    return float("nan") if v is None else float(v)
+
+
+def _uniso_improved_t_cells_nmax_with_full_bounds(
+    urow: dict[str, Any], y_lo: float, y_hi: float
+) -> tuple[str, str]:
+    """
+    Map paper Improved UniSO-T ZS/FS mean±std into nmax using **DUO** full ``fewshot_data`` y bounds.
+
+    Cross-paper comparability is approximate when raw scales differ from this repo's JSON.
+    """
+    span = float(y_hi) - float(y_lo)
+    if not np.isfinite(span) or abs(span) < 1e-20:
+        return ("--", "--")
+
+    def one(key: str) -> str:
+        if key not in urow:
+            return "--"
+        tup = urow[key]
+        if not isinstance(tup, (tuple, list)) or len(tup) < 2:
+            return "--"
+        mu_f, sd_f = float(tup[0]), float(tup[1])
+        nm, ns = raw_mean_std_to_nmax(mu_f, sd_f, y_lo, y_hi)
+        return fmt_pm_latex(nm, ns)
+
+    return one("zero_shot"), one("few_shot")
+
+
+def write_max_real_task_comparison_tables(
+    out_base: Path,
+    results_root: Path,
+    caption: str,
+    label: str,
+) -> None:
+    """
+    Raw ``max_ep_reward``: DUO vs Improved UniSO-T only (paper ZS / FS).
+
+    ``$\mathcal{D}_{\mathrm{all}}$(best)``: ``max(y)`` on merged ``fewshot_data`` JSON (same as evaluate).
+
+    ``$\mathcal{D}_{\mathrm{fs}}$(best)``: few-shot pool ``max(y)`` via ``offline_training_best_y`` with pool
+    ``(k, mode, seed)`` parsed from ``evaluate.log`` (or legacy ``offline_train_best_y`` line).
+    """
+    agg = _collect_best_real_world_nmax(results_root)
+    zs = agg.get("zero_shot", {})
+    fs = agg.get("few_shot", {})
+    rr = _real_task_root(results_root)
+
+    tasks = [t for t in REAL_TASK_ORDER if t in zs or t in fs]
+    extra = sorted((set(zs) | set(fs)) - set(tasks))
+    tasks.extend(extra)
+
+    n_method = 4
+    means_m = np.full((len(tasks), n_method), np.nan, dtype=np.float64)
+    csv_rows: list[dict[str, Any]] = []
+
+    lines: list[str] = [
+        r"% Requires: \usepackage{booktabs}, \usepackage{graphicx}, \usepackage{xcolor}.",
+        r"% UniSO: Improved UniSO-T only (paper Table~6 ZS w/ metadata; Table~3 FS).",
+        r"\begin{table*}[t!]",
+        rf"\caption{{{caption}}}",
+        r"\vspace{0.3em}",
+        r"\centering",
+        r"\resizebox{\linewidth}{!}{",
+        r"\begin{tabular}{l|cc|cc|cc}",
+        r"\toprule",
+        r"Task & $\mathcal{D}_{\mathrm{all}}$(best) & $\mathcal{D}_{\mathrm{fs}}$(best) & "
+        r"\shortstack{UniSO-T\\zero-shot} & \shortstack{UniSO-T\\few-shot} & DUO-ZS & DUO-FS \\",
+        r"\midrule",
+    ]
+
+    for ri, task in enumerate(tasks):
+        z = zs.get(task)
+        f = fs.get(task)
+        urow = UNISO_IMPROVED_T_REAL_TASK_PAPER.get(task, {})
+        d_all = _dbest_all_from_fewshot_full(task)
+        d_fs = _dbest_fs_raw_from_eval_fewshot_log(
+            rr, task, None if f is None else str(f.get("best_hyper", ""))
+        )
+        c_uzs = (
+            fmt_pm_latex(*urow["zero_shot"])
+            if isinstance(urow.get("zero_shot"), (tuple, list))
+            else "--"
+        )
+        c_ufs = (
+            fmt_pm_latex(*urow["few_shot"])
+            if isinstance(urow.get("few_shot"), (tuple, list))
+            else "--"
+        )
+        c_zs = _duo_stat_pm_latex(z, "max_mean", "max_std")
+        c_fs = _duo_stat_pm_latex(f, "max_mean", "max_std")
+
+        means_m[ri, 0] = _mean_from_rank_cell(c_uzs)
+        means_m[ri, 1] = _mean_from_rank_cell(c_ufs)
+        means_m[ri, 2] = _mean_from_rank_cell(c_zs)
+        means_m[ri, 3] = _mean_from_rank_cell(c_fs)
+
+        method_cells = [c_uzs, c_ufs, c_zs, c_fs]
+        method_cells = rank_colorize_latex_cells(method_cells)
+        tname = REAL_TASK_LATEX_NAME.get(task, task).replace("_", r"\_")
+        lines.append(
+            f"{tname} & {_fmt_scalar_latex(d_all)} & {_fmt_scalar_latex(d_fs)} & "
+            + " & ".join(method_cells)
+            + r" \\"
+        )
+        csv_rows.append(
+            {
+                "task": task,
+                "Dbest_all": "" if d_all is None else round(float(d_all), DECIMALS),
+                "Dbest_few_shot": "" if d_fs is None else round(float(d_fs), DECIMALS),
+                "UniSO_T_zero_shot": c_uzs.replace("$", "").replace(r"\pm", "±"),
+                "UniSO_T_few_shot": c_ufs.replace("$", "").replace(r"\pm", "±"),
+                "DUO_zero_shot": c_zs.replace("$", "").replace(r"\pm", "±"),
+                "DUO_few_shot": c_fs.replace("$", "").replace(r"\pm", "±"),
+            }
+        )
+
+    mu_r, sd_r = column_mean_rank_stats_higher_nan_worst(means_m)
+    rank_plain = [fmt_mean_pm_rank(mu_r[j], sd_r[j]) for j in range(n_method)]
+    rank_parts = rank_colorize_latex_mean_rank_row(list(rank_plain))
+    lines.extend(
+        [
+            r"\midrule",
+            r"Mean rank & / & / & " + " & ".join(rank_parts) + r" \\",
+            r"\bottomrule",
+            r"\end{tabular}",
+            r"}",
+            rf"\label{{{label}}}",
+            r"\end{table*}",
+            "",
+        ]
+    )
+    out_base.parent.mkdir(parents=True, exist_ok=True)
+    out_base.with_suffix(".tex").write_text("\n".join(lines), encoding="utf-8")
+    csv_rows.append(
+        {
+            "task": "Mean rank",
+            "Dbest_all": "/",
+            "Dbest_few_shot": "/",
+            "UniSO_T_zero_shot": rank_plain[0].replace("$", "").replace(r"\pm", "±"),
+            "UniSO_T_few_shot": rank_plain[1].replace("$", "").replace(r"\pm", "±"),
+            "DUO_zero_shot": rank_plain[2].replace("$", "").replace(r"\pm", "±"),
+            "DUO_few_shot": rank_plain[3].replace("$", "").replace(r"\pm", "±"),
+        }
+    )
+    write_csv(out_base.with_suffix(".csv"), csv_rows)
+
+
+def write_nmax_real_task_comparison_tables(
+    out_base: Path,
+    results_root: Path,
+    caption: str,
+    label: str,
+) -> None:
+    """
+    DUO: ``nmax_ep_reward`` (evaluate: full ``fewshot_data`` y bounds).
+
+    UniSO: paper ZS/FS mapped with the same full-data bounds (approximate cross-paper).
+
+    ``$\mathcal{D}_{\mathrm{fs}}$(best)`` nmax: few-shot pool best y with those full bounds.
+    """
+    agg = _collect_best_real_world_nmax(results_root)
+    zs = agg.get("zero_shot", {})
+    fs = agg.get("few_shot", {})
+    rr = _real_task_root(results_root)
+
+    tasks = [t for t in REAL_TASK_ORDER if t in zs or t in fs]
+    extra = sorted((set(zs) | set(fs)) - set(tasks))
+    tasks.extend(extra)
+
+    n_method = 4
+    means_m = np.full((len(tasks), n_method), np.nan, dtype=np.float64)
+    csv_rows: list[dict[str, Any]] = []
+
+    lines: list[str] = [
+        r"% Requires: \usepackage{booktabs}, \usepackage{graphicx}, \usepackage{xcolor}.",
+        r"% UniSO: paper ZS/FS mean$\pm$std with DUO full fewshot\_data y bounds (approximate).",
+        r"% D_fs(best) nmax: few-shot pool best y with the same full-data bounds.",
+        r"\begin{table*}[t!]",
+        rf"\caption{{{caption}}}",
+        r"\vspace{0.3em}",
+        r"\centering",
+        r"\resizebox{\linewidth}{!}{",
+        r"\begin{tabular}{l|c|cc|cc}",
+        r"\toprule",
+        r"Task & $\mathcal{D}_{\mathrm{fs}}$(best) & "
+        r"\shortstack{UniSO-T\\zero-shot} & \shortstack{UniSO-T\\few-shot} & DUO-ZS & DUO-FS \\",
+        r"\midrule",
+    ]
+
+    for ri, task in enumerate(tasks):
+        z = zs.get(task)
+        f = fs.get(task)
+        fs_h = None if f is None else str(f.get("best_hyper", ""))
+        d_fs_n = _dbest_fs_nmax_from_fewshot_data(rr, task, fs_h)
+        urow = UNISO_IMPROVED_T_REAL_TASK_PAPER.get(task, {})
+        _yb = _real_world_y_bounds_full(task)
+        if _yb is None:
+            c_uzs, c_ufs = ("--", "--")
+        else:
+            c_uzs, c_ufs = _uniso_improved_t_cells_nmax_with_full_bounds(
+                urow, float(_yb[0]), float(_yb[1])
+            )
+        c_zs = _duo_stat_pm_latex(z, "nmax_mean", "nmax_std")
+        c_fs = _duo_stat_pm_latex(f, "nmax_mean", "nmax_std")
+
+        means_m[ri, 0] = _mean_from_rank_cell(c_uzs)
+        means_m[ri, 1] = _mean_from_rank_cell(c_ufs)
+        means_m[ri, 2] = _mean_from_rank_cell(c_zs)
+        means_m[ri, 3] = _mean_from_rank_cell(c_fs)
+
+        method_cells = [c_uzs, c_ufs, c_zs, c_fs]
+        method_cells = rank_colorize_latex_cells(method_cells)
+        tname = REAL_TASK_LATEX_NAME.get(task, task).replace("_", r"\_")
+        lines.append(
+            f"{tname} & {_fmt_scalar_latex(d_fs_n)} & " + " & ".join(method_cells) + r" \\"
+        )
+        csv_rows.append(
+            {
+                "task": task,
+                "Dbest_few_shot_nmax": "" if d_fs_n is None else round(float(d_fs_n), DECIMALS),
+                "UniSO_T_zero_shot": c_uzs.replace("$", "").replace(r"\pm", "±"),
+                "UniSO_T_few_shot": c_ufs.replace("$", "").replace(r"\pm", "±"),
+                "DUO_zero_shot": c_zs.replace("$", "").replace(r"\pm", "±"),
+                "DUO_few_shot": c_fs.replace("$", "").replace(r"\pm", "±"),
+            }
+        )
+
+    mu_r, sd_r = column_mean_rank_stats_higher_nan_worst(means_m)
+    rank_plain = [fmt_mean_pm_rank(mu_r[j], sd_r[j]) for j in range(n_method)]
+    rank_parts = rank_colorize_latex_mean_rank_row(list(rank_plain))
+    lines.extend(
+        [
+            r"\midrule",
+            r"Mean rank & / & " + " & ".join(rank_parts) + r" \\",
+            r"\bottomrule",
+            r"\end{tabular}",
+            r"}",
+            rf"\label{{{label}}}",
+            r"\end{table*}",
+            "",
+        ]
+    )
+    out_base.parent.mkdir(parents=True, exist_ok=True)
+    out_base.with_suffix(".tex").write_text("\n".join(lines), encoding="utf-8")
+    csv_rows.append(
+        {
+            "task": "Mean rank",
+            "Dbest_few_shot_nmax": "/",
+            "UniSO_T_zero_shot": rank_plain[0].replace("$", "").replace(r"\pm", "±"),
+            "UniSO_T_few_shot": rank_plain[1].replace("$", "").replace(r"\pm", "±"),
+            "DUO_zero_shot": rank_plain[2].replace("$", "").replace(r"\pm", "±"),
+            "DUO_few_shot": rank_plain[3].replace("$", "").replace(r"\pm", "±"),
+        }
+    )
+    write_csv(out_base.with_suffix(".csv"), csv_rows)
+
+
 def main(mode: str = "all") -> None:
     if mode == "w_ablation":
         _run_w_ablation()
@@ -2486,7 +3006,7 @@ def main(mode: str = "all") -> None:
     _swp = _env_compat("DUO_SWEEP_W_PREFIX", "GTGDFGO_SWEEP_W_PREFIX", "")
     _wv = _env_compat("DUO_SWEEP_W_VALUE", "GTGDFGO_SWEEP_W_VALUE", "")
     if _swp.strip():
-        print(f"eval_sweep_w_text: DUO multitask text uses w={_wv} under {_swp}")
+        print(f"DUO multitask text (sweep w): w={_wv} under {_swp}")
 
     do_short = mode in ("all", "short")
     do_final = mode in ("all", "final")
@@ -2527,11 +3047,40 @@ def main(mode: str = "all") -> None:
             "Each cell is mean $\\pm$ std over seeds for the best hyperfolder under results/real_task.",
             label="tab:duo-real-world",
         )
+        _wrote_real_task_compare = False
+        try:
+            write_max_real_task_comparison_tables(
+                MAX_REAL_TASK_BASE,
+                DUO_RESULTS,
+                caption=(
+                    "Real-world tasks: raw max reward (DUO: mean $\\pm$ std at best-nmax hyper). "
+                    "UniSO: Improved UniSO-T (paper Table~6 ZS w/ metadata; Table~3 FS). "
+                    "$\\mathcal{D}_{\\mathrm{all}}$(best) is ``max(y)`` on merged ``fewshot_data``; "
+                    "$\\mathcal{D}_{\\mathrm{fs}}$(best) is few-shot pool ``max(y)`` (same rules as evaluate)."
+                ),
+                label="tab:max-real-task",
+            )
+            write_nmax_real_task_comparison_tables(
+                NMAX_REAL_TASK_BASE,
+                DUO_RESULTS,
+                caption=(
+                    "Real-world tasks: DUO nmax uses full ``fewshot_data`` y min/max (same as evaluate). "
+                    "UniSO-T ZS/FS columns map paper mean $\\pm$ std with those bounds (approximate). "
+                    "$\\mathcal{D}_{\\mathrm{fs}}$(best) nmax: few-shot pool best y with the same full-data bounds."
+                ),
+                label="tab:nmax-real-task",
+            )
+            _wrote_real_task_compare = True
+        except Exception as e:
+            print(f"[warn] max_real_task / nmax_real_task tables skipped: {e}")
         print(f"Wrote {out_base.with_suffix('.csv')}")
         print(f"Wrote {tex_path}")
         write_latex_trajectory_hyperparams(TRAJECTORY_HYPER_TEX)
         print(f"Wrote {NMAX_TEX}")
         print(f"Wrote {REAL_BASE.with_suffix('.tex')}")
+        if _wrote_real_task_compare:
+            print(f"Wrote {MAX_REAL_TASK_BASE.with_suffix('.tex')}")
+            print(f"Wrote {NMAX_REAL_TASK_BASE.with_suffix('.tex')}")
         print(f"Wrote {TRAJECTORY_HYPER_TEX}")
         print(
             f"DUO experiments: {len(duo)}, GTG experiments: {len(gtg)}, comparison rows: {len(rows)}"
@@ -2545,8 +3094,10 @@ def main(mode: str = "all") -> None:
             write_ce_ablation(
                 CE_ABLATION_TEX,
                 CE_ABLATION_CSV,
+                # base: keep using the original sweep directory (legacy, still the source of truth)
                 DUO_RESULTS / "eval_sweep_w_text" / SWEEP_W_DEFAULT_BASE_DIRNAME,
-                DUO_RESULTS / "eval_sweep_w_text" / SWEEP_W_DEFAULT_CE_DIRNAME,
+                # ce: checkpoint-sweep results (epoch1400, fallback epoch1500)
+                _duo_sweep_results_subdir_path(DUO_RESULTS) / SWEEP_W_DEFAULT_CE_DIRNAME,
             )
         except Exception as e:
             print(f"[warn] ce_ablation skipped: {e}")
@@ -2579,7 +3130,7 @@ def _parse_args() -> argparse.Namespace:
             "Which outputs to generate: "
             "short = analysis_table/max_short (wide CSV+TeX), nmax.tex, and trajectory_hyperparams.tex; "
             "final = analysis_table/text_conditioned_result_analysis (DUO: one column per hyper under all_frac…); "
-            "w_ablation = analysis_table/w_ablation from eval_sweep_w_text (pinned mt dir when available); "
+            "w_ablation = analysis_table/w_ablation from results/epoch1400 (fallback epoch1500; pinned mt dir when available); "
             "all = short + final (default)."
         ),
     )

@@ -199,6 +199,15 @@ def multitask_mixed_basename(traj_signature: str, latent_dim: int = 32) -> str:
     return f"mixed_{core}_latent{int(latent_dim)}.p"
 
 
+def multitask_vae_dir_token(traj_signature: str) -> str:
+    """
+    多任务 VAE 保存目录在 ``..._dim{fd}`` 后插入的片段，与
+    :func:`multitask_mixed_basename` 中 ``mt_<hex>`` 使用同一 :func:`multitask_slug_id`。
+    当轨迹签名（n_traj/k/eps/horizon 等）变化时，会落到新目录，从而触发重新训练（若无权重）。
+    """
+    return f"_{multitask_slug_id(traj_signature)}"
+
+
 def multitask_checkpoint_hyper_dir(
     sig: str,
     ret_infix: str,

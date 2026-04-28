@@ -1,0 +1,12 @@
+{
+  "defaults": { "n_traj": 1000, "k": 20, "eps": 0.05 },
+  "ant": { "n_traj": 750, "k": 20, "eps": 0.05 },
+  "dkitty": { "n_traj": 1000, "k": 20, "eps": 0.01 },
+  "superconductor": { "n_traj": 750, "k": 20, "eps": 0.05 },
+  "tfbind8": { "n_traj": 2500, "k": 50, "eps": 0.05 },
+  "tfbind10": { "n_traj": 1500, "k": 50, "eps": 0.05 },
+  "gtopx2": { "n_traj": 500, "k": 20, "eps": 0.05 },
+  "gtopx3": { "n_traj": 500, "k": 10, "eps": 0.01 },
+  "gtopx4": { "n_traj": 750, "k": 20, "eps": 0.05 },
+  "gtopx6": { "n_traj": 750, "k": 20, "eps": 0.05 }
+}

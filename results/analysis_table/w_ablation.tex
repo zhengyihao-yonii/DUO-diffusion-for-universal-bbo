@@ -1,7 +1,7 @@
 % Requires: \usepackage{booktabs}, \usepackage{graphicx}, \usepackage{xcolor}.
 % w_ablation: pooled over all seed* (and legacy run*_seed* / run_*/seed*) under model dir; see scripts/make_sweep_w_ablation_table.py
 \begin{table*}[t!]
-\caption{Text CFG ablation (\texttt{condition\_guidance\_w\_text}): mean $\pm$ std of \texttt{max\_ep\_reward} pooled over all \texttt{seed*} runs under \texttt{results/eval\_sweep\_w\_text/mt\_911054c35daad7e0\_textcond\_mttextonly\_tsbias0.5\_lr0.0002}. Baselines: $\mathcal{D}$(best), UniSO-T Improved, GTG ST.}}
+\caption{Text CFG ablation (\texttt{condition\_guidance\_w\_text}): mean $\pm$ std of \texttt{max\_ep\_reward} pooled over all \texttt{seed*} runs under \texttt{results/epoch1500/mt\_911054c35daad7e0\_textcond\_mttextonly\_ce0.005\_tsbias0.5\_lr0.0002}. Baselines: $\mathcal{D}$(best), UniSO-T Improved, GTG ST.}}
 \vspace{0.3em}
 \centering
 \resizebox{\linewidth}{!}{
@@ -9,17 +9,17 @@
 \toprule
 Task & $\mathcal{D}$(best) & \shortstack{UniSO-T\\Improved} & \shortstack{GTG\\ST} & \shortstack{\texttt{w=8.0}} \\
 \midrule
-Ant & 165.326 & \textbf{\textcolor{violet}{455.658 $\pm$ 39.188}} & 452.330 $\pm$ 61.502 & \textbf{\textcolor{blue}{559.863 $\pm$ 8.221}} \\
-D'Kitty & 199.363 & 222.007 $\pm$ 33.677 & \textbf{\textcolor{violet}{264.857 $\pm$ 17.571}} & \textbf{\textcolor{blue}{313.803 $\pm$ 4.345}} \\
-Superconductor & 74.000 & 82.642 $\pm$ 3.467 & \textbf{\textcolor{violet}{89.802 $\pm$ 6.763}} & \textbf{\textcolor{blue}{108.143 $\pm$ 8.186}} \\
-TF Bind 8 & 0.439 & \textbf{\textcolor{violet}{0.857 $\pm$ 0.069}} & \textbf{\textcolor{blue}{0.934 $\pm$ 0.030}} & 0.855 $\pm$ 0.052 \\
-TF Bind 10 & 0.005 & \textbf{\textcolor{blue}{0.944 $\pm$ 0.794}} & 0.632 $\pm$ 0.106 & \textbf{\textcolor{violet}{0.642 $\pm$ 0.174}} \\
-GTOPX 2 & -196.663 & -90.106 $\pm$ 8.223 & \textbf{\textcolor{violet}{-72.163 $\pm$ 8.495}} & \textbf{\textcolor{blue}{-44.477 $\pm$ 4.761}} \\
+Ant & 165.326 & \textbf{\textcolor{violet}{455.658 $\pm$ 39.188}} & 452.330 $\pm$ 61.502 & \textbf{\textcolor{blue}{567.907 $\pm$ 6.584}} \\
+D'Kitty & 199.363 & 222.007 $\pm$ 33.677 & \textbf{\textcolor{violet}{264.857 $\pm$ 17.571}} & \textbf{\textcolor{blue}{313.148 $\pm$ 3.560}} \\
+Superconductor & 74.000 & 82.642 $\pm$ 3.467 & \textbf{\textcolor{violet}{89.802 $\pm$ 6.763}} & \textbf{\textcolor{blue}{112.230 $\pm$ 8.100}} \\
+TF Bind 8 & 0.439 & 0.857 $\pm$ 0.069 & \textbf{\textcolor{violet}{0.934 $\pm$ 0.030}} & \textbf{\textcolor{blue}{0.958 $\pm$ 0.019}} \\
+TF Bind 10 & 0.005 & \textbf{\textcolor{blue}{0.944 $\pm$ 0.794}} & 0.632 $\pm$ 0.106 & \textbf{\textcolor{violet}{0.742 $\pm$ 0.080}} \\
+GTOPX 2 & -196.663 & -90.106 $\pm$ 8.223 & \textbf{\textcolor{violet}{-72.163 $\pm$ 8.495}} & \textbf{\textcolor{blue}{-60.605 $\pm$ 30.966}} \\
 GTOPX 3 & -152.364 & \textbf{\textcolor{violet}{-44.427 $\pm$ 13.456}} & -53.866 $\pm$ 9.877 & \textbf{\textcolor{blue}{-29.310 $\pm$ 2.237}} \\
-GTOPX 4 & -216.709 & -74.779 $\pm$ 11.032 & \textbf{\textcolor{violet}{-72.749 $\pm$ 6.632}} & \textbf{\textcolor{blue}{-54.560 $\pm$ 14.187}} \\
-GTOPX 6 & -111.666 & \textbf{\textcolor{violet}{-48.244 $\pm$ 5.766}} & -55.834 $\pm$ 9.655 & \textbf{\textcolor{blue}{-28.580 $\pm$ 2.489}} \\
+GTOPX 4 & -216.709 & -74.779 $\pm$ 11.032 & \textbf{\textcolor{violet}{-72.749 $\pm$ 6.632}} & \textbf{\textcolor{blue}{-57.540 $\pm$ 14.848}} \\
+GTOPX 6 & -111.666 & \textbf{\textcolor{violet}{-48.244 $\pm$ 5.766}} & -55.834 $\pm$ 9.655 & \textbf{\textcolor{blue}{-35.646 $\pm$ 12.122}} \\
 \midrule
-Mean rank & / & \textbf{\textcolor{violet}{2.333 $\pm$ 0.707}} & \textbf{\textcolor{violet}{2.333 $\pm$ 0.707}} & \textbf{\textcolor{blue}{1.333 $\pm$ 0.707}} \\
+Mean rank & / & \textbf{\textcolor{violet}{2.444 $\pm$ 0.726}} & \textbf{\textcolor{violet}{2.444 $\pm$ 0.527}} & \textbf{\textcolor{blue}{1.111 $\pm$ 0.333}} \\
 \bottomrule
 \end{tabular}
 }

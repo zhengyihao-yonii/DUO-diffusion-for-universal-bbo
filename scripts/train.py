@@ -10,6 +10,7 @@ import pickle as pkl
 wandb = None
 import os
 from pathlib import Path
+from typing import Optional
 from diffuser.models.vae import VAE
 from diffuser.utils.training import Trainer
 from diffuser.cpu_threads import apply_torch_cpu_threads_from_env
@@ -26,6 +27,7 @@ from diffuser.utils.vae_layout import (
     vae_state_pt_filename,
     vae_train_dir_suffix,
 )
+from diffuser.utils.traj_params import multitask_vae_dir_token
 from diffuser.utils.proxy_filter import proxy_filter_enabled_for_train
 
 apply_torch_cpu_threads_from_env()
@@ -200,6 +202,7 @@ def train_multitask_vae(
     *,
     num_epochs: int = 100,
     force_retrain: bool = False,
+    multitask_traj_signature: Optional[str] = None,
 ) -> VAE:
     """
     与 ``construct_trajectories`` 一致：多任务 VAE 仅通过 ``train_vae.main`` 训练，
@@ -235,10 +238,14 @@ def train_multitask_vae(
     ns.seed = int(seed)
     ns.device = str(device)
     ns.pretrained_vae_info = None
+    ns.multitask_traj_signature = (
+        str(multitask_traj_signature) if multitask_traj_signature is not None else None
+    )
 
     print(
         f"[multitask VAE] 调用 train_vae.main（与 construct 相同），tasks={_csv}, "
-        f"latent_dim={latent_dim}, num_epochs={num_epochs}"
+        f"latent_dim={latent_dim}, num_epochs={num_epochs}, "
+        f"multitask_traj_signature={ns.multitask_traj_signature!r}"
     )
     vae, _scalers, _save_dir = train_vae_main(ns)
     return vae
@@ -257,6 +264,7 @@ def main(**deps):
         wandb = None
 
     train_epochs = deps.pop("train_epochs", None)
+    _retrain = bool(deps.pop("retrain", False))
 
     RUN._update(deps)
     print(deps)
@@ -327,6 +335,16 @@ def main(**deps):
     _real_task_ft = getattr(Config, "real_task_text_only_finetune", False) or getattr(
         Config, "fewshot_text_only_finetune", False
     )
+    if _real_task_ft and train_epochs is not None:
+        _te_int = int(train_epochs)
+        # 微调常见 ~100 epoch；若误把「预训练轮数」当作 --train_epochs，会得到 1400/1500 等
+        if _te_int >= 500:
+            print(
+                f"⚠️ real_task 微调：--train_epochs={_te_int} 很大（n_train_steps={int(Config.n_train_steps)}）。"
+                f"若你只想微调约 100 epoch、仅多任务预训练用 1400+，请对 train 传更小的 --train_epochs，"
+                f"预训练步数只应体现在 load 的 state_*.pt，而不是本项。",
+                flush=True,
+            )
     if _real_task_ft:
         if not getattr(Config, "use_text_condition", False):
             Config.use_text_condition = True
@@ -415,11 +433,23 @@ def main(**deps):
                     except ValueError:
                         _to = 300
                     _st = wandb.Settings(init_timeout=_to)
+                _wandb_kw = {}
+                _wrid = _os.environ.get("WANDB_RUN_ID", "").strip()
+                if _wrid:
+                    _wandb_kw["id"] = _wrid
+                _wres = _os.environ.get("WANDB_RESUME", "").strip().lower()
+                if _wres in ("allow", "must", "auto", "true", "1"):
+                    _wandb_kw["resume"] = (
+                        "allow" if _wres in ("true", "1", "auto") else _wres
+                    )
+                if _wandb_kw:
+                    print(f"[wandb] resume kwargs: {_wandb_kw}", flush=True)
                 wandb.init(
                     project="decdiff-opt",
                     config=Config,
                     name=run_name,
                     settings=_st,
+                    **_wandb_kw,
                 )
             except Exception as e:
                 print(f"[wandb] init 失败（训练仍继续）: {e}", flush=True)
@@ -447,6 +477,12 @@ def main(**deps):
                 },
                 allow_val_change=True,
             )
+
+        from diffuser.utils.training import configure_wandb_step_axes
+
+        configure_wandb_step_axes(
+            include_proxy_axis=not Config.is_multitask and use_proxy_filter,
+        )
 
     _maybe_build_task_text_embeddings(Config)
 
@@ -716,6 +752,45 @@ def main(**deps):
     if _ld_path in ("", None):
         _ld_path = None
     _ld_epoch = getattr(Config, "load_diffusion_checkpoint_epoch", None)
+    if (
+        _ld_path is None
+        and (not _retrain)
+        and _ld_epoch is None
+        and bool(getattr(Config, "save_checkpoints", True))
+    ):
+        import re as _re_ckpt
+
+        def _resume_step_from_ckpt_path(p: str) -> int:
+            m = _re_ckpt.search(r"state_(\d+)\.pt$", p)
+            return int(m.group(1)) if m else 0
+
+        _ck_dir = os.path.join(str(logger.prefix), "checkpoint")
+        if os.path.isdir(_ck_dir):
+            from diffuser.utils.real_task_transfer import resolve_diffusion_state_pt
+
+            _cand = resolve_diffusion_state_pt(_ck_dir, Config)
+            if _cand and os.path.isfile(_cand):
+                _rs = _resume_step_from_ckpt_path(_cand)
+                _goal = int(getattr(Config, "n_train_steps", 0) or 0)
+                _ld_path = _cand
+                setattr(Config, "load_diffusion_checkpoint", _cand)
+                if _goal > 0 and _rs < _goal:
+                    print(
+                        f"[train] resume（默认）：加载 {_cand}（文件名 step≈{_rs}），"
+                        f"继续训练至 n_train_steps={_goal}；同目录从零重训请加 --retrain",
+                        flush=True,
+                    )
+                elif _goal > 0:
+                    print(
+                        f"[train] resume（默认）：加载 {_cand}（step≈{_rs}），"
+                        f"已达或超过 n_train_steps={_goal}，扩散循环将跳过。",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[train] resume（默认）：加载 {_cand}（step≈{_rs}）。",
+                        flush=True,
+                    )
     trainer_config = utils.Config(
         utils.Trainer,
         savepath='trainer_config.pkl',
@@ -750,12 +825,15 @@ def main(**deps):
     _vae_pt = vae_state_pt_filename(_latent)
     _vae_sub = vae_train_dir_suffix(_latent)
     if Config.is_multitask:
-        # 与 train_vae.main / construct 一致：multi_<字典序 token>
+        # 与 train_vae.main / construct 一致：multi_<字典序 token>，且与轨迹签名同 mt_<hex>（有签名时）
         train_tasks_str = multitask_path_token(
             canonical_train_tasks_csv(",".join(Config.train_tasks_list))
         )
+        _mt_sig = getattr(Config, "multitask_traj_signature", None)
+        _mt_tok = multitask_vae_dir_token(_mt_sig) if _mt_sig else ""
         vae_model_path = (
-            f"./trained_models/vae/multi_{train_tasks_str}_frac{Config.frac}_sigma{Config.sigma}_dim{fixed_dim}{_vae_sub}/{_vae_pt}"
+            f"./trained_models/vae/multi_{train_tasks_str}_frac{Config.frac}_sigma{Config.sigma}"
+            f"_dim{fixed_dim}{_mt_tok}{_vae_sub}/{_vae_pt}"
         )
         print(f"多任务模式，VAE模型路径: {vae_model_path}")
     else:
@@ -792,6 +870,9 @@ def main(**deps):
                 device=str(Config.device),
                 num_epochs=100,
                 force_retrain=False,
+                multitask_traj_signature=getattr(
+                    Config, "multitask_traj_signature", None
+                ),
             )
             # train_vae.main 已写入与 vae_model_path 同目录的权重与 scaler / vae_info
             vae.eval()
@@ -875,6 +956,30 @@ def main(**deps):
             color="cyan",
         )
 
+    # 多任务预训练等外源 state_*.pt 内可能带 step=5e4；本 run 的 n_train_steps 仅 1e4 时
+    # 不重置会满足 step>=n_train_total 而整段跳过扩散、wandb 只有 proxy 无 loss。
+    # 从**本 run** `.../seed*/checkpoint/` 续训时目录相同，不重置以保留 resume 语义。
+    _rft = bool(
+        getattr(Config, "real_task_text_only_finetune", False)
+        or getattr(Config, "fewshot_text_only_finetune", False)
+    )
+    if _rft and _ld_path:
+        _own_ckpt = os.path.normpath(
+            os.path.join(str(logger.prefix), "checkpoint")
+        )
+        _ld_dir = os.path.normpath(
+            os.path.dirname(os.path.abspath(str(_ld_path)))
+        )
+        if _ld_dir != _own_ckpt:
+            _ps = int(getattr(trainer, "step", 0) or 0)
+            trainer.step = 0
+            trainer.reset_parameters()
+            logger.print(
+                f"[train] real_task 微调：外源 checkpoint 的 step={_ps} 已置 0，"
+                f"本 run 将按 n_train_steps={int(getattr(Config, 'n_train_steps', 0) or 0)} 训练扩散并写入 wandb（loss / per-t）。",
+                color="yellow",
+            )
+
     # -----------------------------------------------------------------------------#
     # ------------------------ test forward & backward pass -----------------------#
     # -----------------------------------------------------------------------------#
@@ -903,30 +1008,53 @@ def main(**deps):
         # 训练代理模型
         trainer.train_proxy(n_train_steps=Config.proxy_n_train_steps)
     
-    # 训练扩散模型
-    logger.print("🚀 开始训练扩散模型... 🚀")
-    logger.print(f"📈 扩散模型训练参数:")
-    logger.print(f"   - 批量大小: {Config.batch_size}")
-    logger.print(f"   - 学习率: {Config.learning_rate}")
-    logger.print(f"   - 总训练步数: {Config.n_train_steps}")
-    logger.print(f"   - 设备: {Config.device}")
-    logger.print(f"   - 训练模式: {'多任务' if Config.is_multitask else '单任务'}")
-    
-    # 将模式信息添加到wandb
-    if wandb is not None:
-        wandb.log({'training_mode': 'multitask' if Config.is_multitask else 'singletask'})
-    
-    n_epochs = int(Config.n_train_steps // Config.n_steps_per_epoch)
-    logger.print(f"🔄 开始训练循环，共{n_epochs}个epoch")
-    
-    for i in range(n_epochs):
-        logger.print(f'📊 Epoch {i} / {n_epochs} | {logger.prefix}')
-        trainer.train(n_train_steps=Config.n_steps_per_epoch)
-        logger.print(f'✅ Epoch {i} 训练完成')
-        
-        # 记录epoch信息到wandb
+    # 训练扩散模型（支持 resume：trainer.step 可能已由 checkpoint 非零）
+    n_train_total = int(Config.n_train_steps)
+    spe = int(Config.n_steps_per_epoch)
+    total_epochs = max(1, n_train_total // spe)
+    if int(trainer.step) >= n_train_total:
+        logger.print(
+            f"[train] trainer.step={trainer.step} 已达 n_train_steps={n_train_total}，"
+            f"跳过扩散训练循环。",
+            color="yellow",
+        )
+    else:
+        logger.print("🚀 开始训练扩散模型... 🚀")
+        logger.print(f"📈 扩散模型训练参数:")
+        logger.print(f"   - 批量大小: {Config.batch_size}")
+        logger.print(f"   - 学习率: {Config.learning_rate}")
+        logger.print(f"   - 总训练步数: {Config.n_train_steps}")
+        logger.print(f"   - 设备: {Config.device}")
+        logger.print(f"   - 训练模式: {'多任务' if Config.is_multitask else '单任务'}")
+
         if wandb is not None:
-            wandb.log({'epoch': i, 'total_epochs': n_epochs})
+            wandb.log(
+                {
+                    "finetune_step": int(trainer.step),
+                    "training_mode": "multitask"
+                    if Config.is_multitask
+                    else "singletask",
+                }
+            )
+
+        logger.print(
+            f"🔄 训练循环（目标总步数 {n_train_total}，每 epoch {spe} 步，"
+            f"起始 trainer.step={trainer.step}，epoch 上界 {total_epochs}）"
+        )
+        while trainer.step < n_train_total:
+            cur_epoch = int(trainer.step // spe)
+            chunk = min(spe, n_train_total - int(trainer.step))
+            logger.print(f"📊 Epoch {cur_epoch} / {total_epochs} | {logger.prefix}")
+            trainer.train(n_train_steps=chunk)
+            logger.print(f"✅ Epoch {cur_epoch} 段训练完成（chunk={chunk}）")
+            if wandb is not None:
+                wandb.log(
+                    {
+                        "finetune_step": int(trainer.step),
+                        "epoch": cur_epoch,
+                        "total_epochs": total_epochs,
+                    }
+                )
     
     # 训练完成后的总结
     logger.print("🎉 扩散模型训练完成! 🎉")
@@ -935,7 +1063,13 @@ def main(**deps):
     
     # 记录训练完成信息到wandb
     if wandb is not None:
-        wandb.log({'training_completed': True, 'final_step': trainer.step})
+        wandb.log(
+            {
+                "finetune_step": int(trainer.step),
+                "training_completed": True,
+                "final_step": trainer.step,
+            }
+        )
 
     # save_freq 可能大于总步数（如微调 4000 步而 save_freq=5000），训练循环内可能从未触发 save
     logger.print("💾 保存最终扩散 checkpoint（含 EMA）…", flush=True)

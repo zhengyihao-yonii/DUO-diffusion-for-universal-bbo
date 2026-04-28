@@ -24,6 +24,7 @@ import argparse
 import csv
 import importlib.util
 import json
+import os
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -48,7 +49,10 @@ def _load_analyze():
 
 ae = _load_analyze()
 
-_EVAL_LOG_RE = re.compile(r"^eval_w(.+)\.log$")
+# Support both:
+# - eval_w8p0.log (legacy)
+# - eval_w8p0_1400epochs.log (checkpoint sweep; legacy 750epochs also supported)
+_EVAL_LOG_RE = re.compile(r"^eval_w([^_]+)(?:_(\d+)epochs)?\.log$")
 # 推荐：<mt_*>/seed0/eval_w*.log
 _RE_SEED_DIR = re.compile(r"^seed\d+$")
 # 曾用：<mt_*>/run0_seed0/
@@ -63,6 +67,40 @@ def w_from_eval_log_name(name: str) -> float:
     return float(m.group(1).replace("p", "."))
 
 
+def _desired_epoch_suffix() -> str:
+    """
+    Optional selection of checkpoint-eval logs by epoch suffix.
+
+    If DUO_EVAL_LOG_EPOCHS is set (e.g. "1400"), prefer files like:
+      eval_w8p0_1400epochs.log
+    """
+    return os.environ.get("DUO_EVAL_LOG_EPOCHS", "").strip()
+
+
+def _eval_log_patterns() -> list[str]:
+    ep = _desired_epoch_suffix()
+    if ep:
+        return [f"eval_w*_{ep}epochs.log", "eval_w*.log"]
+    return ["eval_w*.log"]
+
+
+def _iter_eval_logs_one_dir(d: Path) -> list[Path]:
+    """
+    List eval logs under one directory (seed dir or legacy dir).
+
+    If DUO_EVAL_LOG_EPOCHS is set and any *_<E>epochs.log exists, return ONLY those.
+    Otherwise return eval_w*.log (legacy) only.
+    """
+    pats = _eval_log_patterns()
+    if len(pats) == 1:
+        return sorted(d.glob(pats[0]))
+    # epoch-specific first
+    ep_logs = sorted(d.glob(pats[0]))
+    if ep_logs:
+        return ep_logs
+    return sorted(d.glob(pats[1]))
+
+
 def iter_eval_w_logs(model_or_legacy_dir: Path):
     """遍历目录下所有 ``eval_w*.log``（平铺 seed* / 旧 run*_seed* / 顶层 run_时间戳）。"""
     if not model_or_legacy_dir.is_dir():
@@ -73,15 +111,15 @@ def iter_eval_w_logs(model_or_legacy_dir: Path):
     if has_flat_seed:
         for child in sorted(children):
             if _RE_SEED_DIR.match(child.name):
-                yield from child.glob("eval_w*.log")
+                yield from _iter_eval_logs_one_dir(child)
         return
     for child in sorted(children):
         if _RE_RUN_SEED_BATCH.match(child.name):
-            yield from child.glob("eval_w*.log")
+            yield from _iter_eval_logs_one_dir(child)
         elif _RE_RUN_LEGACY.match(child.name):
             for sd in sorted(child.glob("seed*")):
                 if sd.is_dir():
-                    yield from sd.glob("eval_w*.log")
+                    yield from _iter_eval_logs_one_dir(sd)
 
 
 def collect_sweep_max_by_task_from_logs(
@@ -104,7 +142,7 @@ def collect_sweep_max_by_task_from_logs(
             values[(task_key, w)].append(float(mx))
     if n_logs == 0:
         # 兼容：root 下直接放 eval_w（不推荐）
-        for logf in sorted(root.glob("eval_w*.log")):
+        for logf in _iter_eval_logs_one_dir(root):
             try:
                 w = w_from_eval_log_name(logf.name)
             except ValueError:
@@ -150,7 +188,7 @@ def collect_sweep_max_nmax_lists(
     for logf in iter_eval_w_logs(root):
         _consume(logf)
     if n_logs == 0:
-        for logf in sorted(root.glob("eval_w*.log")):
+        for logf in _iter_eval_logs_one_dir(root):
             _consume(logf)
 
     w_list = sorted(w_set)
@@ -318,7 +356,9 @@ def discover_default_model_dir(sweep_root: Path) -> Path:
         except OSError:
             continue
         for sd in p.iterdir():
-            if sd.is_dir() and _RE_SEED_DIR.match(sd.name) and any(sd.glob("eval_w*.log")):
+            if sd.is_dir() and _RE_SEED_DIR.match(sd.name) and any(
+                _iter_eval_logs_one_dir(sd)
+            ):
                 flat_sweep.append((mtime, p))
                 break
     if flat_sweep:

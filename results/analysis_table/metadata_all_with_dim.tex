@@ -1,0 +1,39 @@
+\begin{table}[htbp]
+\centering
+\caption{Metadata illustration we used in the experiments (with type and dimension).}
+\vspace{0.3em}
+\resizebox{0.98\linewidth}{!}{
+\begin{tabular}{c|c|c|c|c|c}
+\toprule
+Task & Type & Dim & Name & Description & Objective \\
+\midrule
+Ant & continuous & 60 & Ant Morphology & a quadruped robot morphology optimization & to run as fast as possible \\
+\midrule
+D'Kitty & continuous & 56 & D'Kitty Morphology & D'Kitty robot morphology optimization & to navigate the robot to a fixed location \\
+\midrule
+Superconductor & continuous & 86 & Superconductor & critical temperature maximization & \makecell{to design the chemical formula for a superconducting\\ material that has a high critical temperature} \\
+\midrule
+TF Bind 8 & discrete & 32 & TF Bind 8 & DNA sequence optimization & \makecell{to find the length-8 DNA sequence with maximum\\ binding affinity with SIX6\_REF\_R1 transcription factor} \\
+\midrule
+TF Bind 10 & discrete & 40 & TF Bind 10 & DNA sequence optimization & \makecell{to find the length-10 DNA sequence with maximum\\ binding affinity with SIX6\_REF\_R1 transcription factor} \\
+\midrule
+GTOPX 2 & continuous & 22 & Cassini 2 & Complex interplanetary missions to Saturn & \makecell{to achieve a rendezvous with Saturn,\\ aiming to minimize the total velocity change} \\
+\midrule
+GTOPX 3 & continuous & 18 & Messenger (reduced) & Simulation of interplanetary missions to Mercury & \makecell{to minimize the total velocity change\\ over the course of the mission} \\
+\midrule
+GTOPX 4 & continuous & 26 & Messenger (full) & \makecell{Interplanetary missions to Mercury,\\ with resonant flybys of the planet} & \makecell{to minimize the total velocity\\ change incurred throughout the mission} \\
+\midrule
+GTOPX 6 & continuous & 22 & Rosetta & \makecell{Simulation of multi-gravity-assisted space missions\\ to Comet 67P/Churyumov-Gerasimenko} & \makecell{to minimize the total velocity change\\ required throughout the mission} \\
+\midrule
+LunarLander & continuous & 12 & LunarLander & \makecell{Learn the parameters of a controller for a lunar lander} & \makecell{to maximize the mean terminal reward across\\ a consistent batch of 50 randomly generated landscape} \\
+\midrule
+RobotPush & continuous & 14 & RobotPush & \makecell{Control the robot to push items to a designated location} & \makecell{to minimize he distance between a predefined\\ target location and two objects} \\
+\midrule
+Rover & continuous & 60 & Rover & \makecell{2D trajectories optimization for a rover} & \makecell{to design a reasonable trajectory to minimize the cost} \\
+\bottomrule
+\end{tabular}
+}
+\label{tab:metadata-all}
+\vspace{-1em}
+\end{table}
+

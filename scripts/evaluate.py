@@ -17,10 +17,24 @@ import os
 import pickle as pkl
 import json
 from pathlib import Path
-from typing import Tuple
+from typing import Any, Optional, Tuple
 
 wandb = None
 from diffuser.utils.arrays import to_torch
+
+# Top-k oracle mean for eval / viz (fitting diagnostics: top16 vs max8 sample-viz).
+_ORACLE_TOPK_MAX8 = 8
+_ORACLE_TOPK_DIAG = 16
+
+
+def _oracle_topk_mean(arr: np.ndarray, k: int) -> float:
+    """Mean of the largest ``k`` finite values (or all values if fewer than ``k``)."""
+    a = np.asarray(arr, dtype=np.float64).reshape(-1)
+    a = a[np.isfinite(a)]
+    if a.size == 0:
+        return float("nan")
+    kk = k if a.size >= k else int(a.size)
+    return float(np.mean(np.sort(a)[-kk:]))
 from diffuser.utils.des_bench import DesignBenchFunctionWrapper
 from diffuser.models.vae import VAE
 from sklearn.preprocessing import StandardScaler
@@ -36,7 +50,24 @@ from diffuser.utils.vae_layout import (
     multitask_generated_candidate_rel_dirs,
     resolve_generated_vae_info_path,
     resolve_multitask_generated_root_for_vae,
+    resolve_vae_weights_path_for_eval,
 )
+
+# DUO repository root（用于解析 ``vae_info`` 内相对路径，与 cwd 无关）
+_EVAL_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _eval_effective_latent_dim(deps: dict[str, Any] | None, config: Any) -> int:
+    """
+    Effective VAE / trajectory latent width for building the diffusion UNet.
+
+    Anchor Config (e.g. dkitty_config) may not define ``latent_dim``; CLI still passes
+    it in ``deps`` (``**vars(args)``). Prefer ``deps`` so zero-shot real_task matches
+    a latent64 checkpoint and vae_info_latent64.p.
+    """
+    if deps and deps.get("latent_dim") is not None:
+        return int(deps["latent_dim"])
+    return int(getattr(config, "latent_dim", 32))
 
 
 def _generated_datasets_vae_base(
@@ -106,7 +137,12 @@ def _resolve_multitask_data_dir_for_mixed(
     return primary
 
 
-def _real_world_d_best_fewshot_params(eval_task: str, Config, is_multitask: bool) -> tuple[int | None, str, int]:
+def _real_world_d_best_fewshot_params(
+    eval_task: str,
+    Config,
+    is_multitask: bool,
+    deps: dict[str, Any] | None = None,
+) -> tuple[int | None, str, int]:
     """
     D(best) 与 construct 的 few-shot 池对齐：优先读 ``vae_info.p`` 中 construct 写入的字段。
     """
@@ -114,7 +150,7 @@ def _real_world_d_best_fewshot_params(eval_task: str, Config, is_multitask: bool
     fm = str(getattr(Config, "fewshot_mode", "all"))
     fseed: int | None = getattr(Config, "fewshot_seed", None)
     if not is_multitask and is_real_world_fewshot_task(eval_task):
-        _ld = int(getattr(Config, "latent_dim", 32))
+        _ld = int(_eval_effective_latent_dim(deps, Config))
         _base = f"./generated_datasets/{eval_task}_frac{Config.frac}_sigma{Config.sigma}"
         _vip = resolve_generated_vae_info_path(_base, _ld)
         if _vip and os.path.isfile(_vip):
@@ -181,31 +217,22 @@ def _resolve_proxy_checkpoint_path(proxy_ckpt_dir, Config):
     return None
 
 
-def _resolve_diffusion_checkpoint_path(ckpt_dir, Config):
-    """
-    与训练时实际落盘步数一致：优先 state.pt，再 state_{Config.n_train_steps}.pt；
-    若不存在（例如训练用了 --train_epochs 覆盖了 n_train_steps，而 config 仍为默认值），
-    则取 checkpoint 目录下 state_<步数>.pt 中步数最大的文件。
-    """
-    if not os.path.isdir(ckpt_dir):
-        return None
-    st = os.path.join(ckpt_dir, "state.pt")
-    if os.path.isfile(st):
-        return st
-    if getattr(Config, "save_checkpoints", False):
-        n = int(getattr(Config, "n_train_steps", 0))
-        p = os.path.join(ckpt_dir, f"state_{n}.pt")
-        if os.path.isfile(p):
-            return p
-        matches = glob.glob(os.path.join(ckpt_dir, "state_*.pt"))
-        if matches:
+def _resolve_diffusion_checkpoint_path(
+    ckpt_dir: str,
+    Config: Any,
+    *,
+    ckpt_train_steps: int | None = None,
+    train_epochs: int | None = None,
+) -> str | None:
+    """Delegate to ``resolve_diffusion_state_pt`` (single source of truth)."""
+    from diffuser.utils.real_task_transfer import resolve_diffusion_state_pt
 
-            def _step(path):
-                m = re.search(r"state_(\d+)\.pt$", path)
-                return int(m.group(1)) if m else -1
-
-            return max(matches, key=_step)
-    return None
+    return resolve_diffusion_state_pt(
+        ckpt_dir,
+        Config,
+        ckpt_train_steps=ckpt_train_steps,
+        train_epochs=train_epochs,
+    )
 
 
 def _predict_y_arrays_from_queries_np(
@@ -252,7 +279,7 @@ def _oracle_viz_stats_from_transition_x(
 ) -> Tuple[float, float, float, float, float, float]:
     """
     将当前扩散状态 x（归一化轨迹）解码为设计空间，取 context 之后时间步上的点，
-    调用 Oracle 得到一批 y，返回 mean/max/max8_mean（原始与归一化）。
+    调用 Oracle 得到一批 y，返回 mean/max 与 top-8 均值（原始与归一化；与 sample_viz 一致）。
     """
     samples = x[..., :observation_dim]
     ds_dev = samples.device
@@ -262,7 +289,7 @@ def _oracle_viz_stats_from_transition_x(
     unnormalized_samples = dataset.normalizer.unnormalize(samples)
     batch_size, horizon, _ = unnormalized_samples.shape
     if context_length >= horizon:
-        return (float("nan"),) * 4
+        return (float("nan"),) * 6
 
     if vae is not None:
         with torch.no_grad():
@@ -271,7 +298,7 @@ def _oracle_viz_stats_from_transition_x(
             if scaler is not None:
                 n_sf = int(len(scaler.scale_))
                 if decoded_flat.shape[1] < n_sf:
-                    return (float("nan"),) * 4
+                    return (float("nan"),) * 6
                 inv = scaler.inverse_transform(
                     decoded_flat[:, :n_sf].detach().cpu().numpy()
                 )
@@ -297,22 +324,13 @@ def _oracle_viz_stats_from_transition_x(
     if y.size == 0:
         return (float("nan"),) * 6
 
-    def _max8_mean(a: np.ndarray) -> float:
-        arr = np.asarray(a, dtype=np.float64).reshape(-1)
-        arr = arr[np.isfinite(arr)]
-        if arr.size == 0:
-            return float("nan")
-        k = 8 if arr.size >= 8 else int(arr.size)
-        topk = np.sort(arr)[-k:]
-        return float(np.mean(topk))
-
     return (
         float(np.mean(y)),
         float(np.max(y)),
         float(np.mean(y_norm)),
         float(np.max(y_norm)),
-        _max8_mean(y),
-        _max8_mean(y_norm),
+        _oracle_topk_mean(y, _ORACLE_TOPK_MAX8),
+        _oracle_topk_mean(y_norm, _ORACLE_TOPK_MAX8),
     )
 
 
@@ -465,7 +483,14 @@ def _import_config(task_name):
     return Config
 
 
-def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, save_suffix=""):
+def _evaluate_single_task(
+    eval_task: str,
+    deps: dict[str, Any],
+    state_dict: Optional[dict[str, Any]],
+    Config: Any,
+    log_wandb: bool = True,
+    save_suffix: str = "",
+) -> dict[str, Any]:
     """单次评估：加载 proxy、数据集、VAE，条件扩散采样并在 design-bench 上算 reward。
 
     Config 必须由 evaluate() 传入（已按 checkpoint 对应任务 _import_config + _update）。
@@ -532,7 +557,7 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
 
     # 轨迹数据路径：多任务使用混合 pkl（与 train 一致）
     if rw_zs_no_ctx:
-        _ld_zs = int(getattr(Config, "latent_dim", 32))
+        _ld_zs = int(_eval_effective_latent_dim(deps, Config))
         _fd_zs = int(getattr(Config, "fixed_dim", 128))
         _vae_base_early = _generated_datasets_vae_base(
             is_multitask=is_multitask,
@@ -544,7 +569,7 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
             latent_dim=_ld_zs,
         )
         vae_info_early = resolve_generated_vae_info_path(_vae_base_early, _ld_zs)
-        latent_obs = int(deps.get("latent_observation_dim") or 32)
+        latent_obs = int(_eval_effective_latent_dim(deps, Config))
         if vae_info_early and os.path.isfile(vae_info_early):
             with open(vae_info_early, "rb") as f:
                 _vi = pkl.load(f)
@@ -557,7 +582,7 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
             seed=int(Config.seed),
         )
         logger.print(
-            f"[evaluate] MinimalTrajectoryDataset obs_dim={latent_obs}（来自 vae_info 或默认 32）",
+            f"[evaluate] MinimalTrajectoryDataset obs_dim={latent_obs}（vae_info 若存在则覆盖；否则用 CLI/config 有效 latent）",
             color="cyan",
         )
     elif is_multitask:
@@ -569,7 +594,7 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
 
         _sig = getattr(Config, "multitask_traj_signature", None)
         _skip_auto = bool(deps.get("skip_auto_construct_trajectories", False))
-        _latent = int(getattr(Config, "latent_dim", 32))
+        _latent = int(_eval_effective_latent_dim(deps, Config))
         _fd_mt = int(getattr(Config, "fixed_dim", 128))
         data_dir = _resolve_multitask_data_dir_for_mixed(
             train_tasks_list=list(train_tasks_list),
@@ -610,7 +635,7 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
             task_text_embeds=getattr(Config, "_task_text_embeds_np", None),
             include_task_idx=use_task_branch,
         )
-        _ld_expect = int(getattr(Config, "latent_dim", 32))
+        _ld_expect = int(_eval_effective_latent_dim(deps, Config))
         if int(dataset.observation_dim) != _ld_expect:
             _expect_name = (
                 multitask_mixed_basename(str(_sig), _ld_expect) if _sig else "mixed_*.p"
@@ -732,7 +757,7 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
     from diffuser.utils.offline_train_best import offline_training_best_y
 
     _rw_fk, _rw_fm, _rw_fs = _real_world_d_best_fewshot_params(
-        eval_task, Config, is_multitask
+        eval_task, Config, is_multitask, deps=deps
     )
     _y_tr_best = offline_training_best_y(
         eval_task,
@@ -747,12 +772,42 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
         f"[{eval_task}] offline_train_best_y: {_y_tr_best}",
         color="green",
     )
+    if is_real_world_fewshot_task(eval_task):
+        from diffuser.utils.offline_train_best import (
+            offline_full_dataset_best_y,
+            offline_full_dataset_y_bounds,
+        )
+
+        _y_lo_full, _y_hi_full = offline_full_dataset_y_bounds(
+            eval_task,
+            frac=float(Config.frac),
+            sigma=float(Config.sigma),
+            seed=int(getattr(Config, "seed", 1)),
+        )
+        _y_all_best = offline_full_dataset_best_y(
+            eval_task,
+            frac=float(Config.frac),
+            sigma=float(Config.sigma),
+            seed=int(getattr(Config, "seed", 1)),
+        )
+        logger.print(
+            f"[{eval_task}] real_world_fewshot_pool: k={_rw_fk!r} mode={_rw_fm} seed={_rw_fs}",
+            color="green",
+        )
+        logger.print(
+            f"[{eval_task}] offline_dataset_y_bounds_full: {_y_lo_full}/{_y_hi_full}",
+            color="green",
+        )
+        logger.print(
+            f"[{eval_task}] offline_dataset_best_y_all: {_y_all_best}",
+            color="green",
+        )
 
     vae = None
     latent_dim = observation_dim
     vae_input_output_dim = getattr(Config, 'fixed_dim', 128)
 
-    _ld_vae = int(getattr(Config, "latent_dim", 32))
+    _ld_vae = int(_eval_effective_latent_dim(deps, Config))
     _fd_vae = int(getattr(Config, "fixed_dim", 128))
     _vae_base = _generated_datasets_vae_base(
         is_multitask=is_multitask,
@@ -770,8 +825,41 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
         try:
             with open(vae_info_path, 'rb') as f:
                 vae_info = pkl.load(f)
-            vae_path = vae_info.get('vae_path')
-            latent_dim = vae_info.get('latent_dim', observation_dim)
+            _sig_mt = getattr(Config, "multitask_traj_signature", None)
+            _raw_vp = vae_info.get("vae_path") or vae_info.get("model_path")
+            _latent_from_info = int(vae_info.get("latent_dim", _ld_vae))
+            latent_dim = _latent_from_info
+            vae_path_resolved, _vae_tried = resolve_vae_weights_path_for_eval(
+                raw_path=_raw_vp if _raw_vp else None,
+                vae_info_path=vae_info_path,
+                latent_dim=_latent_from_info,
+                project_root=str(_EVAL_PROJECT_ROOT),
+                multitask_traj_signature=_sig_mt,
+            )
+            if vae_path_resolved is None:
+                raise FileNotFoundError(
+                    "无法在下列路径中找到 VAE 权重文件（末尾为 vae_latent*.pt）；"
+                    f"tried={_vae_tried}"
+                )
+            _intended_norm: str | None = None
+            if _raw_vp:
+                _intended_norm = (
+                    os.path.normpath(_raw_vp)
+                    if os.path.isabs(_raw_vp)
+                    else os.path.normpath(
+                        os.path.join(str(_EVAL_PROJECT_ROOT), _raw_vp)
+                    )
+                )
+            if (
+                _intended_norm is not None
+                and os.path.normpath(vae_path_resolved) != _intended_norm
+            ):
+                logger.print(
+                    f"[evaluate] VAE 权重从回退路径加载（mt 目录段或拷贝位置与 vae_info 记录不一致）: "
+                    f"{vae_path_resolved}",
+                    color="yellow",
+                )
+            vae_path = vae_path_resolved
             vae = VAE(input_dim=vae_input_output_dim, latent_dim=latent_dim)
             vae.load_state_dict(torch.load(vae_path, map_location=Config.device))
             vae.to(Config.device)
@@ -901,9 +989,20 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
     trainer = trainer_config(diffusion, proxy_model, dataset, proxy_dataset, renderer)
     logger.print(utils.report_parameters(model), color='green')
 
-    trainer.step = state_dict['step']
-    trainer.model.load_state_dict(state_dict['model'])
-    trainer.ema_model.load_state_dict(state_dict['ema'])
+    # 随机权重：跳过 checkpoint，用当前网络结构的默认初始化（并同步 EMA），用于验证推理链
+    if state_dict is None:
+        if not bool(deps.get("random_diffusion_weights")):
+            raise RuntimeError("state_dict is None but random_diffusion_weights is not set")
+        trainer.step = 0
+        trainer.reset_parameters()
+        logger.print(
+            "[evaluate] diffusion: random init (no checkpoint load); inference sanity check",
+            color="yellow",
+        )
+    else:
+        trainer.step = state_dict["step"]
+        trainer.model.load_state_dict(state_dict["model"])
+        trainer.ema_model.load_state_dict(state_dict["ema"])
     if use_proxy_filter:
         trainer.proxy_step = proxy_state_dict['step']
         trainer.proxy_model.load_state_dict(proxy_state_dict['model'])
@@ -1002,10 +1101,10 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
                         "sample_viz_step": _step_i,
                         f"sample_viz/{_sv_tag}/mean_y": m,
                         f"sample_viz/{_sv_tag}/max_y": mx,
-                        f"sample_viz/{_sv_tag}/max8_mean": m8,
+                        f"sample_viz/{_sv_tag}/top8_mean": m8,
                         f"sample_viz/{_sv_tag}/mean_y_norm": nm,
                         f"sample_viz/{_sv_tag}/max_y_norm": nmx,
-                        f"sample_viz/{_sv_tag}/max8_mean_norm": nm8,
+                        f"sample_viz/{_sv_tag}/top8_mean_norm": nm8,
                         f"sample_viz/{_sv_tag}/t_index": int(timestep_index),
                         f"sample_viz/{_sv_tag}/denoise_progress": _prog,
                     },
@@ -1019,10 +1118,10 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
                     "viz_step": _step_i,
                     "mean_y": m,
                     "max_y": mx,
-                    "max8_mean": m8,
+                    "top8_mean": m8,
                     "mean_y_norm": nm,
                     "max_y_norm": nmx,
-                    "max8_mean_norm": nm8,
+                    "top8_mean_norm": nm8,
                     "t_index": int(timestep_index),
                     "denoise_progress": _prog,
                 }
@@ -1168,12 +1267,13 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
             queries_norm = trainer.proxy_dataset.normalizer.normalize(queries_cpu.to('cpu'))
         else:
             if int(observation_dim) != int(original_observation_dim):
+                _ld_err = int(_eval_effective_latent_dim(deps, Config))
                 raise RuntimeError(
                     f"[{eval_task}] proxy 需要物理维 {original_observation_dim}，"
                     f"但轨迹/PKL 给出的扩散状态维 observation_dim={observation_dim}（每步向量宽度），"
-                    f"且未加载 VAE 解码。Config.latent_dim={int(getattr(Config, 'latent_dim', 32))} 仅为超参标签；"
+                    f"且未加载 VAE 解码。latent_dim(有效)={_ld_err}；"
                     f"若 observation_dim 与之不符，说明 mixed PKL 与 latent_dim 不匹配。"
-                    f"请确认 {generated_vae_info_filename(int(getattr(Config, 'latent_dim', 32)))} 存在于 generated_datasets/multi_<canonical>_frac…/ 且 vae_path 可读。"
+                    f"请确认 {generated_vae_info_filename(_ld_err)} 存在于 generated_datasets/multi_<canonical>_frac…/ 且 vae_path 可读。"
                 )
             queries_unnorm = trainer.dataset.normalizer.unnormalize(queries_cpu)
             if torch.is_tensor(queries_unnorm):
@@ -1227,23 +1327,54 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
         y = oracle_predict(eval_task, np.asarray(queries, dtype=np.float64))
     else:
         y = func.task.predict(queries)
-    y_norm = (y - func.min) / (func.max - func.min)
+    if is_real_world_fewshot_task(eval_task):
+        from diffuser.utils.offline_train_best import offline_full_dataset_y_bounds
+
+        y_lo_f, y_hi_f = offline_full_dataset_y_bounds(
+            eval_task,
+            frac=float(Config.frac),
+            sigma=float(Config.sigma),
+            seed=int(getattr(Config, "seed", 1)),
+        )
+        span = float(y_hi_f) - float(y_lo_f)
+        y_arr = np.asarray(y, dtype=np.float64)
+        if span <= 1e-20:
+            y_norm = np.zeros_like(y_arr, dtype=np.float64)
+        else:
+            y_norm = (y_arr - y_lo_f) / span
+    else:
+        y_norm = (y - func.min) / (func.max - func.min)
+
+    y_vec = np.asarray(y, dtype=np.float64).reshape(-1)
+    y_norm_vec = np.asarray(y_norm, dtype=np.float64).reshape(-1)
+    top16_mean = _oracle_topk_mean(y_vec, _ORACLE_TOPK_DIAG)
+    ntop16_mean = _oracle_topk_mean(y_norm_vec, _ORACLE_TOPK_DIAG)
 
     logger.print(
         f"[{eval_task}] max_ep_reward: {np.max(y)}, median: {np.median(y)}, mean: {np.mean(y)}",
         color='green',
     )
     logger.print(
+        f"[{eval_task}] top16_mean (raw oracle, fitting diag): {top16_mean}",
+        color='green',
+    )
+    logger.print(
         f"[{eval_task}] nmax_ep_reward: {np.max(y_norm)}, nmedian: {np.median(y_norm)}, nmean: {np.mean(y_norm)}",
+        color='green',
+    )
+    logger.print(
+        f"[{eval_task}] ntop16_mean (normalized oracle, fitting diag): {ntop16_mean}",
         color='green',
     )
     logger.log_metrics_summary({
         f"max_ep_reward_{eval_task}": np.max(y),
         f"median_ep_reward_{eval_task}": np.median(y),
         f"mean_ep_reward_{eval_task}": np.mean(y),
+        f"top16_mean_ep_reward_{eval_task}": top16_mean,
         f"nmax_ep_reward_{eval_task}": np.max(y_norm),
         f"nmedian_ep_reward_{eval_task}": np.median(y_norm),
         f"nmean_ep_reward_{eval_task}": np.mean(y_norm),
+        f"ntop16_mean_ep_reward_{eval_task}": ntop16_mean,
     })
 
     if log_wandb and wandb is not None:
@@ -1251,9 +1382,11 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
             f"max_ep_reward/{eval_task}": np.max(y),
             f"median_ep_reward/{eval_task}": np.median(y),
             f"mean_ep_reward/{eval_task}": np.mean(y),
+            f"top16_mean_ep_reward/{eval_task}": top16_mean,
             f"nmax_ep_reward/{eval_task}": np.max(y_norm),
             f"nmedian_ep_reward/{eval_task}": np.median(y_norm),
             f"nmean_ep_reward/{eval_task}": np.mean(y_norm),
+            f"ntop16_mean_ep_reward/{eval_task}": ntop16_mean,
             "eval_task": eval_task,
             "n_traj": Config.n_traj,
             "horizon": Config.horizon,
@@ -1286,9 +1419,11 @@ def _evaluate_single_task(eval_task, deps, state_dict, Config, log_wandb=True, s
         'max': float(np.max(y)),
         'median': float(np.median(y)),
         'mean': float(np.mean(y)),
+        'top16_mean': float(top16_mean),
         'nmax': float(np.max(y_norm)),
         'nmedian': float(np.median(y_norm)),
         'nmean': float(np.mean(y_norm)),
+        'ntop16_mean': float(ntop16_mean),
     }
 
 
@@ -1337,6 +1472,12 @@ def evaluate(**deps):
     ):
         if _tk in deps and deps[_tk] is not None:
             setattr(Config, _tk, deps[_tk])
+    _te_dep = deps.get("train_epochs")
+    if _te_dep is not None and str(_te_dep).strip() != "":
+        te = int(_te_dep)
+        if te >= 1:
+            spe = int(getattr(Config, "n_steps_per_epoch", 100) or 100)
+            Config.n_train_steps = te * spe
     Config.eval_task = ck_task
     Config.train_tasks_list = train_tasks_list
     Config.is_multitask = is_multitask
@@ -1410,22 +1551,66 @@ def evaluate(**deps):
                 )
                 wandb = None
 
-    _ld = deps.get("load_diffusion_checkpoint")
-    if _ld and os.path.isfile(_ld):
-        loadpath = _ld
+    if bool(deps.get("random_diffusion_weights")):
+        if deps.get("load_diffusion_checkpoint"):
+            raise ValueError(
+                "random_diffusion_weights 与 load_diffusion_checkpoint 不能同时使用"
+            )
+        print(
+            "[evaluate] random_diffusion_weights=1：跳过扩散 checkpoint，使用随机初始化权重",
+            flush=True,
+        )
+        state_dict = None
+        deps["_diffusion_checkpoint_loadpath"] = "<random_init>"
     else:
-        ckpt_dir = deps.get("diffusion_checkpoint_dir") or os.path.join(
-            logger.prefix, "checkpoint"
-        )
-        loadpath = _resolve_diffusion_checkpoint_path(ckpt_dir, Config)
-    if loadpath is None:
-        raise FileNotFoundError(
-            f"未找到扩散 checkpoint：请设置 --load_diffusion_checkpoint 或检查目录 "
-            f"{deps.get('diffusion_checkpoint_dir') or os.path.join(logger.prefix, 'checkpoint')}"
-        )
-    print(f"[evaluate] 加载扩散权重: {loadpath}", flush=True)
-    state_dict = torch.load(loadpath, map_location=Config.device)
-    deps["_diffusion_checkpoint_loadpath"] = loadpath
+        _ld = deps.get("load_diffusion_checkpoint")
+        if _ld and os.path.isfile(_ld):
+            loadpath = _ld
+        else:
+            ckpt_dir = deps.get("diffusion_checkpoint_dir") or os.path.join(
+                logger.prefix, "checkpoint"
+            )
+            _cts = deps.get("diffusion_ckpt_train_steps")
+            if _cts is not None and str(_cts).strip() != "":
+                ckpt_train_steps = int(_cts)
+            else:
+                ckpt_train_steps = None
+            _te = deps.get("train_epochs")
+            if _te is not None and str(_te).strip() != "":
+                train_epochs = int(_te)
+            else:
+                train_epochs = None
+            loadpath = _resolve_diffusion_checkpoint_path(
+                ckpt_dir,
+                Config,
+                ckpt_train_steps=ckpt_train_steps,
+                train_epochs=train_epochs,
+            )
+        if loadpath is None:
+            ckpt_dir = deps.get("diffusion_checkpoint_dir") or os.path.join(
+                logger.prefix, "checkpoint"
+            )
+            _hint = ""
+            _cts2 = deps.get("diffusion_ckpt_train_steps")
+            if _cts2 is not None and str(_cts2).strip() != "":
+                _hint = (
+                    f"（已指定 --diffusion_ckpt_train_steps={_cts2}，但缺少 "
+                    f"state_{int(_cts2)}.pt）"
+                )
+            elif train_epochs is not None:
+                spe = int(getattr(Config, "n_steps_per_epoch", 100) or 100)
+                _hint = (
+                    f"（已指定 train_epochs={train_epochs}×n_steps_per_epoch={spe}="
+                    f"{int(train_epochs) * spe}，但缺少对应 state_*.pt；可改用 "
+                    f"--diffusion_ckpt_train_steps 或检查 checkpoint 目录）"
+                )
+            raise FileNotFoundError(
+                "未找到扩散 checkpoint：请设置 --load_diffusion_checkpoint，"
+                f"或检查目录 {ckpt_dir} 下的 state_*.pt / state.pt{_hint}"
+            )
+        print(f"[evaluate] 加载扩散权重: {loadpath}", flush=True)
+        state_dict = torch.load(loadpath, map_location=Config.device)
+        deps["_diffusion_checkpoint_loadpath"] = loadpath
 
     results = []
     for i, eval_task in enumerate(tasks_to_eval):
@@ -1438,18 +1623,70 @@ def evaluate(**deps):
         results.append(r)
 
     if len(results) > 1:
-        print("=== 多任务评估汇总（绝对值 / 归一化 [0,1]）===")
-        hdr = f"{'task':<18} {'max':>10} {'median':>10} {'mean':>10} | {'nmax':>10} {'nmedian':>10} {'nmean':>10}"
+        print("=== 多任务评估汇总（绝对值 / 归一化 [0,1]；top16 / ntop16 仅作拟合诊断）===")
+        hdr = (
+            f"{'task':<18} {'max':>10} {'median':>10} {'mean':>10} {'top16':>10} | "
+            f"{'nmax':>10} {'nmedian':>10} {'nmean':>10} {'nt16':>10}"
+        )
         print(hdr)
         print("-" * len(hdr))
         for r in results:
             print(
-                f"{r['eval_task']:<18} {r['max']:10.4f} {r['median']:10.4f} {r['mean']:10.4f} | "
-                f"{r['nmax']:10.4f} {r['nmedian']:10.4f} {r['nmean']:10.4f}"
+                f"{r['eval_task']:<18} {r['max']:10.4f} {r['median']:10.4f} {r['mean']:10.4f} "
+                f"{r['top16_mean']:10.4f} | {r['nmax']:10.4f} {r['nmedian']:10.4f} {r['nmean']:10.4f} "
+                f"{r['ntop16_mean']:10.4f}"
             )
         _wandb_summary = {}
         for r in results:
             _wandb_summary[f"summary/max_{r['eval_task']}"] = r['max']
             _wandb_summary[f"summary/nmax_{r['eval_task']}"] = r['nmax']
+            _wandb_summary[f"summary/ntop16_mean_{r['eval_task']}"] = r['ntop16_mean']
         if wandb is not None:
             wandb.log(_wandb_summary)
+    _json_out = deps.get("eval_summary_json_out")
+    if _json_out and results:
+        import json
+        import re as _re_json
+        from pathlib import Path as _Path
+
+        _p = _Path(str(_json_out))
+        _p.parent.mkdir(parents=True, exist_ok=True)
+        _loadp = deps.get("_diffusion_checkpoint_loadpath")
+        _m = _re_json.search(r"state_(\d+)\.pt$", str(_loadp or ""))
+        _ckpt_step = int(_m.group(1)) if _m else None
+        spe = int(getattr(Config, "n_steps_per_epoch", 100) or 100)
+        _equiv_epochs = (
+            _ckpt_step // spe if _ckpt_step is not None and spe > 0 else None
+        )
+        payload: dict[str, object] = {
+            "is_multitask": bool(len(results) > 1),
+            "train_tasks": [r["eval_task"] for r in results],
+            "train_epochs": deps.get("train_epochs"),
+            "diffusion_ckpt_train_steps": deps.get("diffusion_ckpt_train_steps"),
+            "diffusion_checkpoint_train_steps_from_file": _ckpt_step,
+            "eval_equiv_train_epochs": _equiv_epochs,
+            "n_steps_per_epoch": spe,
+            "condition_guidance_w_text": float(
+                getattr(Config, "condition_guidance_w_text", 0.0)
+            ),
+            "diffusion_checkpoint_loadpath": _loadp,
+            "tasks": {
+                r["eval_task"]: {
+                    k: float(r[k])
+                    for k in (
+                        "max",
+                        "median",
+                        "mean",
+                        "top16_mean",
+                        "nmax",
+                        "nmedian",
+                        "nmean",
+                        "ntop16_mean",
+                    )
+                    if k in r
+                }
+                for r in results
+            },
+        }
+        _p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        print(f"[evaluate] wrote eval summary json: {_p}", flush=True)

@@ -33,6 +33,7 @@ from diffuser.utils.soo_gtopx import (
 )
 from diffuser.utils.construct_runtime import resolve_torch_device
 from diffuser.utils.vae_layout import vae_train_dir_suffix
+from diffuser.utils.traj_params import multitask_vae_dir_token
 
 # 任务映射
 TASKNAME2FULL = {
@@ -220,9 +221,18 @@ def main(args):
     }
 
     _rw_suffix = "_rwft" if finetune_rw else ""
+    # 多任务：VAE 目录与轨迹签名（mt 串 / mixed 文件名中的 mt_<hex>）一致；未传签名时保持旧路径兼容
+    _mt_token: str = ""
+    if is_multitask:
+        _mts = getattr(args, "multitask_traj_signature", None)
+        if _mts:
+            _mt_token = multitask_vae_dir_token(_mts)
     # 生成模型保存路径（非 32 隐空间单独子目录，避免 scaler / dataset_info / vae_info 与 32 维互覆盖）
     _lat_dir = vae_train_dir_suffix(args.latent_dim)
-    model_save_dir = f"trained_models/vae/{task_str}_frac{args.frac}_sigma{args.sigma}_dim{input_dim}{_rw_suffix}{_lat_dir}"
+    model_save_dir = (
+        f"trained_models/vae/{task_str}_frac{args.frac}_sigma{args.sigma}"
+        f"_dim{input_dim}{_mt_token}{_rw_suffix}{_lat_dir}"
+    )
     os.makedirs(model_save_dir, exist_ok=True)
     model_path = os.path.join(model_save_dir, f"vae_latent{args.latent_dim}.pt")
     
@@ -399,6 +409,8 @@ def main(args):
         'vae_path': model_path,
         'dataset_info': dataset_info,
     }
+    if is_multitask and getattr(args, "multitask_traj_signature", None):
+        vae_info["multitask_traj_signature"] = str(args.multitask_traj_signature)
     if finetune_rw:
         vae_info['pretrained_vae_info_source'] = os.path.abspath(args.pretrained_vae_info)
     pkl.dump(vae_info, open(os.path.join(model_save_dir, "vae_info.p"), "wb"))
@@ -422,6 +434,12 @@ if __name__ == "__main__":
     parser.add_argument('--task', type=str, choices=_all_tasks, help='单任务名称')
     parser.add_argument('--seed', type=int, default=0, help='SOO GTOPX 离线采样随机种子（与 construct_trajectories --seed 对齐）')
     parser.add_argument('--tasks', type=str, help='多任务列表，用逗号分隔，例如: dkitty,ant,tfbind8')
+    parser.add_argument(
+        '--multitask_traj_signature',
+        type=str,
+        default=None,
+        help='多任务：与 construct/mixed 一致的逻辑轨迹签名字符串；设置后 VAE 目录带 mt_<hex>，与轨迹参数绑定',
+    )
     parser.add_argument('--frac', type=float, default=1.0, help='使用数据集的比例')
     parser.add_argument('--sigma', type=float, default=0.0, help='噪声标准差')
     parser.add_argument('--force_retrain', action='store_true', help='强制重新训练')

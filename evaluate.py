@@ -153,6 +153,42 @@ if __name__ == '__main__':
         help="显式指定扩散 state.pt；不填则与 --real_task_zero_shot_eval 联用自动解析",
     )
     parser.add_argument(
+        "--train_epochs",
+        type=int,
+        default=None,
+        help=(
+            "When set with multitask eval, resolve checkpoint as state_{train_epochs * "
+            "n_steps_per_epoch}.pt if that file exists (same rule as scripts/train.py); "
+            "falls back to max state_*.pt. Omitted in sweep uses TRAIN_EPOCHS from train_eval script."
+        ),
+    )
+    parser.add_argument(
+        "--diffusion_ckpt_train_steps",
+        type=int,
+        default=None,
+        help=(
+            "Explicit optimizer step N for state_{N}.pt; overrides --train_epochs when set. "
+            "Not n_diffusion_steps."
+        ),
+    )
+    parser.add_argument(
+        "--eval_summary_json_out",
+        type=str,
+        default=None,
+        help=(
+            "If set, write multitask eval metrics (max/mean/nmax/ntop16_mean/...) to this JSON path after run."
+        ),
+    )
+    parser.add_argument(
+        "--random_diffusion_weights",
+        action="store_true",
+        default=False,
+        help=(
+            "不加载已训练扩散 checkpoint，使用随机初始化权重跑完整采样/评估，"
+            "用于验证 inference（反演、条件、Oracle）链路是否正常。"
+        ),
+    )
+    parser.add_argument(
         "--proxy_filter",
         type=int,
         choices=[0, 1],
@@ -261,6 +297,15 @@ if __name__ == '__main__':
     real_task_ft = getattr(args, "real_task_text_only_finetune", False) or getattr(
         args, "fewshot_text_only_finetune", False
     )
+    if getattr(args, "random_diffusion_weights", False):
+        if getattr(args, "load_diffusion_checkpoint", None):
+            raise SystemExit(
+                "错误: --random_diffusion_weights 不能与 --load_diffusion_checkpoint 同时使用"
+            )
+        if zshot:
+            raise SystemExit(
+                "错误: --random_diffusion_weights 不能与 --real_task_zero_shot_eval 同时使用"
+            )
     if zshot:
         args.multitask_text_only = True
         args.use_text_condition = True
@@ -320,7 +365,12 @@ if __name__ == '__main__':
                 latent_dim=int(getattr(args, "latent_dim", 32)),
             )
             args.diffusion_checkpoint_dir = os.path.join(run_dir, "checkpoint")
-            _pt = resolve_diffusion_state_pt(args.diffusion_checkpoint_dir, None)
+            _pt = resolve_diffusion_state_pt(
+                args.diffusion_checkpoint_dir,
+                None,
+                ckpt_train_steps=getattr(args, "diffusion_ckpt_train_steps", None),
+                train_epochs=getattr(args, "train_epochs", None),
+            )
             if _pt:
                 args.load_diffusion_checkpoint = _pt
             else:

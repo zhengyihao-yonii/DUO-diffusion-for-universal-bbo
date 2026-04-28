@@ -1,0 +1,21 @@
+% Requires: \usepackage{booktabs}, \usepackage{graphicx}, \usepackage{xcolor}.
+% UniSO: Improved UniSO-T only (paper Table~6 ZS w/ metadata; Table~3 FS).
+\begin{table*}[t!]
+\caption{Real-world tasks: raw max reward (DUO: mean $\pm$ std at best-nmax hyper). UniSO: Improved UniSO-T (paper Table~6 ZS w/ metadata; Table~3 FS). $\mathcal{D}_{\mathrm{all}}$(best) is ``max(y)`` on merged ``fewshot_data``; $\mathcal{D}_{\mathrm{fs}}$(best) is few-shot pool ``max(y)`` (same rules as evaluate).}
+\vspace{0.3em}
+\centering
+\resizebox{\linewidth}{!}{
+\begin{tabular}{l|cc|cc|cc}
+\toprule
+Task & $\mathcal{D}_{\mathrm{all}}$(best) & $\mathcal{D}_{\mathrm{fs}}$(best) & \shortstack{UniSO-T\\zero-shot} & \shortstack{UniSO-T\\few-shot} & DUO-ZS & DUO-FS \\
+\midrule
+LunarLander & -0.001 & -0.001 & 31.186 $\pm$ 27.971 & \textbf{\textcolor{blue}{248.573 $\pm$ 45.386}} & -99.552 $\pm$ 0.349 & \textbf{\textcolor{violet}{93.079 $\pm$ 231.626}} \\
+Rover & -1.085 & -1.085 & -8.888 $\pm$ 2.119 & -8.239 $\pm$ 1.270 & \textbf{\textcolor{violet}{13.284 $\pm$ 0.242}} & \textbf{\textcolor{blue}{19.828 $\pm$ 10.920}} \\
+RobotPush & -0.005 & -0.005 & \textbf{\textcolor{violet}{3.171 $\pm$ 0.984}} & \textbf{\textcolor{blue}{7.067 $\pm$ 0.169}} & 0.727 $\pm$ 0.280 & 2.719 $\pm$ 1.597 \\
+\midrule
+Mean rank & / & / & 3.000 $\pm$ 1.000 & \textbf{\textcolor{blue}{1.667 $\pm$ 1.155}} & 3.333 $\pm$ 1.155 & \textbf{\textcolor{violet}{2.000 $\pm$ 1.000}} \\
+\bottomrule
+\end{tabular}
+}
+\label{tab:max-real-task}
+\end{table*}

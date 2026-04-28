@@ -13,6 +13,12 @@
 # TRAIN_TIMESTEP_BIAS_POWER / TRAIN_LOSS_MIN_SNR_GAMMA default to 0.0 (disabled).
 # TRAIN_LEARNING_RATE optional; when set, passes --learning_rate and appends _lr... to paths.
 # PROXY_FILTER optional 0/1; when set, passes --proxy_filter.
+# DIFFUSION_CKPT_TRAIN_STEPS optional int: passed to evaluate.py as --diffusion_ckpt_train_steps
+#   (load state_{N}.pt; default eval loads latest state_*.pt in checkpoint dir).
+# train.py 默认 resume：同 MODEL_ROOT 下若 checkpoint/ 已有 state_*.pt 且步数 < TRAIN_EPOCHS 对应总步数，
+#   会从最新 state 续训；若要同路径从零重训：TRAIN_EXTRA 前加 --retrain 或 export 后手写 python train.py ... --retrain
+# Wandb 续同一条曲线：第一次训练记下 run id，续跑前 export WANDB_RUN_ID=<id> WANDB_RESUME=allow
+#   （日志里 metrics 的 step 与 trainer.step 一致时会接在原有 step 轴后面；见 https://docs.wandb.ai/guides/runs/resuming ）
 #
 set -euo pipefail
 
@@ -216,6 +222,8 @@ RUN_ID="$(date +%Y%m%d_%H%M%S)"
   echo "DUO_DISCRETE_CE_TASK_NAMES=${DUO_DISCRETE_CE_TASK_NAMES:-}"
   echo "RUN_SUFFIX=${RUN_SUFFIX:-}"
   echo "W_VALUES=${W_VALUES[*]}"
+  echo "TRAIN_EPOCHS=${TRAIN_EPOCHS}"
+  echo "DIFFUSION_CKPT_TRAIN_STEPS=${DIFFUSION_CKPT_TRAIN_STEPS:-}"
   echo "SKIP_TRAIN=${SKIP_TRAIN} SKIP_EVAL=${SKIP_EVAL}"
   echo "SWEEP_ARCHIVE_SLUG=${SWEEP_ARCHIVE_SLUG}"
   echo "---"
@@ -287,12 +295,16 @@ for SEED in "${SEED_LIST[@]}"; do
     _EVAL_BASE+=(--traj_params_json "${TRAJ_PARAMS_JSON}")
   fi
   _EVAL_BASE+=(--latent_dim "${LATENT_DIM}")
+  _EVAL_BASE+=(--train_epochs "${TRAIN_EPOCHS}")
   _EVAL_BASE+=(--train_timestep_bias_power "${TRAIN_TIMESTEP_BIAS_POWER}")
   _EVAL_BASE+=(--train_loss_min_snr_gamma "${TRAIN_LOSS_MIN_SNR_GAMMA}")
   _EVAL_BASE+=(--train_half_timestep_bias_frac "${TRAIN_HALF_TBIAS_FRAC}")
   _EVAL_BASE+=(--train_half_lr_mult "${TRAIN_HALF_LR_MULT}")
   _EVAL_BASE+=("${LR_EXTRA[@]}")
   _EVAL_BASE+=("${PROXY_FILTER_EXTRA[@]}")
+  if [[ -n "${DIFFUSION_CKPT_TRAIN_STEPS:-}" ]]; then
+    _EVAL_BASE+=(--diffusion_ckpt_train_steps "${DIFFUSION_CKPT_TRAIN_STEPS}")
+  fi
 
   if [[ "${SKIP_TRAIN}" != "1" ]]; then
     _log "=== [1/2] Training seed=${SEED} (${LOG_ROOT}/train.log) ==="

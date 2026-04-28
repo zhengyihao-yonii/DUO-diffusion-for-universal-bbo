@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import copy
 import numpy as np
@@ -14,13 +16,67 @@ from .cloud import sync_logs
 from ml_logger import logger
 
 
-def _safe_wandb_log(metrics):
-    """避免未 init 或离线失败时 wandb.log 触发底层 abort。"""
+def _safe_wandb_log(
+    metrics: dict,
+    step: int | None = None,
+    *,
+    wandb_step_key: str | None = None,
+) -> None:
+    """避免未 init 或离线失败时 wandb.log 触发底层 abort。
+
+    - **全局 step**（``wandb.log(..., step=)``）：单段训练时与 ``self.step`` 对齐。
+    - **独立横轴**（``wandb_step_key``）：``metrics`` 内须含该键；**不要**再传 ``step=``，供
+      ``wandb.define_metric(..., step_metric=...)`` 使用。Proxy 与扩散先后训练时，用
+      ``proxy_step`` / ``finetune_step`` 分离坐标，避免单调步冲突且微调曲线从 0 起画。
+    """
     try:
         import wandb as _wandb
 
-        if getattr(_wandb, "run", None) is not None:
+        if getattr(_wandb, "run", None) is None:
+            return
+        if wandb_step_key is not None:
+            if wandb_step_key not in metrics:
+                return
             _wandb.log(metrics)
+            return
+        st = step
+        if st is None and metrics.get("steps") is not None:
+            try:
+                st = int(metrics["steps"])
+            except (TypeError, ValueError):
+                st = None
+        if st is not None:
+            _wandb.log(metrics, step=int(st))
+        else:
+            _wandb.log(metrics)
+    except Exception:
+        pass
+
+
+def configure_wandb_step_axes(*, include_proxy_axis: bool) -> None:
+    """在 ``wandb.init`` 之后、首次 ``log`` 之前调用：为 proxy / 扩散登记独立 step 轴。"""
+    try:
+        import wandb as wb
+
+        if getattr(wb, "run", None) is None:
+            return
+        wb.define_metric("finetune_step")
+        for _m in (
+            "loss",
+            "lr",
+            "steps",
+            "a0_loss",
+            "epoch",
+            "total_epochs",
+            "training_mode",
+            "training_completed",
+            "final_step",
+        ):
+            wb.define_metric(_m, step_metric="finetune_step")
+        wb.define_metric("train/*", step_metric="finetune_step")
+        if include_proxy_axis:
+            wb.define_metric("proxy_step")
+            wb.define_metric("proxy/*", step_metric="proxy_step")
     except Exception:
         pass
 
@@ -291,7 +347,13 @@ class Trainer(object):
                 metrics['proxy_steps'] = self.proxy_step
                 metrics['proxy_loss'] = loss.detach().item()
                 logger.log_metrics_summary(metrics, default_stats='mean')
-                _safe_wandb_log(metrics)
+                # proxy 使用 proxy_step 轴，避免与后续扩散 finetune_step 全局单调冲突
+                wb_metrics = {
+                    f"proxy/{k}": float(v.detach().item()) for k, v in infos.items()
+                }
+                wb_metrics["proxy_step"] = int(self.proxy_step)
+                wb_metrics["proxy/loss"] = float(loss.detach().item())
+                _safe_wandb_log(wb_metrics, wandb_step_key="proxy_step")
 
             self.proxy_step += 1
 
@@ -362,7 +424,9 @@ class Trainer(object):
                 metrics['loss'] = loss.detach().item()
                 metrics['lr'] = float(self.optimizer.param_groups[0].get("lr", self._base_train_lr))
                 logger.log_metrics_summary(metrics, default_stats='mean')
-                _safe_wandb_log(metrics)
+                wb_metrics = dict(metrics)
+                wb_metrics["finetune_step"] = int(self.step)
+                _safe_wandb_log(wb_metrics, wandb_step_key="finetune_step")
 
             # if self.step == 0 and self.sample_freq:
             #     self.render_reference(self.n_reference)

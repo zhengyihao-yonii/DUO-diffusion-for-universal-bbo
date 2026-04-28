@@ -31,11 +31,25 @@
 #                  few-shot 需已有同目录下 checkpoint；可用 BATCH_RUN 指定批次，RESULTS 指向已有实验根目录。
 #   --latent_dim D  与 train/evaluate/construct 一致（默认 32）；非 32 时 few-shot 默认 vae 元数据为
 #                  generated_datasets/multi_*/vae_info_latent{D}.p，且 _fewshot_trained_ckpt_dir 含 _latent{D}。
-#   TRAIN_TIMESTEP_BIAS_POWER / TRAIN_LOSS_MIN_SNR_GAMMA  环境变量，默认 0.0；few-shot train.py 会传入对应 CLI（扩散训练可选改进）。
+#   TRAIN_LEARNING_RATE       few-shot train/evaluate：扩散 Adam 学习率（默认 0.0002，与多任务 text mt_* 常见 _lr… 对齐）。
+#   TRAIN_TIMESTEP_BIAS_POWER / TRAIN_LOSS_MIN_SNR_GAMMA  few-shot：默认 0.5 / 0.0（与 min-SNR 两段式可由 train_half_* 调节）；
+#                   传入 train/evaluate，RUN.prefix 含 _tsbias / _msnr…（与 multitask tsbias 实验一致）。
 #   CONDITION_GUIDANCE_W_TEXT  文本 CFG 权重（--condition_guidance_w_text），默认 8（与 eval_sweep_w_text 中 w=8 对齐）。
 #                  也可 --condition_guidance_w_text <x> 或 --w_text <x>。
 #   --pretrained_vae_info /abs/path/vae_info.p   # few-shot；不设则见下方自动解析
 #   --pretrained_multitask_train_tasks 'ant,dkitty,...'  # 与多任务预训练 CSV 一致，用于默认 VAE 路径
+#
+# 显式多任务扩散预训练目录（含 _ce*_tsbias*_lr* 等后缀、与 resolve_multitask_pretrained_run_dir 默认不同的 run）:
+#   export MULTITASK_PRETRAINED_RUN_DIR="$PROJECT/trained_models/multi_.../mt_<hex>_textcond_mttextonly_ce0.005_tsbias0.5_lr0.0002"
+#   export MULTITASK_PRETRAINED_STATE_BASENAME=state_140000.pt   # 可选：显式指定 state_*.pt（与 REAL_TASK_ZS_TRAIN_EPOCHS 一致）
+#   REAL_TASK_ZS_TRAIN_EPOCHS  可选：仅用于 zero-shot evaluate 与 few-shot **加载预训练**
+#                  state_{epochs*n_steps}.pt（默认 1400→state_140000.pt）；**绝不等于** few-shot 微调轮数。
+#   REAL_TASK_FS_DIFFUSION_EPOCHS  few-shot **扩散微调** epoch（默认 100）。仅当未设置 TRAIN_EPOCHS / --train_epochs 时生效。
+#   TRAIN_EPOCHS / --train_epochs  传给 train.py，覆盖上面两者；勿与 REAL_TASK_ZS_TRAIN_EPOCHS 设成同一个数（除非你真的要微调 1400 epoch）。
+#   REAL_TASK_N_STEPS_PER_EPOCH 可选：与训练一致（默认 100），用于从 REAL_TASK_ZS_TRAIN_EPOCHS 推导 state_{...}.pt 文件名。
+#   设置后：zero-shot 的 evaluate 与 few-shot 的 train 会对每个 run seed 使用
+#     $MULTITASK_PRETRAINED_RUN_DIR/seed<seed>/checkpoint/$MULTITASK_PRETRAINED_STATE_BASENAME
+#   且 zero-shot 结果子目录名会追加 _<run_dir_basename>，避免与未带 CE 路径的旧实验混淆。
 #
 # Few-shot 与 PRETRAINED_VAE_INFO:
 #   多任务 VAE 产物路径为 generated_datasets/multi_<token>_frac<f>_sigma<s>/vae_info.p
@@ -231,16 +245,36 @@ if ! [[ "$NUM_SEEDS" =~ ^[1-9][0-9]*$ ]]; then
   echo "错误: NUM_SEEDS 须为正整数，当前: ${NUM_SEEDS}" >&2
   exit 1
 fi
-# Few-shot 扩散微调默认 epoch；与 train.py 一致。
-TRAIN_EPOCHS="${TRAIN_EPOCHS:-500}"
+# Zero-shot / few-shot 共用：每 epoch 步数、多任务默认 checkpoint 名（state_{epochs*n_steps}.pt）。
+REAL_TASK_N_STEPS_PER_EPOCH="${REAL_TASK_N_STEPS_PER_EPOCH:-100}"
+REAL_TASK_ZS_TRAIN_EPOCHS="${REAL_TASK_ZS_TRAIN_EPOCHS:-1400}"
+# Few-shot 微调专用默认（与 REAL_TASK_ZS_* 彻底分离，避免环境变量里误 export 同一数值）
+REAL_TASK_FS_DIFFUSION_EPOCHS="${REAL_TASK_FS_DIFFUSION_EPOCHS:-100}"
+TRAIN_EPOCHS="${TRAIN_EPOCHS:-$REAL_TASK_FS_DIFFUSION_EPOCHS}"
 LATENT_DIM="${LATENT_DIM:-32}"
-TRAIN_TIMESTEP_BIAS_POWER="${TRAIN_TIMESTEP_BIAS_POWER:-0.0}"
+# 与常见多任务 multitask text 路径（mt_*_tsbias0.5_lr0.0002）对齐；可用环境变量覆盖。
+TRAIN_LEARNING_RATE="${TRAIN_LEARNING_RATE:-0.0002}"
+TRAIN_TIMESTEP_BIAS_POWER="${TRAIN_TIMESTEP_BIAS_POWER:-0.5}"
 TRAIN_LOSS_MIN_SNR_GAMMA="${TRAIN_LOSS_MIN_SNR_GAMMA:-0.0}"
+# 若默认 resolve 找不到带 CE/tsbias/lr 后缀的 multitask 权重，可设此目录（mt_* 的父路径为各 seed 子目录）
+MULTITASK_PRETRAINED_RUN_DIR="${MULTITASK_PRETRAINED_RUN_DIR:-}"
+if [[ -z "${MULTITASK_PRETRAINED_STATE_BASENAME:-}" ]]; then
+  MULTITASK_PRETRAINED_STATE_BASENAME="state_$((REAL_TASK_ZS_TRAIN_EPOCHS * REAL_TASK_N_STEPS_PER_EPOCH)).pt"
+fi
 _DIFF_TRAIN_SUF="$(
   cd "$PROJECT" && PYTHONPATH="$PROJECT${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -c \
     'import sys; from diffuser.utils.multitask_canon import diffusion_train_path_suffix; print(diffusion_train_path_suffix(float(sys.argv[1]), float(sys.argv[2])))' \
     "${TRAIN_TIMESTEP_BIAS_POWER}" "${TRAIN_LOSS_MIN_SNR_GAMMA}"
 )"
+_LR_SUF=""
+if [[ -n "${TRAIN_LEARNING_RATE:-}" ]]; then
+  _LR_SUF="$(
+    cd "$PROJECT" && PYTHONPATH="$PROJECT${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -c \
+      'import sys; from diffuser.utils.multitask_canon import learning_rate_path_suffix; print(learning_rate_path_suffix(float(sys.argv[1])))' \
+      "${TRAIN_LEARNING_RATE}"
+  )"
+fi
+LR_EXTRA=(--learning_rate "${TRAIN_LEARNING_RATE}")
 EVAL_ONLY="${EVAL_ONLY:-0}"
 USE_RETURNS="${USE_RETURNS:-0}"
 AUTO_CONTINUE="${AUTO_CONTINUE:-0}"
@@ -326,7 +360,7 @@ _fewshot_trained_ckpt_dir() {
   fi
   _txt="${GTG_TEXTCOND_PATH_INFIX:-_textcond}"
   _mto="${GTG_MTTEXTONLY_PATH_INFIX:-_mttextonly}"
-  echo "${PROJECT}/trained_models/${t}_frac${FRAC}_sigma${SIGMA}/${N_TRAJ}x${HORIZON}_k${K}_eps${EPS}_fewshot_ft${_ret}${_txt}${_mto}${_DIFF_TRAIN_SUF:-}${_lat}/seed${seed}/checkpoint"
+  echo "${PROJECT}/trained_models/${t}_frac${FRAC}_sigma${SIGMA}/${N_TRAJ}x${HORIZON}_k${K}_eps${EPS}_fewshot_ft${_ret}${_txt}${_mto}${_DIFF_TRAIN_SUF:-}${_LR_SUF:-}${_lat}/seed${seed}/checkpoint"
 }
 
 _tasks_to_run() {
@@ -377,7 +411,14 @@ _run_zero_shot_one() {
   if [[ "${USE_RETURNS}" == "1" ]]; then
     _ST_HYPER="${_ST_HYPER}${RESULTS_SUFFIX:-_ret}"
   fi
+  # 避免 latent32 / latent64 写入同一 results 子目录
+  if [[ "${LATENT_DIM:-32}" != "32" ]]; then
+    _ST_HYPER="${_ST_HYPER}_latent${LATENT_DIM}"
+  fi
   local _mt_tag="mt${PRETRAINED_MT_HEX}_pds${PRETRAINED_DIFFUSION_SEED}_zs"
+  if [[ -n "${MULTITASK_PRETRAINED_RUN_DIR}" ]]; then
+    _mt_tag="${_mt_tag}_$(basename "${MULTITASK_PRETRAINED_RUN_DIR}")"
+  fi
   local base_dir="${REAL_TASK_RESULTS_ROOT}/zero_shot/${_ST_FRAC_SIG}/${_ST_HYPER}_${_mt_tag}"
   mkdir -p "$base_dir"
   local BATCH_STATE_FILE="$base_dir/.gtg_pipeline_batch"
@@ -418,12 +459,27 @@ _run_zero_shot_one() {
     local run_dir="$base_dir/run${br}_seed${seed}"
     mkdir -p "$run_dir"
     echo "--- Zero-shot seed=${seed} ($((zi + 1))/${zs_n}) → $run_dir ---"
+    local _zs_pds="$PRETRAINED_DIFFUSION_SEED"
+    local _zs_ldck=()
+    local _zs_te=()
+    if [[ -n "${REAL_TASK_ZS_TRAIN_EPOCHS:-}" ]]; then
+      _zs_te=(--train_epochs "${REAL_TASK_ZS_TRAIN_EPOCHS}")
+    fi
+    if [[ -n "${MULTITASK_PRETRAINED_RUN_DIR}" ]]; then
+      _zs_pds="$seed"
+      _zs_ldck=(
+        --load_diffusion_checkpoint
+        "${MULTITASK_PRETRAINED_RUN_DIR}/seed${seed}/checkpoint/${MULTITASK_PRETRAINED_STATE_BASENAME}"
+      )
+    fi
     if "$PYTHON" evaluate.py \
       --train_tasks "$t" \
       --real_task_zero_shot_eval \
       --pretrained_mt_hex "$PRETRAINED_MT_HEX" \
       --pretrained_multitask_train_tasks "$PRETRAINED_MULTITASK_TRAIN_TASKS" \
-      --pretrained_diffusion_seed "$PRETRAINED_DIFFUSION_SEED" \
+      --pretrained_diffusion_seed "$_zs_pds" \
+      "${_zs_ldck[@]}" \
+      "${_zs_te[@]}" \
       --n_traj "$N_TRAJ" \
       --k "$K" \
       --eps "$EPS" \
@@ -473,8 +529,15 @@ _run_few_shot_one() {
   if [[ "${USE_RETURNS}" == "1" ]]; then
     _ST_HYPER="${_ST_HYPER}${RESULTS_SUFFIX:-_ret}"
   fi
-  _ST_HYPER="${_ST_HYPER}${_DIFF_TRAIN_SUF:-}"
+  # 避免 latent32 / latent64 写入同一 results 子目录
+  if [[ "${LATENT_DIM:-32}" != "32" ]]; then
+    _ST_HYPER="${_ST_HYPER}_latent${LATENT_DIM}"
+  fi
+  _ST_HYPER="${_ST_HYPER}${_DIFF_TRAIN_SUF:-}${_LR_SUF:-}"
   _ST_HYPER="${_ST_HYPER}_mt${PRETRAINED_MT_HEX}_ft"
+  if [[ -n "${MULTITASK_PRETRAINED_RUN_DIR}" ]]; then
+    _ST_HYPER="${_ST_HYPER}_$(basename "${MULTITASK_PRETRAINED_RUN_DIR}")"
+  fi
 
   # RESULTS=完整路径 时覆盖本任务的 base_dir（单任务重跑）；否则与 single_task 类似写入 real_task/few_shot
   base_dir="${RESULTS:-${REAL_TASK_RESULTS_ROOT}/few_shot/${_ST_FRAC_SIG}/fs_${_FS_TAG}/${_ST_HYPER}}"
@@ -522,9 +585,17 @@ _run_few_shot_one() {
     echo "[批次] BATCH_RUN=$BATCH_RUN"
   fi
 
+  if [[ "${TRAIN_EPOCHS}" == "${REAL_TASK_ZS_TRAIN_EPOCHS}" ]] && [[ "${TRAIN_EPOCHS}" -ge 200 ]]; then
+    echo "[warn] TRAIN_EPOCHS 与 REAL_TASK_ZS_TRAIN_EPOCHS 同为 ${TRAIN_EPOCHS}：若本意是「预训练 1400 / 微调 100」" >&2
+    echo "      请 unset TRAIN_EPOCHS 或设 REAL_TASK_FS_DIFFUSION_EPOCHS=100（不要与预训练 epoch 共用 TRAIN_EPOCHS）。" >&2
+  fi
+
   echo "=========================================="
   echo "[Few-shot] TASK=$t  PRETRAINED_MT_HEX=$PRETRAINED_MT_HEX  n_traj=$N_TRAJ k=$K eps=$EPS horizon=$HORIZON"
-  echo "  TRAIN_EPOCHS=$TRAIN_EPOCHS"
+  echo "  REAL_TASK_ZS_TRAIN_EPOCHS=$REAL_TASK_ZS_TRAIN_EPOCHS（仅预训练 state 文件名 / zero-shot evaluate）"
+  echo "  REAL_TASK_FS_DIFFUSION_EPOCHS=$REAL_TASK_FS_DIFFUSION_EPOCHS（few-shot 微调默认；可被 TRAIN_EPOCHS 覆盖）"
+  echo "  TRAIN_EPOCHS=$TRAIN_EPOCHS（实际传入 train.py）"
+  echo "  TRAIN_LEARNING_RATE=$TRAIN_LEARNING_RATE"
   echo "  TRAIN_TIMESTEP_BIAS_POWER=$TRAIN_TIMESTEP_BIAS_POWER  TRAIN_LOSS_MIN_SNR_GAMMA=$TRAIN_LOSS_MIN_SNR_GAMMA"
   echo "  NUM_SEEDS=$NUM_SEEDS  START_SEED=$start_seed  （seed: $start_seed .. $((start_seed + NUM_SEEDS - 1))）"
   echo "  PRETRAINED_VAE_INFO=$PRETRAINED_VAE_INFO"
@@ -588,13 +659,23 @@ _run_few_shot_one() {
       fi
     fi
 
+    local _fs_pds="$PRETRAINED_DIFFUSION_SEED"
+    local _fs_ldck=()
+    if [[ -n "${MULTITASK_PRETRAINED_RUN_DIR}" ]]; then
+      _fs_pds="$seed"
+      _fs_ldck=(
+        --load_diffusion_checkpoint
+        "${MULTITASK_PRETRAINED_RUN_DIR}/seed${seed}/checkpoint/${MULTITASK_PRETRAINED_STATE_BASENAME}"
+      )
+    fi
     if [[ "${EVAL_ONLY}" != "1" ]] && [[ "$_skip_train" -eq 0 ]]; then
       $PYTHON "$PROJECT/train.py" \
         --train_tasks "$t" \
         --real_task_text_only_finetune \
         --pretrained_mt_hex "$PRETRAINED_MT_HEX" \
         --pretrained_multitask_train_tasks "$PRETRAINED_MULTITASK_TRAIN_TASKS" \
-        --pretrained_diffusion_seed "$PRETRAINED_DIFFUSION_SEED" \
+        --pretrained_diffusion_seed "$_fs_pds" \
+        "${_fs_ldck[@]}" \
         --n_traj "$N_TRAJ" \
         --k "$K" \
         --eps "$EPS" \
@@ -605,6 +686,7 @@ _run_few_shot_one() {
         --latent_dim "$LATENT_DIM" \
         --train_timestep_bias_power "$TRAIN_TIMESTEP_BIAS_POWER" \
         --train_loss_min_snr_gamma "$TRAIN_LOSS_MIN_SNR_GAMMA" \
+        "${LR_EXTRA[@]}" \
         "${RETURNS_EXTRA[@]}" \
         "${_TE_EXTRA[@]}" \
         "${CPU_EXTRA[@]}" \
@@ -632,8 +714,10 @@ _run_few_shot_one() {
       --frac "$FRAC" \
       --sigma "$SIGMA" \
       --latent_dim "$LATENT_DIM" \
+      "${_TE_EXTRA[@]}" \
       --train_timestep_bias_power "$TRAIN_TIMESTEP_BIAS_POWER" \
       --train_loss_min_snr_gamma "$TRAIN_LOSS_MIN_SNR_GAMMA" \
+      "${LR_EXTRA[@]}" \
       "${RETURNS_EXTRA[@]}" \
       "${CPU_EXTRA[@]}" \
       "${W_TEXT_EXTRA[@]}" \

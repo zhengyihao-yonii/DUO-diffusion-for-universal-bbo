@@ -119,7 +119,10 @@ if __name__ == '__main__':
         "--train_epochs",
         type=int,
         default=None,
-        help="扩散训练 epoch 数；n_train_steps = train_epochs * n_steps_per_epoch。",
+        help=(
+            "扩散训练 epoch 数；n_train_steps = train_epochs * n_steps_per_epoch。"
+            " 未指定时：--real_task_text_only_finetune 默认 100，否则 500。"
+        ),
     )
     parser.add_argument(
         "--real_task_text_only_finetune",
@@ -163,6 +166,12 @@ if __name__ == '__main__':
         type=int,
         default=None,
         help="若未指定 --load_diffusion_checkpoint，可填 epoch 从当前 RUN.prefix 下加载（一般不用）",
+    )
+    parser.add_argument(
+        "--retrain",
+        action="store_true",
+        default=False,
+        help="同 RUN 下若已有 checkpoint 也不 resume：从零步重训（默认不开启=尽量从最新 state_*.pt 续训到当前 train_epochs 对应总步数）。",
     )
     parser.add_argument(
         "--proxy_filter",
@@ -240,8 +249,9 @@ if __name__ == '__main__':
     real_task_ft = getattr(args, "real_task_text_only_finetune", False) or getattr(
         args, "fewshot_text_only_finetune", False
     )
+    # Few-shot migration: shorter default schedule; multitask baseline remains 500.
     if args.train_epochs is None:
-        args.train_epochs = 500
+        args.train_epochs = 100 if real_task_ft else 500
     if real_task_ft:
         args.multitask_text_only = True
         args.use_text_condition = True

@@ -35,6 +35,8 @@
 #   EXTRA_EVAL_FLAGS  追加到每次 evaluate.py 的参数（空格分隔字符串）
 #   LATENT_DIM          默认 32；非 32 时传给 evaluate 与 print_multitask_ckpt_hyper_dir，与 trained_models 下 mt_*_latent{d} 一致。
 #   TRAIN_TIMESTEP_BIAS_POWER / TRAIN_LOSS_MIN_SNR_GAMMA  默认 0；非零须与训练 checkpoint 路径一致（传给 evaluate 与 hyper 打印）。
+#   VISUALIZE_TRAIN_EPOCHS  默认 1400：evaluate 优先加载 state_{epoch*n_steps_per_epoch}.pt（与 checkpoint-sweep 对齐）
+#   VISUALIZE_N_STEPS_PER_EPOCH 默认 100（与训练一致）；仅用于说明与保持含义一致
 #
 # 日志：正常运行时脚本与 tqdm 等均写入 results/visualize/<slug>/visualize.log，各次 evaluate 另有
 #       eval_<tag>_seed<seed>.log；多 seed 聚合写入 aggregate_wandb.log。用法错误仍打印到终端。
@@ -102,13 +104,15 @@ N_TRAJ_MT="${N_TRAJ_MT:-1000}"
 K_MT="${K_MT:-50}"
 EPS_MT="${EPS_MT:-0.05}"
 
-SAMPLE_VIZ_STRIDE="${SAMPLE_VIZ_STRIDE:-10}"
+SAMPLE_VIZ_STRIDE="${SAMPLE_VIZ_STRIDE:-5}"
 SAMPLE_VIZ_MAX_QUERIES="${SAMPLE_VIZ_MAX_QUERIES:-512}"
 MT_EXPECT_HEX="${MT_EXPECT_HEX:-911054c35daad7e0}"
 WANDB_RUN_GROUP_PREFIX="${WANDB_RUN_GROUP_PREFIX:-duo_viz}"
 LATENT_DIM="${LATENT_DIM:-32}"
 TRAIN_TIMESTEP_BIAS_POWER="${TRAIN_TIMESTEP_BIAS_POWER:-0.0}"
 TRAIN_LOSS_MIN_SNR_GAMMA="${TRAIN_LOSS_MIN_SNR_GAMMA:-0.0}"
+VISUALIZE_TRAIN_EPOCHS="${VISUALIZE_TRAIN_EPOCHS:-1400}"
+VISUALIZE_N_STEPS_PER_EPOCH="${VISUALIZE_N_STEPS_PER_EPOCH:-100}"
 
 read_n_k_eps() {
   "$PYTHON" - "$TRAJ_JSON" "$TASK" <<'PY'
@@ -231,6 +235,7 @@ run_eval() {
     --latent_dim "$LATENT_DIM" \
     --train_timestep_bias_power "$TRAIN_TIMESTEP_BIAS_POWER" \
     --train_loss_min_snr_gamma "$TRAIN_LOSS_MIN_SNR_GAMMA" \
+    --train_epochs "$VISUALIZE_TRAIN_EPOCHS" \
     "$@" \
     "${EXTRA[@]}" \
     --sample_viz_tag "$tag" \
