@@ -32,7 +32,7 @@ from diffuser.utils.soo_gtopx import (
     is_gtopx_task,
 )
 from diffuser.utils.construct_runtime import resolve_torch_device
-from diffuser.utils.vae_layout import vae_train_dir_suffix
+from diffuser.utils.vae_layout import resolve_vae_weights_path_for_eval, vae_train_dir_suffix
 from diffuser.utils.traj_params import multitask_vae_dir_token
 
 # 任务映射
@@ -351,9 +351,27 @@ def main(args):
     vae = VAE(**vae_config)
     vae.to(device)
     if finetune_rw and pretrained_vae_info_dict:
-        pt_path = pretrained_vae_info_dict.get("vae_path")
+        pt_path = pretrained_vae_info_dict.get("vae_path") or pretrained_vae_info_dict.get(
+            "model_path"
+        )
         if not pt_path or not os.path.isfile(pt_path):
-            raise FileNotFoundError(f"预训练 VAE 权重不存在: {pt_path}")
+            # Try resolve: multitask VAE may live in a mt_<hex> dir segment.
+            _mts = pretrained_vae_info_dict.get("multitask_traj_signature")
+            _resolved, _tried = resolve_vae_weights_path_for_eval(
+                raw_path=str(pt_path) if pt_path else None,
+                vae_info_path=str(args.pretrained_vae_info),
+                latent_dim=int(getattr(args, "latent_dim", 32)),
+                project_root=os.path.dirname(os.path.abspath(__file__)),
+                multitask_traj_signature=str(_mts) if _mts else None,
+            )
+            if _resolved is None:
+                raise FileNotFoundError(
+                    f"预训练 VAE 权重不存在: {pt_path}\n"
+                    f"已尝试回退路径: {_tried}\n"
+                    f"建议：先生成多任务 VAE（latent={int(getattr(args,'latent_dim',32))}），"
+                    f"或确保 {args.pretrained_vae_info} 中的 vae_path 指向可读的 vae_latent*.pt。"
+                )
+            pt_path = _resolved
         vae.load_state_dict(torch.load(pt_path, map_location=device))
         print(f"已从 {pt_path} 加载权重，在 few-shot 数据上微调（lr={getattr(args, 'finetune_lr', 3e-5)}）")
 

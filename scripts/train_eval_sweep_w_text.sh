@@ -27,6 +27,9 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}"
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 
+# Avoid nounset surprises: treat as optional empty string.
+DIFFUSION_CKPT_TRAIN_STEPS="${DIFFUSION_CKPT_TRAIN_STEPS:-}"
+
 # ---------- CLI parsing (before LATENT_DIM default) ----------
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -132,6 +135,41 @@ except Exception:
     sys.exit(1)
 sys.exit(0 if v > 0.0 else 2)" >/dev/null 2>&1; then
     RUN_SUFFIX="_ce${_lam_raw}"
+  fi
+fi
+
+# If caller passed --run_suffix via TRAIN_EXTRA, reflect it in archive slug as well.
+# This keeps results/... aligned with trained_models/... without requiring manual RUN_SUFFIX.
+if [[ -z "${RUN_SUFFIX}" && -n "${TRAIN_EXTRA:-}" ]]; then
+  case " ${TRAIN_EXTRA} " in
+    *" --run_suffix "*)
+      # shellcheck disable=SC2206
+      _te_words=(${TRAIN_EXTRA})
+      for ((i = 0; i < ${#_te_words[@]}; i++)); do
+        if [[ "${_te_words[$i]}" == "--run_suffix" && $((i + 1)) -lt ${#_te_words[@]} ]]; then
+          RUN_SUFFIX="${_te_words[$((i + 1))]}"
+          break
+        fi
+      done
+      ;;
+    *" --run_suffix="*)
+      # Grab last occurrence; simplest robust parse for " --run_suffix=_ce0.005 " style.
+      RUN_SUFFIX="${TRAIN_EXTRA##*--run_suffix=}"
+      RUN_SUFFIX="${RUN_SUFFIX%% *}"
+      ;;
+  esac
+fi
+
+# Task-scheduler runs: append a canonical suffix so outputs never collide with baseline.
+if [[ -n "${DUO_TASK_SCHEDULER:-}" ]]; then
+  _ts="${DUO_TASK_SCHEDULER// /}"
+  _ts="${_ts,,}"
+  if [[ "${_ts}" == "1" || "${_ts}" == "true" || "${_ts}" == "yes" || "${_ts}" == "on" ]]; then
+    if [[ -z "${RUN_SUFFIX}" ]]; then
+      RUN_SUFFIX="_tsched"
+    elif [[ "${RUN_SUFFIX}" != *"_tsched"* ]]; then
+      RUN_SUFFIX="${RUN_SUFFIX}_tsched"
+    fi
   fi
 fi
 
@@ -302,7 +340,7 @@ for SEED in "${SEED_LIST[@]}"; do
   _EVAL_BASE+=(--train_half_lr_mult "${TRAIN_HALF_LR_MULT}")
   _EVAL_BASE+=("${LR_EXTRA[@]}")
   _EVAL_BASE+=("${PROXY_FILTER_EXTRA[@]}")
-  if [[ -n "${DIFFUSION_CKPT_TRAIN_STEPS:-}" ]]; then
+  if [[ -n "${DIFFUSION_CKPT_TRAIN_STEPS}" ]]; then
     _EVAL_BASE+=(--diffusion_ckpt_train_steps "${DIFFUSION_CKPT_TRAIN_STEPS}")
   fi
 

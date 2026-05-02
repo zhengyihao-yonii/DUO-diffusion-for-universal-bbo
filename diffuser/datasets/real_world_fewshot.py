@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Real-world few-shot 任务（LunarLander、RobotPush、Rover）：数据来自
-``fewshot_data/<TaskName>/{similar,unsimilar}/*.json``，每文件含 ``X``、``y``。
+Real-world few-shot 任务（LunarLander、RobotPush、Rover）：数据来自：
+
+- ``real_task_data/meta_dataset.json``（一个大 JSON，按任务聚合 X/y）
 
 Few-shot 子集：``fewshot_k`` + ``fewshot_mode``（``random`` / ``worst``）；
 亦可由环境变量 ``GTG_REAL_WORLD_FEWSHOT_K``、``GTG_REAL_WORLD_FEWSHOT_MODE`` 覆盖（与 construct / ZipDataset 一致）。
@@ -23,7 +24,7 @@ ENV_FEWSHOT_K = "GTG_REAL_WORLD_FEWSHOT_K"
 ENV_FEWSHOT_MODE = "GTG_REAL_WORLD_FEWSHOT_MODE"
 ENV_FEWSHOT_SEED = "GTG_REAL_WORLD_FEWSHOT_SEED"
 
-# DUO 任务短名 -> fewshot_data 下目录名
+# DUO 任务短名 -> real_task_data 下目录名
 TASK_KEY_TO_DATA_DIR: dict[str, str] = {
     "lunar_lander": "LunarLander",
     "robot_push": "RobotPush",
@@ -46,11 +47,13 @@ def _duo_root() -> Path:
 
 
 def default_real_world_data_root() -> Path:
-    """默认 ``<DUO>/fewshot_data``；可用环境变量 ``GTG_REAL_WORLD_FEWSHOT_DIR`` 覆盖。"""
+    """默认 ``<DUO>/real_task_data``；可用环境变量 ``GTG_REAL_WORLD_FEWSHOT_DIR`` 覆盖。"""
     env = os.environ.get("GTG_REAL_WORLD_FEWSHOT_DIR")
     if env:
         return Path(env).expanduser().resolve()
-    return _duo_root() / "fewshot_data"
+    root = _duo_root()
+    newp = root / "real_task_data"
+    return newp
 
 
 def _collect_json_paths(task_dir: Path) -> list[Path]:
@@ -60,6 +63,54 @@ def _collect_json_paths(task_dir: Path) -> list[Path]:
         if d.is_dir():
             out.extend(sorted(d.glob("*.json")))
     return out
+
+
+def _meta_dataset_path(root: Path) -> Path:
+    return root / "meta_dataset.json"
+
+
+def _load_from_meta_dataset_json(root: Path, *, task_dir_name: str) -> tuple[np.ndarray, np.ndarray]:
+    """
+    English doc: Load merged (X,y) for one task from meta_dataset.json.
+
+    Expected structure (as provided by user):
+      {
+        "LunarLander": {
+          "<source_name_1>": {"X": [[...],[...]], "y": [...]},
+          "<source_name_2>": {"X": [[...],[...]], "y": [...]},
+          ...
+        },
+        "RobotPush": {...},
+        "Rover": {...}
+      }
+    We merge all sources under the task key by concatenating rows.
+    """
+    mp = _meta_dataset_path(root)
+    if not mp.is_file():
+        raise FileNotFoundError(str(mp))
+    with mp.open("r", encoding="utf-8") as f:
+        j = json.load(f)
+    if task_dir_name not in j:
+        raise KeyError(f"meta_dataset.json 缺少任务键: {task_dir_name!r}")
+    obj = j[task_dir_name]
+    if not isinstance(obj, dict):
+        raise ValueError(f"{task_dir_name}: meta_dataset.json 期望 dict，收到 {type(obj)}")
+    xs: list[np.ndarray] = []
+    ys: list[np.ndarray] = []
+    for _src, rec in obj.items():
+        if not isinstance(rec, dict):
+            continue
+        if "X" not in rec or "y" not in rec:
+            continue
+        x = np.asarray(rec["X"], dtype=np.float32)
+        y = np.asarray(rec["y"], dtype=np.float32).reshape(-1)
+        if x.shape[0] != y.shape[0]:
+            raise ValueError(f"{task_dir_name}/{_src}: X/y 行数不一致 {x.shape[0]} vs {y.shape[0]}")
+        xs.append(x)
+        ys.append(y)
+    if not xs:
+        raise FileNotFoundError(f"meta_dataset.json: {task_dir_name} 下未找到任何含 X/y 的条目")
+    return np.vstack(xs), np.concatenate(ys)
 
 
 def resolve_fewshot_params(
@@ -121,38 +172,20 @@ def load_real_world_arrays_from_json(
     fewshot_mode: FewshotMode = "all",
     fewshot_seed: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """合并 ``similar``/``unsimilar`` 下所有 JSON 的 ``X``、``y``，再按 few-shot 规则子采样。"""
+    """加载 real-world (X,y)，再按 few-shot 规则子采样（仅 meta_dataset.json）。"""
     root = data_root if data_root is not None else default_real_world_data_root()
     dir_name = TASK_KEY_TO_DATA_DIR.get(task_key)
     if not dir_name:
         raise KeyError(f"未知 real-world 任务: {task_key}")
-    task_dir = root / dir_name
-    if not task_dir.is_dir():
+
+    mp = _meta_dataset_path(root)
+    if not mp.is_file():
         raise FileNotFoundError(
-            f"Real-world 数据目录不存在: {task_dir}\n"
-            f"请将数据置于 fewshot_data/{dir_name}/（含 similar/、unsimilar/ 与 *.json），"
-            f"或设置 GTG_REAL_WORLD_FEWSHOT_DIR 指向含该子目录的路径。"
+            f"未找到 meta_dataset.json: {mp}\n"
+            f"请将数据写入 real_task_data/meta_dataset.json，或设置 GTG_REAL_WORLD_FEWSHOT_DIR 指向包含该文件的目录。"
         )
-    paths = _collect_json_paths(task_dir)
-    if not paths:
-        raise FileNotFoundError(
-            f"未找到 JSON: {task_dir}/similar|unsimilar/*.json"
-        )
-    xs: list[np.ndarray] = []
-    ys: list[np.ndarray] = []
-    for jp in paths:
-        with open(jp, "r", encoding="utf-8") as f:
-            j = json.load(f)
-        if "X" not in j or "y" not in j:
-            raise KeyError(f"{jp} 须含键 'X' 与 'y'")
-        x = np.asarray(j["X"], dtype=np.float32)
-        y = np.asarray(j["y"], dtype=np.float32).reshape(-1)
-        if x.shape[0] != len(y):
-            raise ValueError(f"{jp}: X/y 行数不一致 {x.shape[0]} vs {len(y)}")
-        xs.append(x)
-        ys.append(y)
-    x_cat = np.vstack(xs)
-    y_cat = np.concatenate(ys)
+    x_cat, y_cat = _load_from_meta_dataset_json(root, task_dir_name=dir_name)
+
     spec_dim = REAL_WORLD_FEWSHOT_TASK_SPECS[task_key]["dim"]
     if x_cat.shape[1] != spec_dim:
         raise ValueError(

@@ -29,7 +29,8 @@ def offline_full_dataset_y_bounds(
     seed: int,
 ) -> tuple[float, float]:
     """
-    真实任务：``fewshot_data`` 下合并全部 JSON 的 y 的 ``(min, max)``（与 nmax 全库归一化一致）。
+    真实任务：``real_task_data/meta_dataset.json`` 下合并全部数据的 y 的 ``(min, max)``
+    （与 nmax 全库归一化一致）。
 
     非真实任务：与 ``offline_training_best_y`` 所用离线子集上 ``y`` 的 min/max 一致（Design-Bench 子集）。
     """
@@ -56,7 +57,7 @@ def offline_full_dataset_best_y(
     sigma: float,
     seed: int,
 ) -> float:
-    """全离线库上 best y（越大越好）；真实任务即 ``fewshot_data`` 合并后 ``max(y)``。"""
+    """全离线库上 best y（越大越好）；真实任务即 ``real_task_data`` 合并后 ``max(y)``。"""
     lo, hi = offline_full_dataset_y_bounds(
         task_name, frac=frac, sigma=sigma, seed=seed
     )

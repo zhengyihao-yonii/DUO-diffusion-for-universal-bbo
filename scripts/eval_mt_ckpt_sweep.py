@@ -160,7 +160,7 @@ def _try_rebuild_json_from_log(
 
     Expected log contains:
       - "[evaluate] 加载扩散权重: <path>"
-      - "=== 多任务评估汇总 ... ===" table with columns including top16 / nt16.
+      - "=== 多任务评估汇总 ... ===" table with columns including top8 / nt8.
     """
     if not log_path.is_file() or log_path.stat().st_size <= 0:
         return False
@@ -195,11 +195,11 @@ def _try_rebuild_json_from_log(
                 "max": float(m.group(2)),
                 "median": float(m.group(3)),
                 "mean": float(m.group(4)),
-                "top16_mean": float(m.group(5)),
+                "top8_mean": float(m.group(5)),
                 "nmax": float(m.group(6)),
                 "nmedian": float(m.group(7)),
                 "nmean": float(m.group(8)),
-                "ntop16_mean": float(m.group(9)),
+                "ntop8_mean": float(m.group(9)),
             }
         except ValueError:
             continue

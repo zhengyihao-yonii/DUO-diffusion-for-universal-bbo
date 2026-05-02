@@ -198,6 +198,18 @@ if __name__ == '__main__':
         " few-shot 默认 1，可用 0 或环境变量 PROXY_FILTER=0",
     )
     parser.add_argument(
+        "--proxy_n_train_steps",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="Proxy 训练步数（覆盖 config.proxy_n_train_steps；用于 evaluate 内自动补训 proxy 时）。",
+    )
+    parser.add_argument(
+        "--proxy_save_freq",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="Proxy checkpoint 保存频率（覆盖 config.proxy_save_freq；单位 step）。",
+    )
+    parser.add_argument(
         "--run_suffix",
         type=str,
         default="",
@@ -271,6 +283,14 @@ if __name__ == '__main__':
     )
 
     args = parser.parse_args(_cli_args)
+
+    # 与 train.py 对齐：若启用任务调度器（env），确保评估读取/写入独立目录，避免覆盖 baseline。
+    _ts = os.environ.get("DUO_TASK_SCHEDULER", "").strip().lower()
+    if _ts in ("1", "true", "yes", "on"):
+        if not str(getattr(args, "run_suffix", "") or "").strip():
+            args.run_suffix = "_tsched"
+        elif "_tsched" not in str(args.run_suffix):
+            args.run_suffix = f"{args.run_suffix}_tsched"
 
     # 兼容旧版API - 当指定task时，优先使用task参数覆盖train_tasks和eval_task
     if args.task:

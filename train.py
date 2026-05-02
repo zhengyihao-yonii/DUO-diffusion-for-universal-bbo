@@ -6,6 +6,7 @@ if __name__ == "__main__":
     maybe_apply_from_argv_and_env()
 
 import argparse
+import os
 from ml_logger import logger, instr, needs_relaunch
 from analysis import RUN
 import jaynes
@@ -218,6 +219,39 @@ if __name__ == '__main__':
         help="扩散 Adam 学习率；不传则用锚点 config 的 learning_rate。传参后 RUN.prefix 含 _lr… 以免混用 checkpoint。",
     )
 
+    parser.add_argument(
+        "--proxy_n_train_steps",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="Proxy 训练步数（覆盖 config.proxy_n_train_steps；few-shot 可减小以加速）。",
+    )
+    parser.add_argument(
+        "--proxy_save_freq",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="Proxy checkpoint 保存频率（覆盖 config.proxy_save_freq；单位 step）。",
+    )
+
+    parser.add_argument(
+        "--save_checkpoints",
+        type=int,
+        choices=[0, 1],
+        default=argparse.SUPPRESS,
+        help=(
+            "1=保存 state_{step}.pt（每次触发 Trainer.save）；0=仅覆盖写 state.pt。"
+            "不传则沿用锚点 config 默认值。"
+        ),
+    )
+    parser.add_argument(
+        "--save_freq",
+        type=int,
+        default=argparse.SUPPRESS,
+        help=(
+            "每隔多少 optimizer steps 调用一次 Trainer.save（单位是 step，不是 epoch）。"
+            "real-task few-shot 想要每 N epoch 保存一次，可设 save_freq = N * n_steps_per_epoch。"
+        ),
+    )
+
     args = parser.parse_args(_cli_args)
     if getattr(args, "learning_rate", None) is not None and float(args.learning_rate) <= 0.0:
         raise SystemExit("--learning_rate must be positive")
@@ -226,6 +260,18 @@ if __name__ == '__main__':
     if args.task:
         args.train_tasks = args.task
         args.eval_task = args.task
+
+    # ------------------------------------------------------------------
+    # Task-scheduler runs must not collide with baseline directories.
+    # Enable via env DUO_TASK_SCHEDULER=1 (Trainer side). Here we only
+    # ensure RUN.prefix is separated by appending a default run_suffix.
+    # ------------------------------------------------------------------
+    _ts = os.environ.get("DUO_TASK_SCHEDULER", "").strip().lower()
+    if _ts in ("1", "true", "yes", "on"):
+        if not str(getattr(args, "run_suffix", "") or "").strip():
+            args.run_suffix = "_tsched"
+        elif "_tsched" not in str(args.run_suffix):
+            args.run_suffix = f"{args.run_suffix}_tsched"
     
     # 处理任务列表，判断是单任务还是多任务
     from diffuser.utils.multitask_canon import (

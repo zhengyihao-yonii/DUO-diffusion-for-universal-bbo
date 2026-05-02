@@ -1,0 +1,45 @@
+% Requires: \usepackage{booktabs}, \usepackage{graphicx}.
+\begin{table*}[t!]
+\caption{Real-task few-shot: \texttt{max\_ep\_reward} mean $\pm$ std over seeds; one row per hyper folder; lr/tsbias from folder name. Epoch columns are defined \emph{per task block} (see \textbf{bold} task headers). All leaf hyper folders under each task.}
+\vspace{0.3em}
+\centering
+\textbf{lunar\_lander}
+\vspace{0.25em}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{l|ccc|cccccccccc}
+\toprule
+Task & lr & tsbias & hyper & Ep10 & Ep20 & Ep30 & Ep40 & Ep50 & Ep60 & Ep70 & Ep80 & Ep90 & Ep100 \\
+\midrule
+lunar\_lander & 5e-05 & -- & 100x64\_k20\_eps0.05\_lr5e-05\_mt911054c35daad7e0\_ft & -104.841 $\pm$ 57.527 & -48.540 $\pm$ 79.321 & -52.887 $\pm$ 30.336 & -68.042 $\pm$ 41.112 & -68.352 $\pm$ 42.290 & -68.847 $\pm$ 39.018 & -- & -- & -- & -- \\
+lunar\_lander & 0.0001 & -- & 100x64\_k20\_eps0.05\_lr0.0001\_mt911054c35daad7e0\_ft & -91.088 $\pm$ 61.688 & -94.884 $\pm$ 36.701 & -100.332 $\pm$ 44.397 & -127.059 $\pm$ 51.804 & -125.166 $\pm$ 45.609 & -148.682 $\pm$ 52.445 & -141.709 $\pm$ 38.844 & -151.636 $\pm$ 48.849 & -166.308 $\pm$ 49.542 & -165.182 $\pm$ 47.637 \\
+lunar\_lander & 0.0002 & -- & 100x64\_k20\_eps0.05\_latent64\_lr0.0002\_mt911054c35daad7e0\_ft & -68.230 $\pm$ 47.408 & 8.932 $\pm$ 120.861 & 26.452 $\pm$ 80.039 & 17.763 $\pm$ 119.214 & 30.157 $\pm$ 103.166 & 38.224 $\pm$ 96.447 & 17.085 $\pm$ 96.428 & 13.705 $\pm$ 82.158 & 36.699 $\pm$ 22.199 & 34.221 $\pm$ 29.428 \\
+lunar\_lander & 0.0002 & -- & 100x64\_k20\_eps0.05\_lr0.0002\_mt911054c35daad7e0\_ft & -153.810 $\pm$ 0.000 & -229.456 $\pm$ 0.000 & -221.910 $\pm$ 0.000 & -224.303 $\pm$ 0.000 & -225.031 $\pm$ 0.000 & -218.736 $\pm$ 0.000 & -217.308 $\pm$ 0.000 & -218.752 $\pm$ 0.000 & -217.990 $\pm$ 0.000 & -218.577 $\pm$ 0.000 \\
+\bottomrule
+\end{tabular}
+}
+\vspace{1.0em}
+\textbf{rover}
+\vspace{0.25em}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{l|ccc|cccccc}
+\toprule
+Task & lr & tsbias & hyper & Ep10 & Ep20 & Ep30 & Ep40 & Ep50 & Ep60 \\
+\midrule
+rover & 5e-05 & -- & 100x64\_k20\_eps0.05\_lr5e-05\_mt911054c35daad7e0\_ft & 37.867 $\pm$ 3.021 & 37.315 $\pm$ 3.637 & 36.144 $\pm$ 3.346 & 35.751 $\pm$ 3.734 & 34.481 $\pm$ 2.027 & 33.977 $\pm$ 3.197 \\
+\bottomrule
+\end{tabular}
+}
+\vspace{1.0em}
+\textbf{robot\_push}
+\vspace{0.25em}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{l|ccc|cccccc}
+\toprule
+Task & lr & tsbias & hyper & Ep10 & Ep20 & Ep30 & Ep40 & Ep50 & Ep60 \\
+\midrule
+robot\_push & 5e-05 & -- & 100x64\_k20\_eps0.05\_lr5e-05\_mt911054c35daad7e0\_ft & 9.375 $\pm$ 6.512 & 9.221 $\pm$ 4.681 & 7.795 $\pm$ 4.018 & 11.265 $\pm$ 5.141 & 7.064 $\pm$ 3.132 & 5.545 $\pm$ 2.961 \\
+\bottomrule
+\end{tabular}
+}
+\label{tab:real-task-fewshot-epoch-max}
+\end{table*}

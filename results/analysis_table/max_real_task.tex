@@ -1,7 +1,7 @@
 % Requires: \usepackage{booktabs}, \usepackage{graphicx}, \usepackage{xcolor}.
-% UniSO: Improved UniSO-T only (paper Table~6 ZS w/ metadata; Table~3 FS).
+% Per-row rank coloring across UniSO/DUO columns: best=blue, second=violet (higher raw mean is better).
 \begin{table*}[t!]
-\caption{Real-world tasks: raw max reward (DUO: mean $\pm$ std at best-nmax hyper). UniSO: Improved UniSO-T (paper Table~6 ZS w/ metadata; Table~3 FS). $\mathcal{D}_{\mathrm{all}}$(best) is ``max(y)`` on merged ``fewshot_data``; $\mathcal{D}_{\mathrm{fs}}$(best) is few-shot pool ``max(y)`` (same rules as evaluate).}
+\caption{Real-world tasks: raw max reward (DUO: mean $\pm$ std at selected hyper). UniSO: Improved UniSO-T with metadata (paper Table~6 ZS; Table~7 FS). $\mathcal{D}_{\mathrm{all}}$(best): $\max(y)$ on merged offline data (same as evaluate). $\mathcal{D}_{\mathrm{fs}}$(best): few-shot pool $\max(y)$ from the pool used at evaluation (\texttt{evaluate.log} / \texttt{real\_world\_fewshot\_pool}).}
 \vspace{0.3em}
 \centering
 \resizebox{\linewidth}{!}{
@@ -9,13 +9,21 @@
 \toprule
 Task & $\mathcal{D}_{\mathrm{all}}$(best) & $\mathcal{D}_{\mathrm{fs}}$(best) & \shortstack{UniSO-T\\zero-shot} & \shortstack{UniSO-T\\few-shot} & DUO-ZS & DUO-FS \\
 \midrule
-LunarLander & -0.001 & -0.001 & 31.186 $\pm$ 27.971 & \textbf{\textcolor{blue}{248.573 $\pm$ 45.386}} & -99.552 $\pm$ 0.349 & \textbf{\textcolor{violet}{93.079 $\pm$ 231.626}} \\
-Rover & -1.085 & -1.085 & -8.888 $\pm$ 2.119 & -8.239 $\pm$ 1.270 & \textbf{\textcolor{violet}{13.284 $\pm$ 0.242}} & \textbf{\textcolor{blue}{19.828 $\pm$ 10.920}} \\
-RobotPush & -0.005 & -0.005 & \textbf{\textcolor{violet}{3.171 $\pm$ 0.984}} & \textbf{\textcolor{blue}{7.067 $\pm$ 0.169}} & 0.727 $\pm$ 0.280 & 2.719 $\pm$ 1.597 \\
+RobotPush & 9.764 & -4.989 & 3.171 $\pm$ 0.984 & \textbf{\textcolor{violet}{7.067 $\pm$ 0.169}} & 2.715 $\pm$ 1.602 & \textbf{\textcolor{blue}{15.109 $\pm$ 4.495}} \\
+Rover & 1.216 & -32.127 & -8.888 $\pm$ 2.119 & -8.239 $\pm$ 1.270 & \textbf{\textcolor{violet}{33.489 $\pm$ 0.016}} & \textbf{\textcolor{blue}{39.600 $\pm$ 3.183}} \\
+LunarLander & 280.180 & -236.793 & 31.186 $\pm$ 27.971 & \textbf{\textcolor{blue}{248.573 $\pm$ 45.386}} & -216.627 $\pm$ 4.602 & \textbf{\textcolor{violet}{81.193 $\pm$ 44.657}} \\
 \midrule
-Mean rank & / & / & 3.000 $\pm$ 1.000 & \textbf{\textcolor{blue}{1.667 $\pm$ 1.155}} & 3.333 $\pm$ 1.155 & \textbf{\textcolor{violet}{2.000 $\pm$ 1.000}} \\
+Mean rank & / & / & 3.333 $\pm$ 0.577 & \textbf{\textcolor{violet}{2.000 $\pm$ 1.000}} & 3.333 $\pm$ 1.155 & \textbf{\textcolor{blue}{1.333 $\pm$ 0.577}} \\
 \bottomrule
 \end{tabular}
 }
+\vspace{0.4em}
+\begin{minipage}{\linewidth}\footnotesize
+\setlength{\emergencystretch}{2em}
+\textbf{DUO per-task best hyper (see \texttt{analyze\_eval\_results} selection).}\\
+\textbf{RobotPush}: ZS: lr=--, ep=--, tbias=--; FS: lr=5e-05, ep=60, tbias=--.\\
+\textbf{Rover}: ZS: lr=--, ep=--, tbias=--; FS: lr=5e-05, ep=60, tbias=--.\\
+\textbf{LunarLander}: ZS: lr=--, ep=--, tbias=--; FS: lr=0.0002, ep=100, tbias=--.\\
+\end{minipage}
 \label{tab:max-real-task}
 \end{table*}

@@ -97,7 +97,7 @@ Pipeline-only knobs (`USE_RETURNS`, `USE_TEXT_CONDITION`, `TRAIN_EXTRA`, `EVAL_E
 
 | Variable | Purpose |
 |----------|---------|
-| `GTG_REAL_WORLD_FEWSHOT_DIR` | Root containing `LunarLander` / `RobotPush` / `Rover` subdirs; default `<repo>/fewshot_data`. See `fewshot_data/README.md`. |
+| `GTG_REAL_WORLD_FEWSHOT_DIR` | Directory containing `real_task_data/meta_dataset.json`; default `<repo>/real_task_data`. |
 | `GTG_REAL_WORLD_FEWSHOT_K` | Override few-shot subset size `k` (integer). |
 | `GTG_REAL_WORLD_FEWSHOT_MODE` | Override mode: `all` \| `random` \| `worst`. |
 | `GTG_REAL_WORLD_FEWSHOT_SEED` | Override RNG seed for few-shot selection. |

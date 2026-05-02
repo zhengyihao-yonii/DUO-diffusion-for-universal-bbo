@@ -63,9 +63,10 @@
 #                 <n_traj>x<h>_k<k>_eps<eps>[_ret]_mt<hex>_pds<seed>_zs/run<N>_seed<S>/evaluate.log
 #   真实任务 few-shot：评估前需要 construct 生成的单任务轨迹 pkl（Step 1）。
 #   真实任务 zero-shot：不构造轨迹 pkl；evaluate 固定无上下文采样（README）。
-#   Few-shot 默认 FEWSHOT_K=128、FEWSHOT_MODE=worst（见 README）。
+#   Few-shot 默认 FEWSHOT_K=100、FEWSHOT_MODE=worst（见 README）。
 #   Few-shot:   $REAL_TASK_RESULTS_ROOT/few_shot/<task>_frac.../fs_<tag>/
-#                 <hyper>_mt<hex>_ft/construct_trajectories.log + run<N>_seed*/{train,evaluate}.log
+#                 <hyper>_mt<hex>_ft<suffix>/construct_trajectories.log + run<N>_seed*/{train,evaluate}.log
+#   FEWSHOT_NAME_SUFFIX  默认 "_ftv2"：追加到 few-shot 的 trained_models/results 命名，避免与旧实验混淆。
 #   若 export RESULTS=/某次实验的完整目录，则仅 Few-shot 时覆盖该任务的 base_dir（与旧版一致，便于单任务重跑）。
 #
 # Weights & Biases（默认在线同步；网络不稳可用离线）:
@@ -222,19 +223,28 @@ REAL_TASK_RESULTS_ROOT="${REAL_TASK_RESULTS_ROOT:-$PROJECT/results/real_task}"
 
 # 文本 classifier-free guidance（与 evaluate.py / train.py --condition_guidance_w_text 一致；默认 8）
 CONDITION_GUIDANCE_W_TEXT="${CONDITION_GUIDANCE_W_TEXT:-8}"
+FEWSHOT_CTX_LEN="${FEWSHOT_CTX_LEN:-8}"
+# few-shot：proxy 默认训练步数（加速；evaluate 内若需自动补训 proxy 也用这个值）
+PROXY_N_TRAIN_STEPS="${PROXY_N_TRAIN_STEPS:-2000}"
+# few-shot 命名后缀（同时作用于 trained_models 与 results，便于与旧版本区分）
+# few-shot 目录命名后缀（可选）：默认不加任何后缀，目录仅由超参后缀区分（与主实验风格一致）。
+# 如需人工隔离新旧实验，可显式设：export FEWSHOT_NAME_SUFFIX=_ftv2
+FEWSHOT_NAME_SUFFIX="${FEWSHOT_NAME_SUFFIX:-}"
 
 # ---------- Few-shot 可选变量 ----------
-# 默认：在合并后的 JSON 上取 y 最小的 128 个点（worst；越大越好）。
+# 默认：在合并后的 JSON 上取 y 最小的 100 个点（worst；越大越好）。
 # 若需全量点（不子采样）：export FEWSHOT_K= 为空字符串，或在本脚本执行环境中显式置空。
-# 仅当 FEWSHOT_K 完全未设置（unset）时使用默认 128。
+# 仅当 FEWSHOT_K 完全未设置（unset）时使用默认 100。
 PRETRAINED_VAE_INFO="${PRETRAINED_VAE_INFO:-}"
 if [[ -z "${FEWSHOT_K+x}" ]]; then
-  FEWSHOT_K=128
+  FEWSHOT_K=100
 fi
 FEWSHOT_MODE="${FEWSHOT_MODE:-worst}"
 CONSTRUCT_SEED="${CONSTRUCT_SEED:-0}"
 FINETUNE_EPOCHS="${FINETUNE_EPOCHS:-50}"
 FINETUNE_LR="${FINETUNE_LR:-3e-5}"
+# 每隔多少个 epoch 保存一个扩散 checkpoint（state_{step}.pt）。默认 10。
+SAVE_EVERY_EPOCHS="${SAVE_EVERY_EPOCHS:-10}"
 START_SEED="${START_SEED:-0}"
 if [[ -n "${NUM_SEEDS_CLI:-}" ]]; then
   NUM_SEEDS="$NUM_SEEDS_CLI"
@@ -253,19 +263,28 @@ REAL_TASK_FS_DIFFUSION_EPOCHS="${REAL_TASK_FS_DIFFUSION_EPOCHS:-100}"
 TRAIN_EPOCHS="${TRAIN_EPOCHS:-$REAL_TASK_FS_DIFFUSION_EPOCHS}"
 LATENT_DIM="${LATENT_DIM:-32}"
 # 与常见多任务 multitask text 路径（mt_*_tsbias0.5_lr0.0002）对齐；可用环境变量覆盖。
-TRAIN_LEARNING_RATE="${TRAIN_LEARNING_RATE:-0.0002}"
-TRAIN_TIMESTEP_BIAS_POWER="${TRAIN_TIMESTEP_BIAS_POWER:-0.5}"
+if [[ -z "${TRAIN_LEARNING_RATE+x}" ]]; then
+  TRAIN_LEARNING_RATE="0.0002"
+fi
+if [[ -z "${TRAIN_TIMESTEP_BIAS_POWER+x}" ]]; then
+  # few-shot 主实验：默认不启用 tbias（不传参、不加路径后缀），避免与旧实验命名强绑定。
+  # 如需启用：export TRAIN_TIMESTEP_BIAS_POWER=0.5
+  TRAIN_TIMESTEP_BIAS_POWER=""
+fi
 TRAIN_LOSS_MIN_SNR_GAMMA="${TRAIN_LOSS_MIN_SNR_GAMMA:-0.0}"
 # 若默认 resolve 找不到带 CE/tsbias/lr 后缀的 multitask 权重，可设此目录（mt_* 的父路径为各 seed 子目录）
 MULTITASK_PRETRAINED_RUN_DIR="${MULTITASK_PRETRAINED_RUN_DIR:-}"
 if [[ -z "${MULTITASK_PRETRAINED_STATE_BASENAME:-}" ]]; then
   MULTITASK_PRETRAINED_STATE_BASENAME="state_$((REAL_TASK_ZS_TRAIN_EPOCHS * REAL_TASK_N_STEPS_PER_EPOCH)).pt"
 fi
-_DIFF_TRAIN_SUF="$(
-  cd "$PROJECT" && PYTHONPATH="$PROJECT${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -c \
-    'import sys; from diffuser.utils.multitask_canon import diffusion_train_path_suffix; print(diffusion_train_path_suffix(float(sys.argv[1]), float(sys.argv[2])))' \
-    "${TRAIN_TIMESTEP_BIAS_POWER}" "${TRAIN_LOSS_MIN_SNR_GAMMA}"
-)"
+_DIFF_TRAIN_SUF=""
+if [[ -n "${TRAIN_TIMESTEP_BIAS_POWER}" ]]; then
+  _DIFF_TRAIN_SUF="$(
+    cd "$PROJECT" && PYTHONPATH="$PROJECT${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -c \
+      'import sys; from diffuser.utils.multitask_canon import diffusion_train_path_suffix; print(diffusion_train_path_suffix(float(sys.argv[1]), float(sys.argv[2])))' \
+      "${TRAIN_TIMESTEP_BIAS_POWER}" "${TRAIN_LOSS_MIN_SNR_GAMMA}"
+  )"
+fi
 _LR_SUF=""
 if [[ -n "${TRAIN_LEARNING_RATE:-}" ]]; then
   _LR_SUF="$(
@@ -275,6 +294,13 @@ if [[ -n "${TRAIN_LEARNING_RATE:-}" ]]; then
   )"
 fi
 LR_EXTRA=(--learning_rate "${TRAIN_LEARNING_RATE}")
+DIFF_TRAIN_EXTRA=()
+if [[ -n "${TRAIN_TIMESTEP_BIAS_POWER}" ]]; then
+  DIFF_TRAIN_EXTRA=(--train_timestep_bias_power "${TRAIN_TIMESTEP_BIAS_POWER}" --train_loss_min_snr_gamma "${TRAIN_LOSS_MIN_SNR_GAMMA}")
+else
+  # 不启用 tbias 时仍允许用户单独设置 min-SNR，但为了避免浮点默认值引入路径后缀，这里也不传参。
+  DIFF_TRAIN_EXTRA=()
+fi
 EVAL_ONLY="${EVAL_ONLY:-0}"
 USE_RETURNS="${USE_RETURNS:-0}"
 AUTO_CONTINUE="${AUTO_CONTINUE:-0}"
@@ -304,14 +330,23 @@ spec = importlib.util.spec_from_file_location('multitask_canon', path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 from diffuser.utils.vae_layout import resolve_generated_vae_info_path
+from diffuser.utils.vae_layout import resolve_multitask_generated_root_for_vae
 csv = os.environ['PRETRAINED_MULTITASK_TRAIN_TASKS']
 frac = float(os.environ['FRAC'])
 sigma = float(os.environ['SIGMA'])
 ld = int(os.environ.get('LATENT_DIM', '32'))
 tok = mod.multitask_path_token(mod.canonical_train_tasks_csv(csv))
-base = os.path.join(project, f'generated_datasets/multi_{tok}_frac{frac}_sigma{sigma}')
+# latent_dim!=32 时，generated_datasets 的实际目录通常为 ..._dim128_latent{ld}；
+# 用 resolver 找到真实根目录再定位 vae_info_latent{ld}.p
+base = resolve_multitask_generated_root_for_vae(
+    train_tasks_csv=mod.canonical_train_tasks_csv(csv),
+    frac=frac,
+    sigma=sigma,
+    fixed_dim=128,
+    latent_dim=ld,
+)
 p = resolve_generated_vae_info_path(base, ld)
-print(p or '')
+print(p or os.path.join(base, ('vae_info.p' if ld==32 else f'vae_info_latent{ld}.p')))
 "
   )"
   if [[ -n "$_cand" ]] && [[ -f "$_cand" ]]; then
@@ -360,7 +395,19 @@ _fewshot_trained_ckpt_dir() {
   fi
   _txt="${GTG_TEXTCOND_PATH_INFIX:-_textcond}"
   _mto="${GTG_MTTEXTONLY_PATH_INFIX:-_mttextonly}"
-  echo "${PROJECT}/trained_models/${t}_frac${FRAC}_sigma${SIGMA}/${N_TRAJ}x${HORIZON}_k${K}_eps${EPS}_fewshot_ft${_ret}${_txt}${_mto}${_DIFF_TRAIN_SUF:-}${_LR_SUF:-}${_lat}/seed${seed}/checkpoint"
+
+  # few-shot 默认使用 FEWSHOT_NAME_SUFFIX（如 _ftv2）与旧实验隔离。
+  # 但历史/中途运行可能未带后缀：若 primary 目录不存在则自动回退到无后缀路径。
+  local _base="${PROJECT}/trained_models/${t}_frac${FRAC}_sigma${SIGMA}/${N_TRAJ}x${HORIZON}_k${K}_eps${EPS}_fewshot_ft${_ret}${_txt}${_mto}${_DIFF_TRAIN_SUF:-}${_LR_SUF:-}${_lat}"
+  local _primary="${_base}${FEWSHOT_NAME_SUFFIX}/seed${seed}/checkpoint"
+  if [[ -n "${FEWSHOT_NAME_SUFFIX}" ]] && [[ ! -d "${_primary}" ]]; then
+    local _fallback="${_base}/seed${seed}/checkpoint"
+    if [[ -d "${_fallback}" ]]; then
+      echo "${_fallback}"
+      return
+    fi
+  fi
+  echo "${_primary}"
 }
 
 _tasks_to_run() {
@@ -534,7 +581,7 @@ _run_few_shot_one() {
     _ST_HYPER="${_ST_HYPER}_latent${LATENT_DIM}"
   fi
   _ST_HYPER="${_ST_HYPER}${_DIFF_TRAIN_SUF:-}${_LR_SUF:-}"
-  _ST_HYPER="${_ST_HYPER}_mt${PRETRAINED_MT_HEX}_ft"
+  _ST_HYPER="${_ST_HYPER}_mt${PRETRAINED_MT_HEX}_ft${FEWSHOT_NAME_SUFFIX}"
   if [[ -n "${MULTITASK_PRETRAINED_RUN_DIR}" ]]; then
     _ST_HYPER="${_ST_HYPER}_$(basename "${MULTITASK_PRETRAINED_RUN_DIR}")"
   fi
@@ -597,11 +644,54 @@ _run_few_shot_one() {
   echo "  TRAIN_EPOCHS=$TRAIN_EPOCHS（实际传入 train.py）"
   echo "  TRAIN_LEARNING_RATE=$TRAIN_LEARNING_RATE"
   echo "  TRAIN_TIMESTEP_BIAS_POWER=$TRAIN_TIMESTEP_BIAS_POWER  TRAIN_LOSS_MIN_SNR_GAMMA=$TRAIN_LOSS_MIN_SNR_GAMMA"
+  echo "  PROXY_N_TRAIN_STEPS=$PROXY_N_TRAIN_STEPS"
+  echo "  FEWSHOT_NAME_SUFFIX=$FEWSHOT_NAME_SUFFIX"
   echo "  NUM_SEEDS=$NUM_SEEDS  START_SEED=$start_seed  （seed: $start_seed .. $((start_seed + NUM_SEEDS - 1))）"
   echo "  PRETRAINED_VAE_INFO=$PRETRAINED_VAE_INFO"
   echo "  condition_guidance_w_text=${CONDITION_GUIDANCE_W_TEXT}"
   echo "  RESULTS=$base_dir"
   echo "=========================================="
+
+  # 写 run_meta（供 scripts/eval_real_task_ckpt_sweep.py / 复现实验用）
+  RUN_META_OUT="$base_dir/run_meta_$(date +%Y%m%d_%H%M%S).env"
+  {
+    echo "# real-task few-shot run meta"
+    echo "PROJECT_ROOT=$PROJECT"
+    echo "MODE=$MODE"
+    echo "TASK=$t"
+    echo "FRAC=$FRAC"
+    echo "SIGMA=$SIGMA"
+    echo "N_TRAJ=$N_TRAJ"
+    echo "K=$K"
+    echo "EPS=$EPS"
+    echo "HORIZON=$HORIZON"
+    echo "LATENT_DIM=$LATENT_DIM"
+    echo "REAL_TASK_N_STEPS_PER_EPOCH=$REAL_TASK_N_STEPS_PER_EPOCH"
+    echo "TRAIN_EPOCHS=$TRAIN_EPOCHS"
+    echo "SAVE_EVERY_EPOCHS=$SAVE_EVERY_EPOCHS"
+    echo "FEWSHOT_K=${FEWSHOT_K:-}"
+    echo "FEWSHOT_MODE=$FEWSHOT_MODE"
+    echo "CONSTRUCT_SEED=$CONSTRUCT_SEED"
+    echo "TRAIN_TIMESTEP_BIAS_POWER=$TRAIN_TIMESTEP_BIAS_POWER"
+    echo "TRAIN_LOSS_MIN_SNR_GAMMA=$TRAIN_LOSS_MIN_SNR_GAMMA"
+    echo "TRAIN_HALF_TBIAS_FRAC=${TRAIN_HALF_TBIAS_FRAC:-0.7}"
+    echo "TRAIN_HALF_LR_MULT=${TRAIN_HALF_LR_MULT:-1.0}"
+    echo "TRAIN_LEARNING_RATE=$TRAIN_LEARNING_RATE"
+    echo "CONDITION_GUIDANCE_W_TEXT=$CONDITION_GUIDANCE_W_TEXT"
+    echo "FEWSHOT_CTX_LEN=$FEWSHOT_CTX_LEN"
+    echo "PROXY_N_TRAIN_STEPS=$PROXY_N_TRAIN_STEPS"
+    echo "FEWSHOT_NAME_SUFFIX=$FEWSHOT_NAME_SUFFIX"
+    echo "PRETRAINED_MT_HEX=$PRETRAINED_MT_HEX"
+    echo "PRETRAINED_MULTITASK_TRAIN_TASKS=$PRETRAINED_MULTITASK_TRAIN_TASKS"
+    echo "GTG_TEXTCOND_PATH_INFIX=${GTG_TEXTCOND_PATH_INFIX:-_textcond}"
+    echo "GTG_MTTEXTONLY_PATH_INFIX=${GTG_MTTEXTONLY_PATH_INFIX:-_mttextonly}"
+    echo "GTG_RETCOND_PATH_INFIX=${GTG_RETCOND_PATH_INFIX:-_retcond}"
+    echo "USE_RETURNS=${USE_RETURNS:-0}"
+    echo "DIFF_TRAIN_SUF=${_DIFF_TRAIN_SUF:-}"
+    echo "LR_SUF=${_LR_SUF:-}"
+    echo "PROXY_FILTER=${PROXY_FILTER:-}"
+  } >"$RUN_META_OUT"
+  echo "[run_meta] $RUN_META_OUT"
 
   CONSTRUCT_EXTRA=()
   if [[ -n "${FEWSHOT_K:-}" ]]; then
@@ -639,6 +729,9 @@ _run_few_shot_one() {
   fi
 
   _TE_EXTRA=(--train_epochs "$TRAIN_EPOCHS")
+  # few-shot：每 SAVE_EVERY_EPOCHS 个 epoch 保存一次 state_{step}.pt
+  _SAVE_FREQ_STEPS=$(( SAVE_EVERY_EPOCHS * REAL_TASK_N_STEPS_PER_EPOCH ))
+  _CKPT_SAVE_EXTRA=(--save_checkpoints 1 --save_freq "$_SAVE_FREQ_STEPS")
 
   echo
   echo "=== Step 2: train（real_task_text_only_finetune）+ evaluate ==="
@@ -672,6 +765,7 @@ _run_few_shot_one() {
       $PYTHON "$PROJECT/train.py" \
         --train_tasks "$t" \
         --real_task_text_only_finetune \
+        --run_suffix "$FEWSHOT_NAME_SUFFIX" \
         --pretrained_mt_hex "$PRETRAINED_MT_HEX" \
         --pretrained_multitask_train_tasks "$PRETRAINED_MULTITASK_TRAIN_TASKS" \
         --pretrained_diffusion_seed "$_fs_pds" \
@@ -684,11 +778,12 @@ _run_few_shot_one() {
         --frac "$FRAC" \
         --sigma "$SIGMA" \
         --latent_dim "$LATENT_DIM" \
-        --train_timestep_bias_power "$TRAIN_TIMESTEP_BIAS_POWER" \
-        --train_loss_min_snr_gamma "$TRAIN_LOSS_MIN_SNR_GAMMA" \
+        "${DIFF_TRAIN_EXTRA[@]}" \
+        --proxy_n_train_steps "$PROXY_N_TRAIN_STEPS" \
         "${LR_EXTRA[@]}" \
         "${RETURNS_EXTRA[@]}" \
         "${_TE_EXTRA[@]}" \
+        "${_CKPT_SAVE_EXTRA[@]}" \
         "${CPU_EXTRA[@]}" \
         "${W_TEXT_EXTRA[@]}" \
         "${PROXY_FILTER_FS_EXTRA[@]}" \
@@ -702,30 +797,119 @@ _run_few_shot_one() {
       echo "  跳过训练（SKIP_TRAIN_IF_CKPT，checkpoint 已存在）"
     fi
 
-    $PYTHON "$PROJECT/evaluate.py" \
-      --train_tasks "$t" \
-      --real_task_text_only_finetune \
-      --pretrained_multitask_train_tasks "$PRETRAINED_MULTITASK_TRAIN_TASKS" \
-      --n_traj "$N_TRAJ" \
-      --k "$K" \
-      --eps "$EPS" \
-      --seed "$seed" \
-      --horizon "$HORIZON" \
-      --frac "$FRAC" \
-      --sigma "$SIGMA" \
-      --latent_dim "$LATENT_DIM" \
-      "${_TE_EXTRA[@]}" \
-      --train_timestep_bias_power "$TRAIN_TIMESTEP_BIAS_POWER" \
-      --train_loss_min_snr_gamma "$TRAIN_LOSS_MIN_SNR_GAMMA" \
-      "${LR_EXTRA[@]}" \
-      "${RETURNS_EXTRA[@]}" \
-      "${CPU_EXTRA[@]}" \
-      "${W_TEXT_EXTRA[@]}" \
-      "${PROXY_FILTER_FS_EXTRA[@]}" \
-      >"$run_dir/evaluate.log" 2>&1 || {
-      echo "评估失败: $run_dir/evaluate.log" >&2
-      continue
-    }
+    # 逐 checkpoint 评估（每 SAVE_EVERY_EPOCHS 个 epoch 一个 state_{step}.pt）
+    # 注意：当存在 evaluate_ep${TRAIN_EPOCHS}.log 时，无后缀 evaluate.log 本质等价于“最后一次评估”，会造成重复；默认跳过。
+    if [[ "${EVAL_ONLY}" != "1" ]]; then
+      spe="$REAL_TASK_N_STEPS_PER_EPOCH"
+      echo "  [few-shot] 逐 checkpoint 评估：每 ${SAVE_EVERY_EPOCHS} epoch（spe=${spe}，ctx_len=${FEWSHOT_CTX_LEN}）" >"$run_dir/evaluate.log"
+      _eval_any=0
+      for ((ep = SAVE_EVERY_EPOCHS; ep <= TRAIN_EPOCHS; ep += SAVE_EVERY_EPOCHS)); do
+        steps=$(( ep * spe ))
+        ckpt="$_fs_ckpt/state_${steps}.pt"
+        if [[ ! -f "$ckpt" ]]; then
+          echo "  [few-shot] 跳过 ep=${ep}：缺少 $ckpt" >>"$run_dir/evaluate.log"
+          continue
+        fi
+        _eval_any=1
+        $PYTHON "$PROJECT/evaluate.py" \
+          --train_tasks "$t" \
+          --real_task_text_only_finetune \
+          --run_suffix "$FEWSHOT_NAME_SUFFIX" \
+          --pretrained_multitask_train_tasks "$PRETRAINED_MULTITASK_TRAIN_TASKS" \
+          --ctx_len "$FEWSHOT_CTX_LEN" \
+          --n_traj "$N_TRAJ" \
+          --k "$K" \
+          --eps "$EPS" \
+          --seed "$seed" \
+          --horizon "$HORIZON" \
+          --frac "$FRAC" \
+          --sigma "$SIGMA" \
+          --latent_dim "$LATENT_DIM" \
+          --train_epochs "$ep" \
+          --load_diffusion_checkpoint "$ckpt" \
+          "${DIFF_TRAIN_EXTRA[@]}" \
+          --proxy_n_train_steps "$PROXY_N_TRAIN_STEPS" \
+          "${LR_EXTRA[@]}" \
+          "${RETURNS_EXTRA[@]}" \
+          "${CPU_EXTRA[@]}" \
+          "${W_TEXT_EXTRA[@]}" \
+          "${PROXY_FILTER_FS_EXTRA[@]}" \
+          >"$run_dir/evaluate_ep${ep}.log" 2>&1 || {
+          echo "  [few-shot] ep=${ep} 评估失败: $run_dir/evaluate_ep${ep}.log" >>"$run_dir/evaluate.log"
+          continue
+        }
+      done
+      if [[ "$_eval_any" -eq 0 ]]; then
+        # 没有任何可用的 state_{steps}.pt 时：回退到单次评估（优先 state.pt，其次最后一个 steps 的 state_{steps}.pt）
+        local _fallback_ckpt=""
+        if [[ -f "${_fs_ckpt}/state.pt" ]]; then
+          _fallback_ckpt="${_fs_ckpt}/state.pt"
+        else
+          local _last_steps=$(( TRAIN_EPOCHS * spe ))
+          if [[ -f "${_fs_ckpt}/state_${_last_steps}.pt" ]]; then
+            _fallback_ckpt="${_fs_ckpt}/state_${_last_steps}.pt"
+          fi
+        fi
+        if [[ -n "${_fallback_ckpt}" ]]; then
+          echo "  [few-shot] 未找到逐 epoch checkpoint，回退评估: ${_fallback_ckpt}" >>"$run_dir/evaluate.log"
+          $PYTHON "$PROJECT/evaluate.py" \
+            --train_tasks "$t" \
+            --real_task_text_only_finetune \
+            --run_suffix "$FEWSHOT_NAME_SUFFIX" \
+            --pretrained_multitask_train_tasks "$PRETRAINED_MULTITASK_TRAIN_TASKS" \
+            --ctx_len "$FEWSHOT_CTX_LEN" \
+            --n_traj "$N_TRAJ" \
+            --k "$K" \
+            --eps "$EPS" \
+            --seed "$seed" \
+            --horizon "$HORIZON" \
+            --frac "$FRAC" \
+            --sigma "$SIGMA" \
+            --latent_dim "$LATENT_DIM" \
+            "${_TE_EXTRA[@]}" \
+            --load_diffusion_checkpoint "${_fallback_ckpt}" \
+            "${DIFF_TRAIN_EXTRA[@]}" \
+            --proxy_n_train_steps "$PROXY_N_TRAIN_STEPS" \
+            "${LR_EXTRA[@]}" \
+            "${RETURNS_EXTRA[@]}" \
+            "${CPU_EXTRA[@]}" \
+            "${W_TEXT_EXTRA[@]}" \
+            "${PROXY_FILTER_FS_EXTRA[@]}" \
+            >"$run_dir/evaluate_fallback.log" 2>&1 || {
+            echo "  [few-shot] 回退评估失败: $run_dir/evaluate_fallback.log" >>"$run_dir/evaluate.log"
+          }
+        else
+          echo "  [few-shot] 未找到任何 checkpoint（state.pt/state_*.pt），无法评估" >>"$run_dir/evaluate.log"
+        fi
+      fi
+    else
+      # EVAL_ONLY：仍保留无后缀 evaluate.log（用户显式要求只跑一次评估）
+      $PYTHON "$PROJECT/evaluate.py" \
+        --train_tasks "$t" \
+        --real_task_text_only_finetune \
+        --run_suffix "$FEWSHOT_NAME_SUFFIX" \
+        --pretrained_multitask_train_tasks "$PRETRAINED_MULTITASK_TRAIN_TASKS" \
+        --ctx_len "$FEWSHOT_CTX_LEN" \
+        --n_traj "$N_TRAJ" \
+        --k "$K" \
+        --eps "$EPS" \
+        --seed "$seed" \
+        --horizon "$HORIZON" \
+        --frac "$FRAC" \
+        --sigma "$SIGMA" \
+        --latent_dim "$LATENT_DIM" \
+        "${_TE_EXTRA[@]}" \
+        "${DIFF_TRAIN_EXTRA[@]}" \
+        "${LR_EXTRA[@]}" \
+        "${RETURNS_EXTRA[@]}" \
+        "${CPU_EXTRA[@]}" \
+        "${W_TEXT_EXTRA[@]}" \
+        "${PROXY_FILTER_FS_EXTRA[@]}" \
+        >"$run_dir/evaluate.log" 2>&1 || {
+        echo "评估失败: $run_dir/evaluate.log" >&2
+        continue
+      }
+    fi
 
     echo "  完成: $run_dir"
   done

@@ -14,6 +14,11 @@ from .arrays import batch_to_device, to_np, to_device, apply_dict, to_torch
 from .timer import Timer
 from .cloud import sync_logs
 from ml_logger import logger
+from diffuser.utils.task_scheduler import (
+    MultitaskWindowSampler,
+    init_task_sampling_state,
+    update_task_sampling_state,
+ )
 
 
 def _safe_wandb_log(
@@ -94,6 +99,50 @@ def _env_float(key: str, default: float) -> float:
 def _env_str(key: str, default: str = "") -> str:
     v = os.environ.get(key, "").strip()
     return v if v else default
+
+
+def _task_sched_bin_weight(bin_idx: int) -> float:
+    """
+    Scheduler 观测指标用的 per-t loss bin 权重。
+
+    需求：更关心低噪声（b00/b01），高噪声也不能完全忽略，且“权重区别尽量大”。
+    这里用指数衰减：w[b]=2^{-b} → b0=1, b1=0.5, b2=0.25 ... 差异明显且不为 0。
+    """
+    b = max(0, int(bin_idx))
+    return float(2.0 ** (-b))
+
+
+def _task_sched_observed_score(loss: torch.Tensor, infos: dict) -> float:
+    """
+    用于 scheduler 的观测指标（越大→越“没收敛”→采样概率应更高）。
+
+    优先使用 `train/t_loss/bXX_...`（per-bin weighted MSE），按低噪声 bin 给予更大权重；
+    若该信息不存在，则回退到整体 loss。
+    """
+    try:
+        # keys like: train/t_loss/b00_t0_9
+        s = 0.0
+        ws = 0.0
+        for k, v in (infos or {}).items():
+            if not isinstance(k, str):
+                continue
+            if not k.startswith("train/t_loss/b"):
+                continue
+            # parse bXX
+            bi = int(k.split("train/t_loss/b", 1)[1].split("_", 1)[0])
+            w = _task_sched_bin_weight(bi)
+            tv = float(v.detach().item()) if torch.is_tensor(v) else float(v)
+            if tv == tv and tv not in (float("inf"), float("-inf")):
+                s += w * tv
+                ws += w
+        if ws > 0.0:
+            return float(s / ws)
+    except Exception:
+        pass
+    try:
+        return float(loss.detach().item())
+    except Exception:
+        return 0.0
 
 
 def _set_optimizer_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
@@ -247,11 +296,55 @@ class Trainer(object):
             # 在没有proxy_dataset的情况下，仍然可以训练扩散模型
             self.proxy_dataloader = None
 
+        # ---------------- task sampling scheduler (multitask only) ----------------
+        self._task_sched_enabled = _env_str("DUO_TASK_SCHEDULER", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        self._task_sched_update_every = int(float(_env_float("DUO_TASK_SCHEDULER_UPDATE_EVERY", 50)))
+        self._task_sched_ema_beta = float(_env_float("DUO_TASK_SCHEDULER_EMA_BETA", 0.05))
+        self._task_sched_min_prob = float(_env_float("DUO_TASK_SCHEDULER_MIN_PROB", 0.02))
+        self._task_sched_temp = float(_env_float("DUO_TASK_SCHEDULER_TEMPERATURE", 1.0))
+
         _n_ds = len(self.dataset)
         _drop_main = _n_ds >= train_batch_size
-        self.dataloader = cycle(torch.utils.data.DataLoader(
-            self.dataset, batch_size=train_batch_size, num_workers=0, shuffle=True, pin_memory=True, drop_last=_drop_main,
-        ))
+        _sampler = None
+        self._task_state = None
+        if self._task_sched_enabled and getattr(self.dataset, "tasks_list", None) is not None:
+            try:
+                nt = int(len(self.dataset.tasks_list))
+                if nt >= 2 and getattr(self.dataset, "task_indices", None) is not None:
+                    # scheduler state is immutable; we just reassign self._task_state each update
+                    self._task_state = init_task_sampling_state(nt, device="cpu")
+                    _sampler = MultitaskWindowSampler(
+                        self.dataset,
+                        task_probs_getter=lambda: self._task_state.task_probs,
+                        num_samples=int(_n_ds),
+                        seed=int(getattr(self, "step", 0) or 0),
+                    )
+                    logger.print(
+                        f"[task_sched] enabled: num_tasks={nt}, update_every={self._task_sched_update_every}, "
+                        f"ema_beta={self._task_sched_ema_beta}, min_prob={self._task_sched_min_prob}, temp={self._task_sched_temp}",
+                        color="yellow",
+                    )
+            except Exception as e:
+                logger.print(f"[task_sched] disabled (init failed): {e}", color="yellow")
+                self._task_state = None
+                _sampler = None
+
+        self.dataloader = cycle(
+            torch.utils.data.DataLoader(
+                self.dataset,
+                batch_size=train_batch_size,
+                num_workers=0,
+                shuffle=(_sampler is None),
+                sampler=_sampler,
+                pin_memory=True,
+                drop_last=_drop_main,
+            )
+        )
         # self.proxy_dataloader = cycle(torch.utils.data.DataLoader(
         #     self.proxy_dataset, batch_size=train_batch_size, num_workers=0, shuffle=True, pin_memory=True, drop_last=True,
         # ))
@@ -427,6 +520,49 @@ class Trainer(object):
                 wb_metrics = dict(metrics)
                 wb_metrics["finetune_step"] = int(self.step)
                 _safe_wandb_log(wb_metrics, wandb_step_key="finetune_step")
+
+            # Update task sampling scheduler after stepping (uses current batch task ids).
+            if (
+                self._task_state is not None
+                and self._task_sched_enabled
+                and self._task_sched_update_every > 0
+                and (int(self.step) % int(self._task_sched_update_every) == 0)
+            ):
+                try:
+                    cond = getattr(batch, "conditions", None)
+                    tid = None
+                    if isinstance(cond, dict):
+                        tid = cond.get("task_idx", None)
+                    if tid is not None:
+                        tid_t = torch.as_tensor(tid).view(-1)
+                        obs = _task_sched_observed_score(loss, infos)
+                        self._task_state = update_task_sampling_state(
+                            self._task_state,
+                            task_ids=tid_t,
+                            batch_loss=float(obs),
+                            ema_beta=self._task_sched_ema_beta,
+                            min_prob=self._task_sched_min_prob,
+                            temperature=self._task_sched_temp,
+                        )
+                        # 可选：把当前 probs 打到 wandb（走 finetune_step 轴）
+                        try:
+                            m = {
+                                "finetune_step": int(self.step),
+                                "task_sched/observed_score": float(obs),
+                            }
+                            tl = getattr(self.dataset, "tasks_list", None)
+                            if tl:
+                                for i, name in enumerate(list(tl)):
+                                    m[f"task_sched/p_{name}"] = float(
+                                        self._task_state.task_probs.detach()
+                                        .to("cpu")[i]
+                                        .item()
+                                    )
+                            _safe_wandb_log(m, wandb_step_key="finetune_step")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
 
             # if self.step == 0 and self.sample_freq:
             #     self.render_reference(self.n_reference)

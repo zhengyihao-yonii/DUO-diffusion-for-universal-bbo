@@ -22,9 +22,8 @@ from typing import Any, Optional, Tuple
 wandb = None
 from diffuser.utils.arrays import to_torch
 
-# Top-k oracle mean for eval / viz (fitting diagnostics: top16 vs max8 sample-viz).
+# Top-k oracle mean for eval / viz (use top8 as the only top-k diagnostic).
 _ORACLE_TOPK_MAX8 = 8
-_ORACLE_TOPK_DIAG = 16
 
 
 def _oracle_topk_mean(arr: np.ndarray, k: int) -> float:
@@ -142,6 +141,7 @@ def _real_world_d_best_fewshot_params(
     Config,
     is_multitask: bool,
     deps: dict[str, Any] | None = None,
+    logger_prefix: str | None = None,
 ) -> tuple[int | None, str, int]:
     """
     D(best) 与 construct 的 few-shot 池对齐：优先读 ``vae_info.p`` 中 construct 写入的字段。
@@ -160,6 +160,19 @@ def _real_world_d_best_fewshot_params(
                 fk = _vi.get("real_world_fewshot_k", fk)
                 fm = str(_vi.get("real_world_fewshot_mode", fm))
                 fseed = int(_vi["real_world_fewshot_seed"])
+
+    # 若 vae_info 缺失/不含字段，则从 results 路径名中恢复（避免 Dall best == Dfs best 的误解）
+    if is_real_world_fewshot_task(eval_task) and (fk is None or fm == "all"):
+        try:
+            import re
+
+            pfx = str(logger_prefix or "")
+            m = re.search(r"(?:^|/)(?:fs_k)(?P<k>\\d+)_?(?P<mode>worst|random|all)(?:/|$)", pfx)
+            if m:
+                fk = int(m.group("k"))
+                fm = str(m.group("mode"))
+        except Exception:
+            pass
     if fseed is None:
         fseed = int(getattr(Config, "seed", 1))
     return fk, fm, fseed
@@ -757,7 +770,7 @@ def _evaluate_single_task(
     from diffuser.utils.offline_train_best import offline_training_best_y
 
     _rw_fk, _rw_fm, _rw_fs = _real_world_d_best_fewshot_params(
-        eval_task, Config, is_multitask, deps=deps
+        eval_task, Config, is_multitask, deps=deps, logger_prefix=getattr(logger, "prefix", None)
     )
     _y_tr_best = offline_training_best_y(
         eval_task,
@@ -1347,15 +1360,15 @@ def _evaluate_single_task(
 
     y_vec = np.asarray(y, dtype=np.float64).reshape(-1)
     y_norm_vec = np.asarray(y_norm, dtype=np.float64).reshape(-1)
-    top16_mean = _oracle_topk_mean(y_vec, _ORACLE_TOPK_DIAG)
-    ntop16_mean = _oracle_topk_mean(y_norm_vec, _ORACLE_TOPK_DIAG)
+    top8_mean = _oracle_topk_mean(y_vec, _ORACLE_TOPK_MAX8)
+    ntop8_mean = _oracle_topk_mean(y_norm_vec, _ORACLE_TOPK_MAX8)
 
     logger.print(
         f"[{eval_task}] max_ep_reward: {np.max(y)}, median: {np.median(y)}, mean: {np.mean(y)}",
         color='green',
     )
     logger.print(
-        f"[{eval_task}] top16_mean (raw oracle, fitting diag): {top16_mean}",
+        f"[{eval_task}] top8_mean (raw oracle, fitting diag): {top8_mean}",
         color='green',
     )
     logger.print(
@@ -1363,18 +1376,18 @@ def _evaluate_single_task(
         color='green',
     )
     logger.print(
-        f"[{eval_task}] ntop16_mean (normalized oracle, fitting diag): {ntop16_mean}",
+        f"[{eval_task}] ntop8_mean (normalized oracle, fitting diag): {ntop8_mean}",
         color='green',
     )
     logger.log_metrics_summary({
         f"max_ep_reward_{eval_task}": np.max(y),
         f"median_ep_reward_{eval_task}": np.median(y),
         f"mean_ep_reward_{eval_task}": np.mean(y),
-        f"top16_mean_ep_reward_{eval_task}": top16_mean,
+        f"top8_mean_ep_reward_{eval_task}": top8_mean,
         f"nmax_ep_reward_{eval_task}": np.max(y_norm),
         f"nmedian_ep_reward_{eval_task}": np.median(y_norm),
         f"nmean_ep_reward_{eval_task}": np.mean(y_norm),
-        f"ntop16_mean_ep_reward_{eval_task}": ntop16_mean,
+        f"ntop8_mean_ep_reward_{eval_task}": ntop8_mean,
     })
 
     if log_wandb and wandb is not None:
@@ -1382,11 +1395,11 @@ def _evaluate_single_task(
             f"max_ep_reward/{eval_task}": np.max(y),
             f"median_ep_reward/{eval_task}": np.median(y),
             f"mean_ep_reward/{eval_task}": np.mean(y),
-            f"top16_mean_ep_reward/{eval_task}": top16_mean,
+            f"top8_mean_ep_reward/{eval_task}": top8_mean,
             f"nmax_ep_reward/{eval_task}": np.max(y_norm),
             f"nmedian_ep_reward/{eval_task}": np.median(y_norm),
             f"nmean_ep_reward/{eval_task}": np.mean(y_norm),
-            f"ntop16_mean_ep_reward/{eval_task}": ntop16_mean,
+            f"ntop8_mean_ep_reward/{eval_task}": ntop8_mean,
             "eval_task": eval_task,
             "n_traj": Config.n_traj,
             "horizon": Config.horizon,
@@ -1419,11 +1432,11 @@ def _evaluate_single_task(
         'max': float(np.max(y)),
         'median': float(np.median(y)),
         'mean': float(np.mean(y)),
-        'top16_mean': float(top16_mean),
+        'top8_mean': float(top8_mean),
         'nmax': float(np.max(y_norm)),
         'nmedian': float(np.median(y_norm)),
         'nmean': float(np.mean(y_norm)),
-        'ntop16_mean': float(ntop16_mean),
+        'ntop8_mean': float(ntop8_mean),
     }
 
 
@@ -1623,24 +1636,27 @@ def evaluate(**deps):
         results.append(r)
 
     if len(results) > 1:
-        print("=== 多任务评估汇总（绝对值 / 归一化 [0,1]；top16 / ntop16 仅作拟合诊断）===")
+        print("=== 多任务评估汇总（绝对值 / 归一化 [0,1]；top8 / ntop8 仅作拟合诊断）===")
         hdr = (
-            f"{'task':<18} {'max':>10} {'median':>10} {'mean':>10} {'top16':>10} | "
-            f"{'nmax':>10} {'nmedian':>10} {'nmean':>10} {'nt16':>10}"
+            f"{'task':<18} {'max':>10} {'median':>10} {'mean':>10} {'top8':>10} | "
+            f"{'nmax':>10} {'nmedian':>10} {'nmean':>10} {'nt8':>10}"
         )
         print(hdr)
         print("-" * len(hdr))
         for r in results:
             print(
                 f"{r['eval_task']:<18} {r['max']:10.4f} {r['median']:10.4f} {r['mean']:10.4f} "
-                f"{r['top16_mean']:10.4f} | {r['nmax']:10.4f} {r['nmedian']:10.4f} {r['nmean']:10.4f} "
-                f"{r['ntop16_mean']:10.4f}"
+                f"{r['top8_mean']:10.4f} | {r['nmax']:10.4f} {r['nmedian']:10.4f} {r['nmean']:10.4f} "
+                f"{r['ntop8_mean']:10.4f}"
             )
         _wandb_summary = {}
         for r in results:
             _wandb_summary[f"summary/max_{r['eval_task']}"] = r['max']
             _wandb_summary[f"summary/nmax_{r['eval_task']}"] = r['nmax']
-            _wandb_summary[f"summary/ntop16_mean_{r['eval_task']}"] = r['ntop16_mean']
+            if "top8_mean" in r:
+                _wandb_summary[f"summary/top8_mean_{r['eval_task']}"] = r["top8_mean"]
+            if "ntop8_mean" in r:
+                _wandb_summary[f"summary/ntop8_mean_{r['eval_task']}"] = r["ntop8_mean"]
         if wandb is not None:
             wandb.log(_wandb_summary)
     _json_out = deps.get("eval_summary_json_out")
@@ -1677,11 +1693,11 @@ def evaluate(**deps):
                         "max",
                         "median",
                         "mean",
-                        "top16_mean",
+                        "top8_mean",
                         "nmax",
                         "nmedian",
                         "nmean",
-                        "ntop16_mean",
+                        "ntop8_mean",
                     )
                     if k in r
                 }

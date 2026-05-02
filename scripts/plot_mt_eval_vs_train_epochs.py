@@ -10,7 +10,7 @@ Optionally upload figures to Weights & Biases (wandb).
 Example:
   cd /data/xk/zyh_dfgo/DUO && python3 scripts/plot_mt_eval_vs_train_epochs.py \\
     --model-root results/epoch1500/mt_911054c35daad7e0_textcond_mttextonly_ce0.005_tsbias0.5_lr0.0002 \\
-    --metric ntop16_mean --tasks ant,dkitty \\
+    --metric ntop8_mean --tasks ant,dkitty \\
     --std-across-seeds stdev \\
     --macro-across-tasks \\
     --wandb-run-name mt_ce005_ckpt_curve
@@ -34,8 +34,8 @@ _METRICS_ALL = (
     "median",
     "nmedian",
     "nmean",
-    "top16_mean",
-    "ntop16_mean",
+    "top8_mean",
+    "ntop8_mean",
 )
 
 
@@ -259,7 +259,7 @@ def main() -> None:
         type=str,
         default="nmax",
         choices=_METRICS_ALL,
-        help="Per-task metric from eval_summary JSON (ntop16_mean: normalized top-16 oracle mean).",
+        help="Per-task metric from eval_summary JSON (ntop8_mean: normalized top-8 oracle mean).",
     )
     ap.add_argument(
         "--std-across-seeds",
