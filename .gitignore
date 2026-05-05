@@ -10,3 +10,8 @@ wandb/
 
 # 第三方克隆（如需纳入版本库可删此行或改用 git submodule）
 thirdparty_benchmark/SOO-Bench/
+
+checkpoint/
+*.pt
+*.pth
+*.ckpt
