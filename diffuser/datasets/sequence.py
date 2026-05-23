@@ -415,8 +415,19 @@ class PointRegretDataset(torch.utils.data.Dataset):
         return self.num_trajectories * (self.size_of_trajectory - self.block_size + 1)
 
     def get_conditions(self, trajectories):
-        conditions = {}
-        conditions["ctx_len"] = np.array([0])
+        conditions: dict = {}
+        c = int(max(0, self.context_length))
+        c = min(c, int(self.block_size))
+        if c > 0:
+            tr = trajectories
+            if not torch.is_tensor(tr):
+                tr = torch.as_tensor(tr, dtype=torch.float32)
+            for t in range(c):
+                row = tr[t]
+                conditions[int(t)] = np.asarray(
+                    row.detach().cpu().numpy(), dtype=np.float32
+                )
+        conditions["ctx_len"] = np.array([c], dtype=np.int64)
         if not self._multitask_pkl:
             # 单任务 pkl：仍可在 use_text_condition 时注入 text_embed（与多任务 multitask_text_only 一致）
             if self.task_text_embeds is not None and self.task_text_embeds.shape[0] >= 1:

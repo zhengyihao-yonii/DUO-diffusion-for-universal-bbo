@@ -1,0 +1,25 @@
+{
+  "gap_dir": "/data/xk/zyh_dfgo/DUO/results/comparison1/exp1_scene_v4/shift_sim_low_3/fs50",
+  "test_meta_json": "/data/xk/zyh_dfgo/DUO/../UniSO/data_exp1_sim_low_3/exp1_D_test_sim_low.meta.json",
+  "topk": 16,
+  "methods": {
+    "duo_mt_text": {
+      "candidates_jsonl": "/data/xk/zyh_dfgo/DUO/results/comparison1/exp1_scene_v4/shift_sim_low_3/fs50/candidates/duo_mt_text.jsonl",
+      "scores": {
+        "n": 128,
+        "max": 0.9038166999816895,
+        "mean": 0.7544471523724496,
+        "topk_mean": 0.8694283738732338
+      }
+    },
+    "uniso": {
+      "candidates_jsonl": "/data/xk/zyh_dfgo/DUO/results/comparison1/exp1_scene_v4/shift_sim_low_3/fs50/candidates/uniso.jsonl",
+      "scores": {
+        "n": 128,
+        "max": 1.0,
+        "mean": 0.9312073439359665,
+        "topk_mean": 0.996206808835268
+      }
+    }
+  }
+}

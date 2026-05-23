@@ -12,7 +12,7 @@ from comparisonExperiment.experiment1.data_formats import DuoTrajectoryPkl
 from diffuser.models.vae import VAE
 
 
-def build_task_vae(*, input_dim: int, latent_dim: int = 16) -> VAE:
+def build_task_vae(*, input_dim: int, latent_dim: int = 8) -> VAE:
     """English doc: Same VAE class as main DUO; small Transformer over one design token."""
     return VAE(
         input_dim=int(input_dim),
@@ -28,7 +28,7 @@ def fit_vae_on_points(
     x_flat: torch.Tensor,
     *,
     input_dim: int,
-    latent_dim: int = 16,
+    latent_dim: int = 8,
     train_steps: int = 800,
     batch_size: int = 256,
     lr: float = 1e-3,

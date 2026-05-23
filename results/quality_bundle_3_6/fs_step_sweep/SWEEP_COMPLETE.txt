@@ -1,0 +1,9 @@
+status=complete
+sweep_root=/data/xk/zyh_dfgo/DUO/results/quality_bundle_3_6/fs_step_sweep
+config=config.quality_exp36_train
+run_label=exp36
+finetune_lr=1e-05
+milestones=[500, 1000, 1500, 2000, 2500]
+finished_log=pipeline_logs/run_fs_step_sweep_20260521_195338.log
+recommended_step=500
+mean_rank_at_500=2.333

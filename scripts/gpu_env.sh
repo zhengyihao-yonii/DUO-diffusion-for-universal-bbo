@@ -1,4 +1,8 @@
 # DUO：供 run_multitask.sh / run_singletask.sh source，用于多卡服务器上选择物理 GPU。
+
+_wandb_gpu_env_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/wandb_login.sh
+source "${_wandb_gpu_env_dir}/wandb_login.sh"
 #
 # 用法（任选其一）:
 #   1) 运行前: export CUDA_VISIBLE_DEVICES=2

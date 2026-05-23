@@ -1547,8 +1547,10 @@ def evaluate(**deps):
                         _to = 300
                     _st = wandb.Settings(init_timeout=_to)
                 _wgroup = os.environ.get("WANDB_RUN_GROUP", "").strip() or "evaluation"
-                wandb.init(
-                    project="decdiff-opt",
+                from diffuser.utils.wandb_auth import init_wandb_run
+
+                init_wandb_run(
+                    "decdiff-opt",
                     config=Config,
                     name=run_name,
                     group=_wgroup,

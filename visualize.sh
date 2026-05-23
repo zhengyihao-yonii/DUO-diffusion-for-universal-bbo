@@ -50,6 +50,8 @@ _PROJECT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT="${PROJECT:-${_PROJECT}}"
 cd "$PROJECT"
 export PYTHONPATH="${PROJECT}:${PYTHONPATH:-}"
+# shellcheck source=scripts/wandb_login.sh
+source "${PROJECT}/scripts/wandb_login.sh"
 
 PYTHON="${PYTHON:-/home/xk/anaconda3/envs/gtg/bin/python}"
 if [[ $# -lt 1 ]]; then

@@ -27,6 +27,9 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}"
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 
+# shellcheck source=scripts/wandb_login.sh
+source "${PROJECT_ROOT}/scripts/wandb_login.sh"
+
 # Avoid nounset surprises: treat as optional empty string.
 DIFFUSION_CKPT_TRAIN_STEPS="${DIFFUSION_CKPT_TRAIN_STEPS:-}"
 

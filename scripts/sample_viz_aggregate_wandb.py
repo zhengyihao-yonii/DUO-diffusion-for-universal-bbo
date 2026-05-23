@@ -79,9 +79,10 @@ def main() -> None:
     dump_dir = Path(args.dump_dir)
 
     import wandb
+    from diffuser.utils.wandb_auth import init_wandb_run
 
     run_name = args.run_name or f"{args.group}_sample_viz_mean"
-    wandb.init(project=args.project, name=run_name, group=args.group, job_type="sample_viz_agg")
+    init_wandb_run(args.project, name=run_name, group=args.group, job_type="sample_viz_agg")
     # 不能用全局 wandb.log(..., step=0..N) 对每个 tag 重复一遍：全局 step 必须单调递增，
     # 否则只有第一个 tag（通常为 mt_text）有完整曲线，其余 tag 会被丢弃/合并成一个点。
     wandb.define_metric("sample_viz_step")

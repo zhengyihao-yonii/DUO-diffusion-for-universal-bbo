@@ -76,9 +76,9 @@ def latent_objective_grid(
 
 def branin_grad_xy(z1: np.ndarray, z2: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """
-    Analytic gradient of Branin (internal coords z in [-1,1]) for background quiver / sketch.
+    Analytic gradient of Branin in latent z (legacy mapping).
 
-    English doc: Matches LatentObjective(branin).eval mapping in task_family.
+    English doc: Prefer ``branin_gradient_xy`` for plots on Branin coordinates (x1, x2).
     """
     import math
 
@@ -92,7 +92,7 @@ def branin_grad_xy(z1: np.ndarray, z2: np.ndarray) -> tuple[np.ndarray, np.ndarr
     inner = x2 - b * x1**2 + c * x1 - r
     df_dx1 = (
         2.0 * inner * (-2.0 * b * x1 + c)
-        - s * (1.0 - t) * math.sin(x1)
+        - s * (1.0 - t) * np.sin(x1)
     )
     df_dx2 = 2.0 * inner
     dz1_dx1 = 1.0 / 5.0
@@ -100,3 +100,34 @@ def branin_grad_xy(z1: np.ndarray, z2: np.ndarray) -> tuple[np.ndarray, np.ndarr
     g_z1 = df_dx1 * dz1_dx1
     g_z2 = df_dx2 * dz2_dx2
     return g_z1, g_z2
+
+
+def z_path_to_branin_xy(z_steps: np.ndarray) -> np.ndarray:
+    """Map denoise trace ``[S,B,2]`` to Branin plot coords (x1, x2) from latent z."""
+    from comparisonExperiment.experiment1.branin_standard import X1_BIAS, X1_SCALE, X2_BIAS, X2_SCALE
+
+    z = np.asarray(z_steps, dtype=np.float64)
+    x1 = z[..., 0] * float(X1_SCALE) + float(X1_BIAS)
+    x2 = z[..., 1] * float(X2_SCALE) + float(X2_BIAS)
+    return np.stack([x1, x2], axis=-1)
+
+
+def objective_grid_for_meta(
+    raw_meta: dict,
+    objective: Any,
+    *,
+    n: int = 140,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Return (axis0, axis1, F) for landscape contour.
+
+    English doc: If ``branin_domain==standard``, grid on Branin (x1,x2); else latent (z1,z2).
+    """
+    from comparisonExperiment.experiment1.branin_standard import normalize_branin_domain
+
+    bd = normalize_branin_domain(str(raw_meta.get("branin_domain", "legacy")))
+    if str(raw_meta.get("objective", "branin")).lower() == "branin" and bd == "standard":
+        from comparisonExperiment.experiment1.branin_standard import branin_grid
+
+        return branin_grid(n=int(n))
+    return latent_objective_grid(objective, n=int(n))

@@ -21,6 +21,9 @@ This experiment generates **two dataset formats**:
 
 ### Entry points
 - `run_exp1.py`: generate tasks + datasets + a small evaluation table scaffold
+- `run_comparison_v4_duo_uniso.sh`: **DUO v4 `mt_text` vs UniSO-T** on scene-aware `data_exp1_sim_*_3`
+  (export trace candidates → UniSO `run_exp1_uniso_scene_aware.sh` → oracle eval → LaTeX table)
+- `export_quality_trace_jsonl.py` / `export_duo_uniso_comparison_table.py`: helpers for the v4 comparison
 
 ### Notes
 - Keep this experiment small by default (few tasks, short horizon) to compare architectures.

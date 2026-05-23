@@ -4,13 +4,23 @@ Load ``metadata_text`` from exp1 ``*.meta.json`` / ``*.metadata`` and encode for
 
 English doc: Used for shift ZS/FS when multitask or single-task **text** checkpoints need the
 held-out task description as an embedding vector (same protocol as ``visualize.sh``).
+
+Environment (optional):
+  DUO_SENTENCE_TRANSFORMER_PATH — if set to an existing local directory, load the model from disk
+  (avoids Hugging Face Hub / mirror HTTPS during shift phases).
+  DUO_ST_LOCAL_FILES_ONLY — if truthy, pass ``local_files_only=True`` to ``SentenceTransformer``
+  (use with a populated HF cache and e.g. ``HF_HUB_OFFLINE=1``).
 """
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
+
+# Chinese comment: 同一进程内复用模型，避免每个 wandb run 重复访问 Hub（易触发镜像 SSL 问题）。
+_ST_MODEL_CACHE: dict[str, object] = {}
 
 
 def load_metadata_text(meta_json: Path) -> str:
@@ -33,8 +43,14 @@ def load_metadata_text(meta_json: Path) -> str:
     )
 
 
-def encode_sentence_embedding(text: str, *, model_name: str) -> np.ndarray:
-    """English doc: Returns ``float32`` vector ``[E]`` (same dtype as training pipelines)."""
+def _sentence_transformer_source(model_name: str) -> str:
+    raw = os.environ.get("DUO_SENTENCE_TRANSFORMER_PATH", "").strip()
+    if raw and Path(raw).is_dir():
+        return raw
+    return str(model_name)
+
+
+def _get_sentence_transformer(model_name: str):
     try:
         from sentence_transformers import SentenceTransformer
     except ImportError as e:
@@ -43,7 +59,22 @@ def encode_sentence_embedding(text: str, *, model_name: str) -> np.ndarray:
             "pip install sentence-transformers\n"
             "Or provide a precomputed vector via --held_out_text_embed_npy."
         ) from e
-    model = SentenceTransformer(str(model_name))
+    src = _sentence_transformer_source(model_name)
+    lfo = os.environ.get("DUO_ST_LOCAL_FILES_ONLY", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    key = f"{src}|lfo={int(lfo)}"
+    if key not in _ST_MODEL_CACHE:
+        _ST_MODEL_CACHE[key] = SentenceTransformer(src, local_files_only=bool(lfo))
+    return _ST_MODEL_CACHE[key]
+
+
+def encode_sentence_embedding(text: str, *, model_name: str) -> np.ndarray:
+    """English doc: Returns ``float32`` vector ``[E]`` (same dtype as training pipelines)."""
+    model = _get_sentence_transformer(str(model_name))
     v = model.encode([text], convert_to_numpy=True, show_progress_bar=False)
     out = np.asarray(v[0], dtype=np.float32).reshape(-1)
     return out

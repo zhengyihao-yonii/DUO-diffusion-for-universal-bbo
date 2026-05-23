@@ -18,9 +18,9 @@ if __name__ == '__main__':
     sys.argv = [sys.argv[0]]
 
     try:
-        import wandb
+        from diffuser.utils.wandb_auth import ensure_wandb_login
 
-        wandb.login(key="cbb3c28f1b21becaa3b185b09464e7f6ba3b84ef")
+        ensure_wandb_login()
     except Exception as e:
         print(f"[wandb] login 跳过: {e}", flush=True)
     parser = argparse.ArgumentParser()
@@ -115,6 +115,15 @@ if __name__ == '__main__':
         action="store_true",
         default=False,
         help="多任务：混合轨迹缺失时不自动运行 construct_trajectories（默认会自动生成）",
+    )
+    parser.add_argument(
+        "--exp1_train_pkl",
+        type=str,
+        default="",
+        help=(
+            "人造函数 exp1：指向 train_merged 或单任务 PKL 的绝对/相对路径。"
+            "若设置则强制 --train_tasks 为 exp1_synthetic，并走 scripts/train.py 与 ant_config 相同的扩散/UNet 逻辑（仅数据与 context_length=0 不同）。"
+        ),
     )
     parser.add_argument(
         "--train_epochs",
@@ -292,6 +301,16 @@ if __name__ == '__main__':
         if not args.eval_task:
             args.eval_task = train_tasks_list[0]
 
+    _exp1_pkl = str(getattr(args, "exp1_train_pkl", "") or "").strip()
+    if _exp1_pkl:
+        if is_multitask:
+            raise SystemExit("--exp1_train_pkl 仅支持单任务，请勿使用多任务 train_tasks")
+        args.train_tasks = "exp1_synthetic"
+        train_tasks_list = ["exp1_synthetic"]
+        is_multitask = False
+    elif len(train_tasks_list) == 1 and train_tasks_list[0] == "exp1_synthetic":
+        raise SystemExit("train_tasks=exp1_synthetic 时必须提供 --exp1_train_pkl=/path/to.pkl")
+
     real_task_ft = getattr(args, "real_task_text_only_finetune", False) or getattr(
         args, "fewshot_text_only_finetune", False
     )
@@ -400,18 +419,14 @@ if __name__ == '__main__':
         RUN.prefix = f"trained_models/multi_{train_tasks_str}_frac{args.frac}_sigma{args.sigma}/{_hyper}/seed{args.seed}/"
     else:
         # 单任务模式，保持原有格式，与dfgo-main一致
+        from pathlib import Path
+
         from diffuser.utils.vae_layout import per_task_latent_train_filename
 
         task_name = train_tasks_list[0]
         if not args.eval_task:
             args.eval_task = task_name
         _ld = int(args.latent_dim)
-        args.data_path = (
-            f"generated_datasets/{task_name}_frac{args.frac}_sigma{args.sigma}/"
-            + per_task_latent_train_filename(
-                task_name, args.n_traj, args.horizon, args.k, args.eps, _ld
-            )
-        )
         _few = "_fewshot_ft" if real_task_ft else ""
         _lat_tag = f"_latent{_ld}" if _ld != 32 else ""
         _dtrain = diffusion_train_path_suffix_v2(
@@ -421,7 +436,21 @@ if __name__ == '__main__':
             float(getattr(args, "train_half_lr_mult", 1.0)),
         )
         _lr_suf = learning_rate_path_suffix(vars(args).get("learning_rate"))
-        RUN.prefix = f"trained_models/{task_name}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}{_few}{_ret}{_txt}{_mto}{_dtrain}{_lr_suf}{_lat_tag}/seed{args.seed}/"
+        if _exp1_pkl:
+            args.data_path = str(Path(_exp1_pkl).resolve())
+            _stem = Path(_exp1_pkl).stem
+            RUN.prefix = (
+                f"trained_models/exp1_synthetic_frac{args.frac}_sigma{args.sigma}/"
+                f"{_stem}_h{args.horizon}{_few}{_ret}{_txt}{_mto}{_dtrain}{_lr_suf}{_lat_tag}/seed{args.seed}/"
+            )
+        else:
+            args.data_path = (
+                f"generated_datasets/{task_name}_frac{args.frac}_sigma{args.sigma}/"
+                + per_task_latent_train_filename(
+                    task_name, args.n_traj, args.horizon, args.k, args.eps, _ld
+                )
+            )
+            RUN.prefix = f"trained_models/{task_name}_frac{args.frac}_sigma{args.sigma}/{args.n_traj}x{args.horizon}_k{args.k}_eps{args.eps}{_few}{_ret}{_txt}{_mto}{_dtrain}{_lr_suf}{_lat_tag}/seed{args.seed}/"
     
     logger.print(RUN.prefix, color='green')
     jaynes.config("local")

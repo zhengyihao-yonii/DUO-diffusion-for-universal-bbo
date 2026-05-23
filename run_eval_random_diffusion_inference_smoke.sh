@@ -31,6 +31,8 @@ set -euo pipefail
 _ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${_ROOT}"
 export PYTHONPATH="${_ROOT}:${PYTHONPATH:-}"
+# shellcheck source=scripts/wandb_login.sh
+source "${_ROOT}/scripts/wandb_login.sh"
 
 PYTHON="${PYTHON:-python3}"
 export WANDB_DISABLED="${WANDB_DISABLED:-1}"

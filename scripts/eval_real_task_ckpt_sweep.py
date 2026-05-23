@@ -272,9 +272,10 @@ def main() -> None:
     if str(args.wandb_project).strip():
         try:
             import wandb
+            from diffuser.utils.wandb_auth import init_wandb_run
 
-            wandb_run = wandb.init(
-                project=str(args.wandb_project).strip(),
+            wandb_run = init_wandb_run(
+                str(args.wandb_project).strip(),
                 name=str(args.wandb_run_name).strip() or f"{model_root.name}_fs_ckpt",
                 config=dict(meta) | {"epochs": epochs, "seeds": seeds, "w_text": float(args.w_text)},
             )

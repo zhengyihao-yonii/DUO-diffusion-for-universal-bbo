@@ -22,6 +22,7 @@ import torch
 
 from comparisonExperiment.experiment1.exp1_latent_decode import decode_latent_matrix_to_native
 
+from config import exp1_diffusion_aligned as _e1a
 from diffuser.datasets.sequence import PointRegretDataset
 from diffuser.models.diffusion import GaussianDiffusion
 from diffuser.models.temporal import Proxy, TemporalUnet
@@ -142,6 +143,18 @@ def main() -> None:
         help="Number of per-timestep loss bins (default: 20).",
     )
     ap.add_argument(
+        "--log_freq",
+        type=int,
+        default=0,
+        help="Trainer log interval (steps); 0 = ant_config default (50).",
+    )
+    ap.add_argument(
+        "--save_freq",
+        type=int,
+        default=0,
+        help="Trainer.save interval (steps); 0 = ant_config default (5000).",
+    )
+    ap.add_argument(
         "--wandb",
         action="store_true",
         default=True,
@@ -203,16 +216,17 @@ def _run(args: argparse.Namespace, *, out_path: Path) -> None:
     )
 
     transition_dim = int(dataset.observation_dim + dataset.action_dim)
+    # English doc: UNet + diffusion match ``config/ant_config.py`` (main train).
     model = TemporalUnet(
         horizon=int(args.horizon),
         transition_dim=transition_dim,
         cond_dim=0,
-        dim=128,
-        dim_mults=(1, 2, 4),
+        dim=int(_e1a.UNET_DIM),
+        dim_mults=_e1a.UNET_DIM_MULTS,
         returns_condition=False,
         task_condition=False,
         num_tasks=1,
-        condition_dropout=0.0,
+        condition_dropout=float(_e1a.UNET_CONDITION_DROPOUT),
         text_condition=False,
     )
     diffusion = GaussianDiffusion(
@@ -220,12 +234,16 @@ def _run(args: argparse.Namespace, *, out_path: Path) -> None:
         horizon=int(args.horizon),
         observation_dim=int(dataset.observation_dim),
         action_dim=int(dataset.action_dim),
-        n_timesteps=1000,
-        n_sample_timesteps=200,
-        loss_type="l1",
-        clip_denoised=False,
-        predict_epsilon=True,
+        n_timesteps=int(_e1a.N_DIFFUSION_STEPS),
+        n_sample_timesteps=int(_e1a.N_SAMPLE_TIMESTEPS),
+        loss_type=str(_e1a.LOSS_TYPE),
+        clip_denoised=bool(_e1a.CLIP_DENOISED),
+        predict_epsilon=bool(_e1a.PREDICT_EPSILON),
+        action_weight=float(_e1a.ACTION_WEIGHT),
         returns_condition=False,
+        condition_guidance_w=float(_e1a.CONDITION_GUIDANCE_W),
+        condition_guidance_w_task=float(_e1a.CONDITION_GUIDANCE_W_TASK),
+        condition_guidance_w_text=float(_e1a.CONDITION_GUIDANCE_W_TEXT),
     )
     device = torch.device(str(args.device))
     diffusion = diffusion.to(device)
@@ -268,6 +286,10 @@ def _run(args: argparse.Namespace, *, out_path: Path) -> None:
         )
         proxy_model = proxy_model.to(device)
 
+    _log_f = int(args.log_freq) if int(args.log_freq) > 0 else int(_e1a.MAIN_LOG_FREQ)
+    _ts = int(args.train_steps)
+    _save_f = int(args.save_freq) if int(args.save_freq) > 0 else int(_e1a.MAIN_SAVE_FREQ)
+    _save_f = max(1, min(_save_f, _ts))
     trainer = Trainer(
         diffusion_model=diffusion,
         proxy_model=proxy_model,
@@ -279,10 +301,9 @@ def _run(args: argparse.Namespace, *, out_path: Path) -> None:
         train_lr=float(args.lr),
         proxy_train_lr=float(args.proxy_lr),
         gradient_accumulate_every=int(args.grad_accum),
-        log_freq=max(50, int(args.train_steps) // 20),
+        log_freq=max(1, _log_f),
         sample_freq=0,
-        # Avoid writing implicit checkpoints into current working directory.
-        save_freq=int(args.train_steps) + 1,
+        save_freq=_save_f,
         proxy_save_freq=int(args.proxy_steps) + 1,
         train_device=str(args.device),
         save_checkpoints=False,
@@ -293,12 +314,14 @@ def _run(args: argparse.Namespace, *, out_path: Path) -> None:
         try:
             import wandb as _wandb
 
+            from diffuser.utils.wandb_auth import init_wandb_run
+
             wb = _wandb
             # Use fixed per-timestep loss bins for stable comparison experiments.
             os.environ["DUO_LOG_PER_T_LOSS"] = "1"
             os.environ["DUO_LOG_PER_T_LOSS_BINS"] = str(int(args.per_t_loss_bins))
-            wb.init(
-                project=str(args.wandb_project),
+            init_wandb_run(
+                str(args.wandb_project),
                 name=str(args.wandb_run_name).strip() or f"exp1_duo_{out_path.parent.name}",
                 group=str(args.wandb_group),
                 config={

@@ -1,0 +1,6 @@
+config_module=config.quality_exp36_train
+run_label=exp36
+finetune_lr=1e-05
+milestones=[500, 1000, 1500, 2000, 2500]
+shifts=['sim_low', 'sim_mid', 'sim_high']
+canon_pkl=/data/xk/zyh_dfgo/DUO/generated_datasets/exp1_sim_low_3

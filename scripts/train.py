@@ -265,6 +265,7 @@ def main(**deps):
 
     train_epochs = deps.pop("train_epochs", None)
     _retrain = bool(deps.pop("retrain", False))
+    deps.pop("exp1_train_pkl", None)
 
     RUN._update(deps)
     print(deps)
@@ -276,10 +277,14 @@ def main(**deps):
     if 'train_tasks' in deps and ',' in str(deps.get('train_tasks', '')):
         deps['train_tasks'] = canonical_train_tasks_csv(deps['train_tasks'])
 
-    # 确定使用哪个配置文件（多任务：与 eval 无关，用 canonical 后 train_tasks 的逗号首项，即字典序第一个任务）
+    # 确定使用哪个配置文件（多任务：canonical 后 train_tasks 的逗号首项；单任务：与 train_tasks 一致）
     task_to_use = deps.get('eval_task', deps.get('task', 'dkitty'))
-    if 'train_tasks' in deps and ',' in str(deps.get('train_tasks', '')):
-        task_to_use = deps['train_tasks'].split(',')[0].strip()
+    if 'train_tasks' in deps:
+        _tts = str(deps['train_tasks']).strip()
+        if ',' in _tts:
+            task_to_use = _tts.split(',')[0].strip()
+        elif _tts:
+            task_to_use = _tts
 
     if task_to_use == 'ant':
         from config.ant_config import Config
@@ -293,6 +298,8 @@ def main(**deps):
         from config.superconductor_config import Config
     elif task_to_use in ('gtopx2', 'gtopx3', 'gtopx4', 'gtopx6'):
         from config.gtopx_config import Config
+    elif task_to_use == 'exp1_synthetic':
+        from config.ant_config import Config
     else:
         from config.dkitty_config import Config
     
@@ -331,6 +338,17 @@ def main(**deps):
             Config.train_tasks_list = [Config.dataset]
         print(f"📊 单任务训练模式启用 📊")
         print(f"📋 训练任务: {Config.train_tasks_list[0]}")
+
+    if task_to_use == "exp1_synthetic":
+        Config.data_path = os.path.abspath(str(Config.data_path))
+        Config.context_length = 0
+        if deps.get("proxy_filter") is None:
+            deps["proxy_filter"] = 0
+        print(
+            f"📎 exp1_synthetic：data_path={Config.data_path}，context_length=0；"
+            f"未显式指定 proxy_filter 时已关闭（无 Zip 轨迹）。",
+            flush=True,
+        )
 
     _real_task_ft = getattr(Config, "real_task_text_only_finetune", False) or getattr(
         Config, "fewshot_text_only_finetune", False
@@ -444,8 +462,10 @@ def main(**deps):
                     )
                 if _wandb_kw:
                     print(f"[wandb] resume kwargs: {_wandb_kw}", flush=True)
-                wandb.init(
-                    project="decdiff-opt",
+                from diffuser.utils.wandb_auth import init_wandb_run
+
+                init_wandb_run(
+                    "decdiff-opt",
                     config=Config,
                     name=run_name,
                     settings=_st,

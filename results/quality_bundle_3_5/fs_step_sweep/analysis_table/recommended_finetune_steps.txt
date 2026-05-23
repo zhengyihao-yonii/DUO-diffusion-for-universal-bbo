@@ -1,0 +1,2 @@
+focus_method=mt_text
+best_mean_rank_step=500

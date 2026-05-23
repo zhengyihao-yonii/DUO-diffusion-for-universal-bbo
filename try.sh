@@ -1,3 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/wandb_login.sh
+source "${_SCRIPT_DIR}/scripts/wandb_login.sh"
+
 TRAIN_TIMESTEP_BIAS_POWER="${TRAIN_TIMESTEP_BIAS_POWER:-0.0}"
 TRAIN_LOSS_MIN_SNR_GAMMA="${TRAIN_LOSS_MIN_SNR_GAMMA:-0.0}"
 

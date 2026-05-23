@@ -1,0 +1,6 @@
+finetune_steps,mean_rank,recommended
+500,1.778,yes
+1000,2.222,
+1500,3.222,
+2000,3.778,
+2500,4.000,

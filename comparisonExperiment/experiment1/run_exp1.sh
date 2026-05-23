@@ -12,6 +12,9 @@ set -euo pipefail
 DUO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${DUO_ROOT}"
 
+# shellcheck source=scripts/wandb_login.sh
+source "${DUO_ROOT}/scripts/wandb_login.sh"
+
 PYTHON="${PYTHON:-python}"
 
 SCRIPT="${DUO_ROOT}/comparisonExperiment/experiment1/duo_train_and_sample.py"

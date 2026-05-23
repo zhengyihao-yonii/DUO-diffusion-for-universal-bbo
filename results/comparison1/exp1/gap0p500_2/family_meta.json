@@ -1,0 +1,34 @@
+{
+  "objective": "branin",
+  "d_z": 2,
+  "train_d_x": [
+    2,
+    3,
+    4,
+    5
+  ],
+  "test_d_x": 2,
+  "d_pad": 32,
+  "latent_dim": 4,
+  "gap": 0.5,
+  "geom_dist": 0.2706465423107147,
+  "n_points_per_task": 2000,
+  "duo": {
+    "horizon": 64,
+    "n_traj": 100
+  },
+  "seed": 0,
+  "train_tasks": [
+    "D_train_1",
+    "D_train_2",
+    "D_train_3",
+    "D_train_4"
+  ],
+  "test_task": "D_test_gap0p500",
+  "fewshot": {
+    "mode": "worst_tail_frac",
+    "budget": 100,
+    "tail_fracs": "0.1,0.2,0.5"
+  },
+  "train_pool_best_frac": 0.9
+}

@@ -242,10 +242,11 @@ def _plot_macro(
 def _maybe_wandb(paths: list[Path], *, project: str, run_name: str) -> None:
     try:
         import wandb
+        from diffuser.utils.wandb_auth import init_wandb_run
     except ImportError:
         print("[plot] wandb not installed; skip upload", file=sys.stderr)
         return
-    run = wandb.init(project=project, name=run_name, job_type="analysis")
+    run = init_wandb_run(project, name=run_name, job_type="analysis")
     for p in paths:
         run.log({f"figure/{p.stem}": wandb.Image(str(p))})
     run.finish()

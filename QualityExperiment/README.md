@@ -84,7 +84,26 @@ python -m QualityExperiment.build_task_text_embeds \
 
 NPZ/PNG：`quality_trace_*.npz`；若设 `--local_out_dir`，另存 `*_latent_landscape.png`。
 
-## 完整流程（命名已对齐 `gap0p500`）
+## 一键主实验（推荐）
+
+**入口脚本**：`QualityExperiment/run_quality_exp1_pipeline.sh`
+
+- **通用主训**（四模型、D_train）：`results/quality_training_2/dtrain_universal_seed*/`（**不是** `exp1_gap*/_seed*`）。
+- **当前默认实验线 v2**（`run_quality_exp1_pipeline.sh`）：`TRAIN_D_X=2,3,4,5`（4 个 D_train）、`TEST_D_X=2`、`LATENT_DIM=4`（VAE 轨迹维）、路径后缀 **`QUAL_EXP1_SUFFIX=_2`** → `generated_datasets/exp1_gap0p000_2`、`quality_bundle_2`、`quality_training_2` 等。
+- **主训用 PKL 锚点**：**`QUAL_TRAIN_DATA_GAP`**（默认 `0`）+ 后缀；D_train 与 gap 无关，D_test 随 gap 漂移。
+- **每个 `QUAL_GAPS` 值**：单独 `run_exp1`、在 `quality_bundle_2/gap_*/fs_checkpoints/` 做 **D_test few-shot 微调**、shift 评估与轨迹图。
+
+```bash
+cd /data/xk/zyh_dfgo/DUO/QualityExperiment
+CUDA_VISIBLE_DEVICES=0 bash run_quality_exp1_pipeline.sh
+# 跑旧线（5 个 D_train、d_x=8、latent_dim=8、无后缀）可显式设：
+# QUAL_EXP1_SUFFIX= TRAIN_D_X=5,6,7,9,10 TEST_D_X=8 LATENT_DIM=8 \
+#   QUAL_BUNDLE_ROOT=.../quality_bundle QUAL_TRAIN_ROOT=.../quality_training bash run_quality_exp1_pipeline.sh
+```
+
+- 默认 **`WANDB_MODE=online`**；离线设 `WANDB_MODE=offline`。`FORCE_TRAIN` / `FORCE_FINETUNE` / `FORCE_SUITE` 等见脚本注释。
+
+## 完整流程（手动分步；命名已对齐 `gap0p500`）
 
 ```bash
 cd /data/xk/zyh_dfgo/DUO

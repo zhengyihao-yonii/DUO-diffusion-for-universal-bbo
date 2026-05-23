@@ -521,6 +521,28 @@ class Trainer(object):
                 wb_metrics["finetune_step"] = int(self.step)
                 _safe_wandb_log(wb_metrics, wandb_step_key="finetune_step")
 
+                # Optional JSONL log (dynamic keys; includes train/t_loss bins when DUO_LOG_PER_T_LOSS=1).
+                _csv_dir = os.environ.get("TRAIN_METRICS_CSV_DIR", "").strip()
+                _variant = os.environ.get("QUAL_TRAIN_VARIANT", "").strip() or "diffusion"
+                if _csv_dir:
+                    import json
+
+                    from pathlib import Path as _Path
+
+                    _Path(_csv_dir).mkdir(parents=True, exist_ok=True)
+                    _fn = _Path(_csv_dir) / f"{_variant}_train_metrics.jsonl"
+                    _row: dict[str, object] = {}
+                    for _k, _v in (infos or {}).items():
+                        try:
+                            _row[str(_k)] = float(_v.detach().item())
+                        except Exception:
+                            _row[str(_k)] = str(_v)
+                    _row["step"] = int(self.step)
+                    _row["loss"] = float(loss.detach().item())
+                    _row["lr"] = float(self.optimizer.param_groups[0].get("lr", self._base_train_lr))
+                    with _fn.open("a", encoding="utf-8") as _f:
+                        _f.write(json.dumps(_row, ensure_ascii=False) + "\n")
+
             # Update task sampling scheduler after stepping (uses current batch task ids).
             if (
                 self._task_state is not None
